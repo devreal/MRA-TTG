@@ -54,20 +54,7 @@ namespace mra {
         /// Move assignment default is OK
         SCOPE Key& operator=(Key<NDIM>&& key) = default;
 
-        /// Equality
-        SCOPE bool operator==(const Key<NDIM>& other) const {
-            if (rehash() != other.rehash()) {
-                return false;
-            }
-            else {
-                if (n != other.n) return false;
-                for (Dimension d = 0; d < NDIM; ++d) if (l[d] != other.l[d]) return false;
-            }
-            return true;
-        }
-
-        /// Inequality
-        SCOPE bool operator!=(const Key<NDIM>& other) const {return !(*this == other);}
+        auto operator<=>(const Key<NDIM>&) const = default;
 
         /// Hash to unsigned value
         SCOPE HashValue hash() const {return rehash();}
