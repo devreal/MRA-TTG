@@ -89,7 +89,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   // D(R(C(P)))
   auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
                                     FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
-  // auto extract = make_extract(derivative_result, map);
+  auto extract = make_extract(derivative_result, map);
 
   auto connected = make_graph_executable(start.get());
   assert(connected);

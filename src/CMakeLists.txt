@@ -23,12 +23,12 @@ target_compile_definitions(mra-unit-host-parsec PUBLIC MRA_ENABLE_HOST=1 TTG_USE
 target_link_libraries(mra-unit-host-parsec PUBLIC MADworld ttg-parsec)
 
 # Holding this off until BLAS in MADNESS works for our use case
-#add_executable(mra-mad-host-parsec
-#               tests/mad_derivative_test.cc
-#               gl.cc
-#               twoscale.cc)
-#target_compile_definitions(mra-mad-host-parsec PUBLIC MRA_ENABLE_HOST=1 TTG_USE_PARSEC=1)
-#target_link_libraries(mra-mad-host-parsec PUBLIC MADworld ttg-parsec)
+add_executable(mra-mad-host-parsec
+               tests/mad_derivative_test.cc
+               gl.cc
+               twoscale.cc)
+target_compile_definitions(mra-mad-host-parsec PUBLIC MRA_ENABLE_HOST=1 TTG_USE_PARSEC=1)
+target_link_libraries(mra-mad-host-parsec PUBLIC MADworld MADtensor MADmra ttg-parsec)
 
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
 target_compile_definitions(mra-cycledimtest PUBLIC MRA_ENABLE_HOST=1 TTG_USE_PARSEC=1)

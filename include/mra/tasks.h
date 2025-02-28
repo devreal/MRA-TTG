@@ -13,6 +13,7 @@
 #include "mra/tasks/project.h"
 #include "mra/tasks/norm.h"
 #include "mra/tasks/derivative.h"
+#include "mra/tasks/extract.h"
 
 
 #endif // HAVE_TASKS_H

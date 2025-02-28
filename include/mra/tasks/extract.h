@@ -19,9 +19,11 @@
 
 namespace mra{
 
-  template <typename T, Dimension NDIM, typename NodeT>
+  template <Dimension NDIM, typename NodeT>
   auto make_extract(ttg::Edge<Key<NDIM>, NodeT>& in, std::map<Key<NDIM>, NodeT>& map){
     auto func = [&map](const Key<NDIM>& key, NodeT&& node) {
+      static std::mutex m;
+      std::lock_guard<std::mutex> lock(m);
       map[key] = std::move(node);
     };
     return ttg::make_tt(func, ttg::edges(in), ttg::edges(), "extract", {"input"});
