@@ -108,18 +108,11 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   ttg::execute();
   ttg::fence();
 
-  // call madness function and compare the vector with the map defined above (iterate as in pr_writecoeff)
-  madness::initialize(argc, argv);
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
+  // call madness function and compare the vector with the map defined above (iterate as in pr_writecoeff)
   compute_madness<T, NDIM>(world);
 
-  if (ttg::default_execution_context().rank() == 0) {
-    end = std::chrono::high_resolution_clock::now();
-    std::cout << "TTG Execution Time (milliseconds) : "
-              << (std::chrono::duration_cast<std::chrono::microseconds>(end - beg).count()) / 1000
-              << std::endl;
-  }
 }
 
 int main(int argc, char **argv) {
@@ -137,7 +130,14 @@ int main(int argc, char **argv) {
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
+  /* initialize MADNESS PaRSEC backend with the same PaRSEC context */
+#if defined(TTG_PARSEC_IMPORTED)
+  madness::ParsecRuntime::initialize_with_existing_context(ttg::default_execution_context().impl().context());
+#endif // TTG_PARSEC_IMPORTED
+  madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
+
   test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level, argc, argv);
 
+  madness::finalize();
   ttg::finalize();
 }
