@@ -14,34 +14,55 @@ typedef madness::Function<double,3> functionT;
 typedef madness::FunctionFactory<double,3> factoryT;
 typedef madness::Tensor<double> tensorT;
 
+static const double Length = 4.0;
+static const int init_lev = 2;
+
 template <typename T>
+// static T u_exact(const coordT &pt) {
+//   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+// }
 static T u_exact(const coordT &pt) {
-  return (std::exp(-pt[0]*pt[0]) * std::exp(-pt[1]*pt[1]) * std::exp(-pt[2]*pt[2]));
+  return (1.0+pt[0]*pt[1]*pt[2]) ;
 }
 
 template <typename T>
+// static T xbdy_dirichlet(const coordT &pt) {
+//   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+// }
 static T xleft_dirichlet(const coordT &pt) {
-  return T(0);
+  return T(1) ;
+}
+
+template <typename T>
+static T xright_dirichlet(const coordT &pt) {
+  double x = Length, y = pt[1], z=pt[2];
+  return (1.+x*y*z) ;
 }
 
 template <typename T, mra::Dimension NDIM>
 auto compute_madness(madness::World& world) {
   size_type k = 10;
-  functionT u = factoryT(world).f(u_exact );
-  functionT  xleft_d = factoryT(world).f( xleft_dirichlet) ;
-  functionT xright_d = factoryT(world).f(xleft_dirichlet) ;
+  static const T thresh = 1.e-4;
+  functionT u = factoryT(world).f(u_exact);
+  functionT xleft_d = factoryT(world).f(xleft_dirichlet) ;
+  functionT xright_d = factoryT(world).f(xright_dirichlet) ;
 
-  madness::FunctionDefaults<3>::set_cubic_cell( -6, 6);
+  madness::FunctionDefaults<3>::set_cubic_cell( 0, Length );
+  madness::FunctionDefaults<3>::set_k(k);
+  madness::FunctionDefaults<3>::set_refine(true);
+  madness::FunctionDefaults<3>::set_autorefine(true);
+  madness::FunctionDefaults<3>::set_thresh(thresh);
+  madness::FunctionDefaults<3>::set_initial_level(init_lev);
 
   madness::BoundaryConditions<3> bc;
-  // bc(0,0) = madness::BoundaryType::BC_DIRICHLET;
-  // bc(0,1) = madness::BoundaryType::BC_FREE;
-  // bc(1,0) = madness::BoundaryType::BC_FREE;
-  // bc(1,1) = madness::BoundaryType::BC_FREE;
-  // bc(2,0) = madness::BoundaryType::BC_FREE;
-  // bc(2,1) = madness::BoundaryType::BC_FREE;
+  bc(0,0) = madness::BCType::BC_DIRICHLET;
+  bc(0,1) = madness::BCType::BC_FREE;
+  bc(1,0) = madness::BCType::BC_FREE;
+  bc(1,1) = madness::BCType::BC_FREE;
+  bc(2,0) = madness::BCType::BC_FREE;
+  bc(2,1) = madness::BCType::BC_FREE;
 
-  madness::Derivative<T,NDIM> dx1(world, 0, bc, xleft_d, xright_d, k);
+  madness::Derivative<T, 3> dx1(world, 0, bc, xleft_d, xright_d, k);
   functionT dudx1 = dx1(u);
 
   return dudx1;
@@ -63,7 +84,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, derivative_result;
 
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-  T expnt = 1.0;
+  T expnt = 10.0;
 
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> map;
 
@@ -111,7 +132,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   // call madness function and compare the vector with the map defined above (iterate as in pr_writecoeff)
-  compute_madness<T, NDIM>(world);
+  auto result = compute_madness<T, NDIM>(world);
 
 }
 
