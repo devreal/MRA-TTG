@@ -18,34 +18,31 @@ static const double Length = 4.0;
 static const int init_lev = 2;
 
 template <typename T>
-// static T u_exact(const coordT &pt) {
-//   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
-// }
 static T u_exact(const coordT &pt) {
-  return (1.0+pt[0]*pt[1]*pt[2]) ;
+  return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
 }
-
-template <typename T>
-// static T xbdy_dirichlet(const coordT &pt) {
-//   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+// static T u_exact(const coordT &pt) {
+//   return (1.0+pt[0]*pt[1]*pt[2]) ;
 // }
-static T xleft_dirichlet(const coordT &pt) {
-  return T(1) ;
-}
 
 template <typename T>
-static T xright_dirichlet(const coordT &pt) {
-  double x = Length, y = pt[1], z=pt[2];
-  return (1.+x*y*z) ;
+static T xbdy_dirichlet(const coordT &pt) {
+  return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
 }
+// static T xleft_dirichlet(const coordT &pt) {
+//   return T(1) ;
+// }
+
+// template <typename T>
+// static T xright_dirichlet(const coordT &pt) {
+//   double x = Length, y = pt[1], z=pt[2];
+//   return (1.+x*y*z) ;
+// }
 
 template <typename T, mra::Dimension NDIM>
 auto compute_madness(madness::World& world) {
   size_type k = 10;
   static const T thresh = 1.e-4;
-  functionT u = factoryT(world).f(u_exact);
-  functionT xleft_d = factoryT(world).f(xleft_dirichlet) ;
-  functionT xright_d = factoryT(world).f(xright_dirichlet) ;
 
   madness::FunctionDefaults<3>::set_cubic_cell( 0, Length );
   madness::FunctionDefaults<3>::set_k(k);
@@ -54,8 +51,12 @@ auto compute_madness(madness::World& world) {
   madness::FunctionDefaults<3>::set_thresh(thresh);
   madness::FunctionDefaults<3>::set_initial_level(init_lev);
 
+  functionT u = factoryT(world).f(u_exact);
+  functionT xleft_d = factoryT(world).f(xbdy_dirichlet) ;
+  functionT xright_d = factoryT(world).f(xbdy_dirichlet) ;
+
   madness::BoundaryConditions<3> bc;
-  bc(0,0) = madness::BCType::BC_DIRICHLET;
+  bc(0,0) = madness::BCType::BC_FREE;
   bc(0,1) = madness::BCType::BC_FREE;
   bc(1,0) = madness::BCType::BC_FREE;
   bc(1,1) = madness::BCType::BC_FREE;
@@ -132,8 +133,11 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   // call madness function and compare the vector with the map defined above (iterate as in pr_writecoeff)
-  auto result = compute_madness<T, NDIM>(world);
-
+  {
+    auto result = compute_madness<T, NDIM>(world);
+  }
+  std::cout << "madness derivative test passed" << std::endl;
+  world.gop.fence();
 }
 
 int main(int argc, char **argv) {
