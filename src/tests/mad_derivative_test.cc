@@ -44,7 +44,7 @@ auto compute_madness(madness::World& world) {
   size_type k = 10;
   static const T thresh = 1.e-4;
 
-  madness::FunctionDefaults<3>::set_cubic_cell( 0, Length );
+  madness::FunctionDefaults<3>::set_cubic_cell( -6, 6 );
   madness::FunctionDefaults<3>::set_k(k);
   madness::FunctionDefaults<3>::set_refine(true);
   madness::FunctionDefaults<3>::set_autorefine(true);
@@ -87,7 +87,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
   T expnt = 10.0;
 
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> map;
+  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
 
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
@@ -111,7 +111,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   // D(R(C(P)))
   auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
                                     FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
-  auto extract = make_extract(derivative_result, map);
+  auto extract = make_extract(derivative_result, cmap);
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
@@ -130,11 +130,29 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   ttg::execute();
   ttg::fence();
 
+  // for (auto& [key, node] : cmap) {
+  //   std::cout << "key " << key << " node " << node << std::endl;
+  // }
+
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   // call madness function and compare the vector with the map defined above (iterate as in pr_writecoeff)
   {
     auto result = compute_madness<T, NDIM>(world);
+    const auto &coeffs = result.get_impl()->get_coeffs();
+    auto key = madness::Key<NDIM>(0);
+      for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
+        std::array<Translation,NDIM> l;
+        for (int i=0; i<NDIM; ++i){
+          l[i] = it->first.translation()[i];
+        }
+        auto mad_coeff = it->second;
+        Key<NDIM> mad_key = Key<NDIM>(it->first.level(), l);
+        auto mra_coeff = cmap.find(mad_key);
+        if (mra_coeff != cmap.end()) {
+          assert(mad_coeff.coeff().svd_normf() - mra::normf(mra_coeff->second.coeffs().current_view()) < 1e-04);
+        }
+    }
   }
   std::cout << "madness derivative test passed" << std::endl;
   world.gop.fence();
