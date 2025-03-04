@@ -21,23 +21,11 @@ template <typename T>
 static T u_exact(const coordT &pt) {
   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
 }
-// static T u_exact(const coordT &pt) {
-//   return (1.0+pt[0]*pt[1]*pt[2]) ;
-// }
 
 template <typename T>
 static T xbdy_dirichlet(const coordT &pt) {
   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
 }
-// static T xleft_dirichlet(const coordT &pt) {
-//   return T(1) ;
-// }
-
-// template <typename T>
-// static T xright_dirichlet(const coordT &pt) {
-//   double x = Length, y = pt[1], z=pt[2];
-//   return (1.+x*y*z) ;
-// }
 
 template <typename T, mra::Dimension NDIM>
 auto compute_madness(madness::World& world) {
@@ -130,13 +118,8 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   ttg::execute();
   ttg::fence();
 
-  // for (auto& [key, node] : cmap) {
-  //   std::cout << "key " << key << " node " << node << std::endl;
-  // }
-
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
-  // call madness function and compare the vector with the map defined above (iterate as in pr_writecoeff)
   {
     auto result = compute_madness<T, NDIM>(world);
     const auto &coeffs = result.get_impl()->get_coeffs();
@@ -153,8 +136,8 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
           assert(mad_coeff.coeff().svd_normf() - mra::normf(mra_coeff->second.coeffs().current_view()) < 1e-04);
         }
     }
+    std::cout << "madness comparison test passed" << std::endl;
   }
-  std::cout << "madness derivative test passed" << std::endl;
   world.gop.fence();
 }
 
