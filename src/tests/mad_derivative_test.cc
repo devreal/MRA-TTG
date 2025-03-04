@@ -124,19 +124,20 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
     auto result = compute_madness<T, NDIM>(world);
     const auto &coeffs = result.get_impl()->get_coeffs();
     auto key = madness::Key<NDIM>(0);
-      for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
-        std::array<Translation,NDIM> l;
-        for (int i=0; i<NDIM; ++i){
-          l[i] = it->first.translation()[i];
+    for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
+      std::array<Translation,NDIM> l;
+      for (int i=0; i<NDIM; ++i){
+        l[i] = it->first.translation()[i];
+      }
+      auto mad_coeff = it->second;
+      Key<NDIM> mad_key = Key<NDIM>(it->first.level(), l);
+      auto mra_coeff = cmap.find(mad_key);
+      if (mra_coeff != cmap.end()) {
+        if (!(mad_coeff.coeff().svd_normf() - mra::normf(mra_coeff->second.coeffs().current_view()) < precision)){
+          throw std::runtime_error("madness comparison test failed");
         }
-        auto mad_coeff = it->second;
-        Key<NDIM> mad_key = Key<NDIM>(it->first.level(), l);
-        auto mra_coeff = cmap.find(mad_key);
-        if (mra_coeff != cmap.end()) {
-          assert(mad_coeff.coeff().svd_normf() - mra::normf(mra_coeff->second.coeffs().current_view()) < 1e-04);
-        }
+      }
     }
-    std::cout << "madness comparison test passed" << std::endl;
   }
   world.gop.fence();
 }
