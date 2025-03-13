@@ -227,8 +227,10 @@ namespace mra{
             const Tensor<T, 2>& phi= functiondata.get_phi();
             const Tensor<T, 1>& quad_x = functiondata.get_quad_x();
 
+            FunctionNorms<T, NDIM> norms(left, center, right);
+
 #ifndef MRA_ENABLE_HOST
-            co_await ttg::device::select(db, left.coeffs().buffer(), center.coeffs().buffer(),
+            co_await ttg::device::select(db, left.coeffs().buffer(), center.coeffs().buffer(), norms.buffer(),
                                         right.coeffs().buffer(), result.coeffs().buffer(), operators.buffer(),
                                         phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp);
 #endif // MRA_ENABLE_HOST
@@ -239,6 +241,14 @@ namespace mra{
                                     center.coeffs().current_view(), right.coeffs().current_view(), operators.current_view(),
                                     result_view, phi.current_view(), phibar.current_view(), quad_x.current_view(),
                                     tmp.current_device_ptr(), N, K, g1, g2, axis, bc_left, bc_right, ttg::device::current_stream());
+
+            norms.compute();
+
+#if !defined(MRA_ENABLE_HOST) && defined(MRA_CHECK_NORMS)
+            co_await ttg::device::wait(norms.buffer());
+#endif // !defined(MRA_ENABLE_HOST) && defined(MRA_CHECK_NORMS)
+
+            norms.verify();
 
             do_send.template operator()<RESULT>(key, std::move(result));
           }

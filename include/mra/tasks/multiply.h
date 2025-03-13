@@ -56,10 +56,11 @@ namespace mra{
         const auto& phiT = functiondata.get_phiT();
         const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*N;
         ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+        auto norms = FunctionNorms("multiply", t1, t2, out);
 
   #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer(), phibar.buffer(), phiT.buffer(),
-                                        tmp_scratch);
+                                        tmp_scratch, norms.buffer());
         // if (!t1.empty()) {
         //   input.add(t1.coeffs().buffer());
         // }
@@ -80,6 +81,13 @@ namespace mra{
 
         submit_multiply_kernel(D, t1_view, t2_view, out_view, phiT_view, phibar_view,
                             N, K, key, tmp_device, ttg::device::current_stream());
+
+        norms.compute();
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::wait(norms.buffer());
+#endif // MRA_ENABLE_HOST
+        norms.verify();
+
 
         send_out(std::move(out));
       }

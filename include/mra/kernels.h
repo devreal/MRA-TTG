@@ -13,5 +13,6 @@
 #include "mra/kernels/multiply.h"
 #include "mra/kernels/norm.h"
 #include "mra/kernels/derivative.h"
+#include "mra/kernels/simple_norm.h"
 
 #endif // MRA_KERNELS_H

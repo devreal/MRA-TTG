@@ -129,6 +129,18 @@ namespace mra {
       return view_type(m_buffer.current_device_ptr(), m_dims);
     }
 
+    /* returns a view for the current memory space
+     * TODO: handle const correctness (const Tensor should return a const TensorView)*/
+    view_type view_on(const ttg::device::Device& device) {
+      return view_type(m_buffer.device_ptr_on(device), m_dims);
+    }
+
+    /* returns a view for the current memory space
+     * TODO: handle const correctness (const Tensor should return a const TensorView)*/
+    const view_type view_on(const ttg::device::Device& device) const {
+      return view_type(m_buffer.device_ptr_on(device), m_dims);
+    }
+
     bool empty() const {
       return m_buffer.empty();
     }

@@ -96,6 +96,11 @@ namespace mra{
         r_arr[i].allocate(K, ttg::scope::Allocate);
       }
 
+      // compute norms
+      auto norms = [&]<std::size_t... Is>(std::index_sequence<Is...>){
+        return FunctionNorms("reconstruct", node, from_parent, r_arr[Is]...);
+      }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
+
 #ifndef MRA_ENABLE_HOST
       // helper lambda to pick apart the std::array
       auto make_inputs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
@@ -103,12 +108,9 @@ namespace mra{
                                   (r_arr[Is].coeffs().buffer())...);
       };
       auto inputs = make_inputs(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
-      if (!from_parent.empty()) {
-        inputs.add(from_parent.coeffs().buffer());
-      }
-      if (!node.empty()) {
-        inputs.add(node.coeffs().buffer());
-      }
+      inputs.add(from_parent.coeffs().buffer());
+      inputs.add(node.coeffs().buffer());
+      inputs.add(norms.buffer());
       /* select a device */
       co_await ttg::device::select(inputs);
 #endif
@@ -123,6 +125,15 @@ namespace mra{
       auto from_parent_view = from_parent.coeffs().current_view();
       submit_reconstruct_kernel(key, N, K, node_view, hg_view, from_parent_view,
                                 r_ptrs, tmp_scratch.current_device_ptr(), ttg::device::current_stream());
+
+#ifdef MRA_CHECK_NORMS
+      norms.compute();
+#ifndef MRA_ENABLE_HOST
+    /* wait for norms to come back and verify */
+      co_await ttg::device::wait(norms.buffer());
+#endif // MRA_ENABLE_HOST
+      norms.verify();
+#endif // MRA_CHECK_NORMS
 
       for (auto it=children.begin(); it!=children.end(); ++it) {
         const mra::Key<NDIM> child= *it;

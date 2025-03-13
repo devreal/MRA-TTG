@@ -99,7 +99,7 @@ namespace mra{
           /* TODO: cannot do this from a function, had to move it into the main task */
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(db, gl, fb, coeffs.buffer(), phibar.buffer(),
-                                      hgT.buffer(), tmp_scratch, is_leafs);
+                                      hgT.buffer(), tmp_scratch, is_leafs, result_norms.buffer());
 #endif
           auto coeffs_view = coeffs.current_view();
           auto phibar_view = phibar.current_view();
@@ -115,11 +115,14 @@ namespace mra{
                                 phibar_view, hgT_view, coeffs_view,
                                 is_leafs_device, thresh, ttg::device::current_stream());
 
+          result_norms.compute();
+
           /* wait and get is_leaf back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(is_leafs);
+          co_await ttg::device::wait(is_leafs, result_norms.buffer());
 #endif
 
+          result_norms.verify(); // extracts the norms and stores them in the node
           const bool* is_leafs_arr = is_leafs.host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
             result.is_leaf(i) = is_leafs_arr[i];

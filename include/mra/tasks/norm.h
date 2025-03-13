@@ -45,9 +45,10 @@ namespace mra{
       // TODO: pass ttg::scope::Allocate once that's possible
       // TODO: reuse of one of the input norms?
       auto norms_result = norm_tensor_type(N);
+      auto fnnorms = FunctionNorms("norm", norm0, norm1, norm2, norm3, norm4, norm5, norm6, norm7);
       //std::cout << name << " " << key << std::endl;
 #ifndef MRA_ENABLE_HOST
-      co_await ttg::device::select(norms_result.buffer(), in.coeffs().buffer(),
+      co_await ttg::device::select(norms_result.buffer(), in.coeffs().buffer(), fnnorms.buffer(),
                                   norm0.buffer(), norm1.buffer(), norm2.buffer(), norm3.buffer(),
                                   norm4.buffer(), norm5.buffer(), norm6.buffer(), norm7.buffer());
 #endif // MRA_ENABLE_HOST
@@ -59,6 +60,12 @@ namespace mra{
           norm4.buffer().current_device_ptr(), norm5.buffer().current_device_ptr(),
           norm6.buffer().current_device_ptr(), norm7.buffer().current_device_ptr()};
       submit_norm_kernel(key, N, K, node_view, norm_result_view, child_norms, ttg::device::current_stream());
+
+      fnnorms.compute();
+#ifndef MRA_ENABLE_HOST
+      co_await ttg::device::wait(fnnorms);
+#endif // MRA_ENABLE_HOST
+      fnnorms.verify();
 
 #ifndef MRA_ENABLE_HOST
       if (key.level() == 0) {

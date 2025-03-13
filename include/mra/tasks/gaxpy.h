@@ -79,7 +79,9 @@ namespace mra{
         }
 #endif // 0
 
-  #ifndef MRA_ENABLE_HOST
+        auto norms = FunctionNorms("gaxpy", out, t1, t2);
+
+#ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer());
         if (!t1.empty()) {
           input.add(t1.coeffs().buffer());
@@ -87,14 +89,23 @@ namespace mra{
         if (!t2.empty()) {
           input.add(t2.coeffs().buffer());
         }
+        input.add(norms.buffer());
         co_await ttg::device::select(input);
-  #endif
+#endif
         auto t1_view = t1.coeffs().current_view();
         auto t2_view = t2.coeffs().current_view();
         auto out_view = out.coeffs().current_view();
 
         submit_gaxpy_kernel(key, t1_view, t2_view, out_view,
                             scalarA, scalarB, N, K, ttg::device::current_stream());
+
+        norms.compute();
+
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::wait(norms.buffer());
+#endif // MRA_ENABLE_HOST
+
+        norms.verify();
 
         send_out(std::move(out));
       }
