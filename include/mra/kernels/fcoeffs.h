@@ -100,7 +100,7 @@ namespace mra {
 
     template<typename Fn, typename T, Dimension NDIM>
     GLOBALSCOPE void
-    LAUNCH_BOUNDS(max_threads(MRA_MAX_K))
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     fcoeffs_kernel(
       const Domain<NDIM>& D,
       const T* gldata,
@@ -172,10 +172,9 @@ namespace mra {
      * synchronization is required.
      */
     Dim3 thread_dims = max_thread_dims(K);
-    size_type numthreads = thread_dims.x*thread_dims.y*thread_dims.z;
 
     /* launch one block per child */
-    CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, numthreads*sizeof(T), stream,
+    CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, 0, stream,
       (D, gldata, fns, key, N, K, tmp,
        phibar_view, hgT_view, coeffs_view,
        is_leaf_scratch, thresh));

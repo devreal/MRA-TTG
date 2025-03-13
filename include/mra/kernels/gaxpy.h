@@ -23,7 +23,7 @@ namespace mra {
     }
 
     template <typename T, Dimension NDIM>
-    LAUNCH_BOUNDS(max_threads(2*MRA_MAX_K))
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void gaxpy_kernel(
       const TensorView<T, NDIM+1> nodeA_view,
       const TensorView<T, NDIM+1> nodeB_view,

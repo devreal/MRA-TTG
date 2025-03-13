@@ -46,7 +46,7 @@ namespace mra {
 
     template <typename T, Dimension NDIM>
     GLOBALSCOPE void
-    LAUNCH_BOUNDS(max_threads(MRA_MAX_K))
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     multiply_kernel(
       const Domain<NDIM>& D,
       const TensorView<T, NDIM+1> nodeA_view,

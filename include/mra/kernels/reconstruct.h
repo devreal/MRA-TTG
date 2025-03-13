@@ -56,7 +56,7 @@ namespace mra {
 
     template<typename T, Dimension NDIM>
     GLOBALSCOPE void
-    LAUNCH_BOUNDS(max_threads(2*MRA_MAX_K))
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     reconstruct_kernel(
       Key<NDIM> key,
       size_type N,

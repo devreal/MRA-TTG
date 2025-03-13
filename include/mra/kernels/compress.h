@@ -55,7 +55,7 @@ namespace mra {
     }
 
     template<typename T, Dimension NDIM>
-    LAUNCH_BOUNDS(max_threads(2*MRA_MAX_K))
+    LAUNCH_BOUNDS(max_threads(MAX_THREADS_PER_BLOCK))
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
       size_type N,
@@ -112,9 +112,8 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-    size_type numthreads = thread_dims.x*thread_dims.y*thread_dims.z;
 
-    CALL_KERNEL(detail::compress_kernel, N, thread_dims, numthreads*sizeof(T), stream,
+    CALL_KERNEL(detail::compress_kernel, N, thread_dims, 0, stream,
       (key, N, K, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
     checkSubmit();
   }

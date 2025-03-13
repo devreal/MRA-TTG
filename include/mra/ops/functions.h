@@ -168,7 +168,7 @@ namespace mra {
       template <typename T>
       SCOPE void reduce_block(const T input, T* output, size_type blocksize = block_size()) {
 #ifdef HAVE_DEVICE_ARCH
-        extern __shared__ T sdata[];
+        __shared__ T sdata[MAX_THREADS_PER_BLOCK];
         size_type tid = thread_id();
         sdata[tid] = input;
         SYNCTHREADS();
