@@ -138,9 +138,8 @@ namespace mra
           norms.compute();
           /* wait for kernel and transfer sums back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(d_sumsq, norms.buffer());
+          co_await ttg::device::wait(d_sumsq);
 #endif
-          norms.verify();
 
           auto* d_sumsq_arr = d_sumsq.host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
@@ -148,7 +147,7 @@ namespace mra
                                     in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
             auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
             p.sum(i) = d_sumsq_arr[i] + child_sumsq; // result sumsq is last element in sumsqs
-            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
+            //std::cout << "compress " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
             //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
           }
 

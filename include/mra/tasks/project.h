@@ -87,7 +87,7 @@ namespace mra{
           tensor_type& coeffs = result.coeffs();
 
           // compute the norm of functions
-          auto result_norms = FunctionNorms(name, result);
+          auto result_norms = FunctionNorms("project", result);
 
           /* global function data */
           // TODO: need to make our own FunctionData with dynamic K
@@ -102,7 +102,7 @@ namespace mra{
           /* TODO: cannot do this from a function, had to move it into the main task */
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(db, gl, fb, coeffs.buffer(), phibar.buffer(),
-                                      hgT.buffer(), tmp_scratch, is_leafs, result_norms.buffer());
+                                      hgT.buffer(), tmp_scratch, is_leafs);
 #endif
           auto coeffs_view = coeffs.current_view();
           auto phibar_view = phibar.current_view();
@@ -122,10 +122,9 @@ namespace mra{
 
           /* wait and get is_leaf back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(is_leafs, result_norms.buffer());
+          co_await ttg::device::wait(is_leafs);
 #endif
 
-          result_norms.verify(); // extracts the norms and stores them in the node
           const bool* is_leafs_arr = is_leafs.host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
             result.is_leaf(i) = is_leafs_arr[i];

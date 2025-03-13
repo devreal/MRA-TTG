@@ -130,15 +130,6 @@ namespace mra{
       submit_reconstruct_kernel(key, N, K, node_view, hg_view, from_parent_view,
                                 r_ptrs, tmp_scratch.current_device_ptr(), ttg::device::current_stream());
 
-#ifdef MRA_CHECK_NORMS
-      norms.compute();
-#ifndef MRA_ENABLE_HOST
-    /* wait for norms to come back and verify */
-      co_await ttg::device::wait(norms.buffer());
-#endif // MRA_ENABLE_HOST
-      norms.verify();
-#endif // MRA_CHECK_NORMS
-
       for (auto it=children.begin(); it!=children.end(); ++it) {
         const mra::Key<NDIM> child= *it;
         mra::FunctionsReconstructedNode<T,NDIM>& r = r_arr[it.index()];
