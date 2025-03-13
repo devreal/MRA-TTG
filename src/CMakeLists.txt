@@ -63,7 +63,7 @@ if (HAVE_CUDA)
                      twoscale.cc)
   target_compile_definitions(mra-pcr-device-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(mra-pcr-device-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray>)
 
   add_executable(mra-derivative-device-cuda-parsec
                      examples/derivative/test_derivative.cu
@@ -71,7 +71,7 @@ if (HAVE_CUDA)
                      twoscale.cc)
   target_compile_definitions(mra-derivative-device-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(mra-derivative-device-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-derivative-device-cuda-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(mra-derivative-device-cuda-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray>)
 
   add_executable(mra-unit-device-cuda-parsec
                      examples/unit/test_unit.cu
@@ -79,7 +79,7 @@ if (HAVE_CUDA)
                      twoscale.cc)
   target_compile_definitions(mra-unit-device-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(mra-unit-device-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-unit-device-cuda-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(mra-unit-device-cuda-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray>)
 endif (HAVE_CUDA)
 
 if (HAVE_HIP)
@@ -90,7 +90,7 @@ if (HAVE_HIP)
                      twoscale.cc)
   target_compile_definitions(mra-pcr-device-hip-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(mra-pcr-device-hip-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-pcr-device-hip-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(mra-pcr-device-hip-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray>)
 
   add_executable(mra-derivative-device-hip-parsec
                      examples/derivative/test_derivative.hip
@@ -98,7 +98,7 @@ if (HAVE_HIP)
                      twoscale.cc)
   target_compile_definitions(mra-derivative-device-hip-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(mra-derivative-device-hip-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-derivative-device-hip-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(mra-derivative-device-hip-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray>)
 
   add_executable(mra-unit-device-hip-parsec
                      examples/unit/test_unit.hip
@@ -106,5 +106,5 @@ if (HAVE_HIP)
                      twoscale.cc)
   target_compile_definitions(mra-unit-device-hip-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(mra-unit-device-hip-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-unit-device-hip-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(mra-unit-device-hip-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray>)
 endif (HAVE_HIP)

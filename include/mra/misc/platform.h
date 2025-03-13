@@ -1,5 +1,5 @@
-#ifndef MRA_PLATFORM_H
-#define MRA_PLATFORM_H
+#ifndef MRA_DEVICE_PLATFORM_H
+#define MRA_DEVICE_PLATFORM_H
 
 #include <cstdlib>
 #include <algorithm>
@@ -8,7 +8,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
-#elif defined(MRA_ENABLE_HIP) && !defined(__HIP_DEVICE_COMPILE__)
+#elif defined(MRA_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 #endif
 
@@ -36,7 +36,7 @@ namespace mra::detail {
 #define SHARED __shared__
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT)
 #define HAVE_DEVICE_ARCH 1
-#elif defined(__HIPCC__)
+#elif defined(__HIP__)
 #define SCOPE __device__ __host__
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
@@ -79,7 +79,7 @@ namespace mra::detail {
 
 #if defined(__CUDA_ARCH__)
 #define THROW(s) do { std::printf(s); __trap(); } while(0)
-#elif defined(__HIPCC__)
+#elif defined(__HIP__)
 /* TODO: how to error out on HIP? */
 #define THROW(s) do { printf(s); } while(0)
 #else  // __CUDA_ARCH__
@@ -100,11 +100,20 @@ namespace mra::detail {
 #define MAX_THREADS_PER_BLOCK 1024
 #endif
 
-#if defined(MRA_ENABLE_HOST)
+#if !defined(MRA_HAVE_DEVICE_ARCH)
 using Dim3 = mra::detail::dim3;
 #else
 using Dim3 = dim3;
-#endif // MRA_ENABLE_HOST
+#endif // MRA_HAVE_DEVICE_ARCH
+
+// current have to make sure we use scope::SyncIn for host
+// this will be fixed once TTG supports coros for host tasks
+#if defined(MRA_ENABLE_HOST)
+constexpr const static ttg::scope TempScope = ttg::scope::SyncIn;
+#else
+constexpr const static ttg::scope TempScope = ttg::scope::Allocate;
+#endif
+
 
 #if defined(MRA_ENABLE_HOST)
 namespace mra {
@@ -163,4 +172,4 @@ namespace std {
 } // namespace std
 
 
-#endif // MRA_PLATFORM_H
+#endif // MRA_DEVICE_PLATFORM_H

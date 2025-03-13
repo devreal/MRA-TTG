@@ -10,7 +10,7 @@ include(FetchContent)
 FetchContent_Declare(
       ttg
       GIT_REPOSITORY      https://github.com/devreal/ttg.git
-      GIT_TAG             914cc3d75385e129b3a2b3d910a41501300b5a47
+      GIT_TAG             ttg-for-mra
   )
 
 #FetchContent_Declare(

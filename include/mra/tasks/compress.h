@@ -82,30 +82,23 @@ namespace mra
           /* some inputs are on the device so submit a kernel */
 
           // allocate the result
-          result = mra::FunctionsCompressedNode<T, NDIM>(key, N, K);
+          result = mra::FunctionsCompressedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
           auto& d = result.coeffs();
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
-          p = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K);
+          p = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
           p.set_all_leaf(false);
           assert(p.is_all_leaf() == false);
 
-          //std::cout << name << " " << key << " all leafs " << result.is_all_child_leaf() << std::endl;
-
-          /* d and p don't have to be synchronized into the device */
-          d.buffer().reset_scope(ttg::scope::Allocate);
-          p.coeffs().buffer().reset_scope(ttg::scope::Allocate);
-
-          /* stores sumsq for each child and for result at the end of the kernel */
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
-          auto tmp = std::make_unique_for_overwrite<T[]>(tmp_size);
+          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
           const auto& hgT = functiondata.get_hgT();
-          auto tmp_scratch = ttg::make_scratch(tmp.get(), ttg::scope::Allocate, tmp_size);
-          auto d_sumsq = std::make_unique_for_overwrite<T[]>(N);
-          auto d_sumsq_scratch = ttg::make_scratch(d_sumsq.get(), ttg::scope::Allocate, N);
-  #ifndef MRA_ENABLE_HOST
+          /* stores sumsq for each child and for result at the end of the kernel */
+          auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(N, TempScope);
+
+#ifndef MRA_ENABLE_HOST
           auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(),
-                                          tmp_scratch, d_sumsq_scratch);
+                                          tmp_scratch, d_sumsq);
           auto select_in = [&](const auto& in) {
             if (!in.empty()) {
               input.add(in.coeffs().buffer());
@@ -117,7 +110,7 @@ namespace mra
           select_in(in6); select_in(in7);
 
           co_await ttg::device::select(input);
-  #endif
+#endif
 
           /* some constness checks for the API */
           static_assert(std::is_const_v<std::remove_reference_t<decltype(in0)>>);
@@ -135,20 +128,21 @@ namespace mra
           auto hgT_view = hgT.current_view();
 
           submit_compress_kernel(key, N, K, coeffs_view, rcoeffs_view, hgT_view,
-                                tmp_scratch.device_ptr(), d_sumsq_scratch.device_ptr(), input_views,
+                                tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
                                 ttg::device::current_stream());
 
           /* wait for kernel and transfer sums back */
-  #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(d_sumsq_scratch);
-  #endif
+#ifndef MRA_ENABLE_HOST
+          co_await ttg::device::wait(d_sumsq);
+#endif
 
+          auto* d_sumsq_arr = d_sumsq.host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
             auto sumsqs = std::array{in0.sum(i), in1.sum(i), in2.sum(i), in3.sum(i),
                                     in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
             auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
-            p.sum(i) = d_sumsq[i] + child_sumsq; // result sumsq is last element in sumsqs
-            //std::cout << "compress " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq[i]
+            p.sum(i) = d_sumsq_arr[i] + child_sumsq; // result sumsq is last element in sumsqs
+            //std::cout << "compress " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
             //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
           }
 

@@ -50,13 +50,12 @@ namespace mra{
         mra::apply_leaf_info(out, t1, t2);
         send_out(std::move(out));
       } else {
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K);
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);
         const auto& phibar = functiondata.get_phibar();
         const auto& phiT = functiondata.get_phiT();
         const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*N;
-        auto tmp = std::make_unique_for_overwrite<T[]>(tmp_size);
-        auto tmp_scratch = ttg::make_scratch(tmp.get(), ttg::scope::Allocate, tmp_size);
+        ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
 
   #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer(), phibar.buffer(), phiT.buffer(),
@@ -77,7 +76,7 @@ namespace mra{
         auto phiT_view = phiT.current_view();
         auto phibar_view = phibar.current_view();
         auto& D = *db.current_device_ptr();
-        T* tmp_device = tmp_scratch.device_ptr();
+        T* tmp_device = tmp_scratch.current_device_ptr();
 
         submit_multiply_kernel(D, t1_view, t2_view, out_view, phiT_view, phibar_view,
                             N, K, key, tmp_device, ttg::device::current_stream());

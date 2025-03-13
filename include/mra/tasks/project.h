@@ -80,8 +80,11 @@ namespace mra{
            * TODO: figure out a way to outline this into a function or coroutine
            */
           // allocate tensor
-          result = node_type(key, N, K);
+          result = node_type(key, N, K, ttg::scope::Allocate);
           tensor_type& coeffs = result.coeffs();
+
+          // compute the norm of functions
+          auto result_norms = FunctionNorms("project", result);
 
           /* global function data */
           // TODO: need to make our own FunctionData with dynamic K
@@ -89,41 +92,37 @@ namespace mra{
           const auto& hgT = functiondata.get_hgT();
 
           /* temporaries */
-          /* TODO: have make_scratch allocate pinned memory for us */
-          auto is_leafs = std::make_unique_for_overwrite<bool[]>(N);
-          auto is_leafs_scratch = ttg::make_scratch(is_leafs.get(), ttg::scope::Allocate, N);
           const std::size_t tmp_size = fcoeffs_tmp_size<NDIM>(K)*N;
-          auto tmp = std::make_unique_for_overwrite<T[]>(tmp_size);
-          auto tmp_scratch = ttg::make_scratch(tmp.get(), ttg::scope::Allocate, tmp_size);
-
-          /* coeffs don't have to be synchronized into the device */
-          coeffs.buffer().reset_scope(ttg::scope::Allocate);
+          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+          auto is_leafs = ttg::Buffer<bool, DeviceAllocator<bool>>(N, TempScope);
 
           /* TODO: cannot do this from a function, had to move it into the main task */
-  #ifndef MRA_ENABLE_HOST
+#ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(db, gl, fb, coeffs.buffer(), phibar.buffer(),
-                                      hgT.buffer(), tmp_scratch, is_leafs_scratch);
-  #endif
+                                      hgT.buffer(), tmp_scratch, is_leafs);
+#endif
           auto coeffs_view = coeffs.current_view();
           auto phibar_view = phibar.current_view();
           auto hgT_view    = hgT.current_view();
-          T* tmp_ptr = tmp_scratch.device_ptr();
-          bool *is_leafs_device = is_leafs_scratch.device_ptr();
+          T* tmp_device = tmp_scratch.current_device_ptr();
+          bool *is_leafs_device = is_leafs.current_device_ptr();
           auto *f_ptr   = fb.current_device_ptr();
           auto& domain = *db.current_device_ptr();
           auto  gldata = gl.current_device_ptr();
 
           /* submit the kernel */
-          submit_fcoeffs_kernel(domain, gldata, f_ptr, key, N, K, tmp_ptr,
+          submit_fcoeffs_kernel(domain, gldata, f_ptr, key, N, K, tmp_device,
                                 phibar_view, hgT_view, coeffs_view,
                                 is_leafs_device, thresh, ttg::device::current_stream());
 
           /* wait and get is_leaf back */
-  #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(is_leafs_scratch);
-  #endif
+#ifndef MRA_ENABLE_HOST
+          co_await ttg::device::wait(is_leafs);
+#endif
+
+          const bool* is_leafs_arr = is_leafs.host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
-            result.is_leaf(i) = is_leafs[i];
+            result.is_leaf(i) = is_leafs_arr[i];
           }
           /**
            * END FCOEFFS HERE

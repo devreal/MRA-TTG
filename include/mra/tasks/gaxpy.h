@@ -64,11 +64,10 @@ namespace mra{
         send_out(t1);
       } else {
 
-        auto out = mra::FunctionsCompressedNode<T, NDIM>(key, N, K);
-        out.coeffs().buffer().reset_scope(ttg::scope::Allocate);
+        auto out = mra::FunctionsCompressedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
+
         /* adapt the leaf information of the result: if the children of both nodes are leafs then
         * the children of the output node are leafs as well. */
-
         mra::apply_leaf_info(out, t1, t2);
         //std::cout << name << " " << key << " all leafs " << out.is_all_child_leaf() << std::endl;
 #if 0
