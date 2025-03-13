@@ -20,6 +20,7 @@
 #include "mra/misc/twoscale.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/keymaps.h"
 
 #include "mra/ops/mxm.h"
 #include "mra/ops/inner.h"

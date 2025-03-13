@@ -18,7 +18,7 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, Dimension NDIM>
+  template <typename T, Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_derivative(size_type N, size_type K,
                 ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> in,
                 ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> result,
@@ -29,7 +29,9 @@ namespace mra{
                 const Dimension axis,
                 const int bc_left,
                 const int bc_right,
-                const std::string& name = "derivative")
+                const std::string& name = "derivative",
+                ProcMap&& procmap = {},
+                DeviceMap&& devicemap = {})
   {
     // TODO: we could generalize this to NDIM by using the tuple-based API
     static_assert(NDIM == 3, "Derivative currently only supported in 3D!");
@@ -263,6 +265,16 @@ namespace mra{
                               ttg::edges(left, center, right),
                               ttg::edges(left, center, right, result),
                               name);
+
+    // set maps if provided
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
+      deriv_tt->set_keymap(procmap);
+      dispatch_tt->set_keymap(procmap);
+    }
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
+      deriv_tt->set_devicemap(devicemap);
+      dispatch_tt->set_devicemap(devicemap);
+    }
 
     return std::make_tuple(std::move(deriv_tt),
                            std::move(dispatch_tt));

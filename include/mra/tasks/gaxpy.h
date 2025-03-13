@@ -19,12 +19,14 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template<typename T, mra::Dimension NDIM>
+  template<typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_gaxpy(ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in1,
                 ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in2,
                 ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
                 const T scalarA, const T scalarB, const size_t N, const size_t K,
-                const char* name = "gaxpy")
+                const char* name = "gaxpy",
+                ProcMap procmap = {},
+                DeviceMap devicemap = {})
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> S1, S2; // to balance trees
 
@@ -161,11 +163,15 @@ namespace mra{
 #endif // MRA_ENABLE_HOST
     };
 
-    return ttg::make_tt<Space>(std::move(func),
-                              ttg::edges(ttg::fuse(S1, in1), ttg::fuse(S2, in2)),
-                              ttg::edges(out, S1, S2), name,
-                              {"in1", "in2"},
-                              {"out", "S1", "S2"});
+    auto tt = ttg::make_tt<Space>(std::move(func),
+                                  ttg::edges(ttg::fuse(S1, in1), ttg::fuse(S2, in2)),
+                                  ttg::edges(out, S1, S2), name,
+                                  {"in1", "in2"},
+                                  {"out", "S1", "S2"});
+
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt.set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt.set_devicemap(devicemap);
+    return tt;
 }
 
   template<typename T, mra::Dimension NDIM>

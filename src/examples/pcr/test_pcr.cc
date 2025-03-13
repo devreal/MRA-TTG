@@ -17,6 +17,9 @@ void test_pcr(std::size_t N, std::size_t K, int max_level) {
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
 
+  auto pmap = PartitionKeymap<NDIM>(); // process map
+  auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
+
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_reconstruct_result, gaxpy_result;
@@ -39,18 +42,18 @@ void test_pcr(std::size_t N, std::size_t K, int max_level) {
   auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result);
+  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp");
+  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
+  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   // C(R(C(P)))
-  auto compress_r = make_compress(N, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp");
+  auto compress_r = make_compress(N, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
 
   // C(R(C(P))) - C(P)
-  auto gaxpy = make_gaxpy(compress_reconstruct_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K);
+  auto gaxpy = make_gaxpy(compress_reconstruct_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy", pmap, dmap);
   // | C(R(C(P))) - C(P) |
-  auto norm  = make_norm(N, K, gaxpy_result, norm_result);
+  auto norm  = make_norm(N, K, gaxpy_result, norm_result, "norm", pmap, dmap);
   // final check
   auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
     // TODO: check for the norm within machine precision

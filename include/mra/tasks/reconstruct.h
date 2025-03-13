@@ -18,14 +18,16 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, mra::Dimension NDIM>
+  template <typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_reconstruct(
     const std::size_t N,
     const std::size_t K,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out,
-    const char* name = "reconstruct")
+    const char* name = "reconstruct",
+    ProcMap procmap = {},
+    DeviceMap devicemap = {})
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> S("S");  // passes scaling functions down
 
@@ -152,6 +154,9 @@ namespace mra{
 
 
     auto s = ttg::make_tt<Space>(std::move(do_reconstruct), ttg::edges(in, S), ttg::edges(S, out), name, {"input", "s"}, {"s", "output"});
+
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) s.set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) s.set_devicemap(devicemap);
 
     if (ttg::default_execution_context().rank() == 0) {
       s->template in<1>()->send(mra::Key<NDIM>{0,{0}},

@@ -20,14 +20,16 @@
 namespace mra
 {
 /// Make a composite operator that implements compression for a single function
-  template <typename T, mra::Dimension NDIM>
+  template <typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   static auto make_compress(
     const std::size_t N,
     const std::size_t K,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>& in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
-    const char *name = "compress")
+    const char *name = "compress",
+    ProcMap&& procmap = {},
+    DeviceMap&& devicemap = {})
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
 
@@ -178,8 +180,14 @@ namespace mra
 #endif
         }
     };
-    return std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, "send_leaves_up"),
-                          ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name));
+    auto tt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, "send_leaves_up"),
+                              ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name));
+
+    // set maps if provided
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+
+    return tt;
   }
 
 }

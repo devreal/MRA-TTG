@@ -42,7 +42,11 @@ namespace mra{
         std::cout << str << " (" << key << "," << value << ")" << std::endl;
       }
     };
-    return ttg::make_tt<Space>(func, ttg::edges(in), ttg::edges(), "printer", {"input"});
+    auto tt = ttg::make_tt<Space>(func, ttg::edges(in), ttg::edges(), "printer", {"input"});
+
+    // always execute on the rank that asks
+    tt->set_keymap([&](const keyT&){ return ttg::default_execution_context().rank(); });
+    return tt;
   }
 
   /* forward a reconstructed function node to the right input of do_compress

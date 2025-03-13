@@ -18,11 +18,13 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, Dimension NDIM>
+  template <typename T, Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_norm(size_type N, size_type K,
                 ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
                 ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> result,
-                const char* name = "norm") {
+                const char* name = "norm",
+                ProcMap procmap = {},
+                DeviceMap devicemap = {}) {
     static_assert(NDIM == 3); // TODO: worth fixing?
     using norm_tensor_type = mra::Tensor<T, 1>;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> node_e;
@@ -139,6 +141,16 @@ namespace mra{
                                           ttg::edges(norm_e0, norm_e1, norm_e2, norm_e3,
                                                       norm_e4, norm_e5, norm_e6, norm_e7, node_e),
                                           "norm-dispatch");
+
+    // set maps if provided
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
+      norm_tt->set_keymap(procmap);
+      dispatch_tt->set_keymap(procmap);
+    }
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
+      norm_tt->set_devicemap(devicemap);
+      dispatch_tt->set_devicemap(devicemap);
+    }
     /* compile everything into tasks */
     return std::make_tuple(std::move(norm_tt),
                           std::move(dispatch_tt));

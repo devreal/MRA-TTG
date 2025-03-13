@@ -18,7 +18,7 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template<typename FnT, typename T, mra::Dimension NDIM>
+  template<typename FnT, typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_project(
     const ttg::Buffer<mra::Domain<NDIM>>& db,
     const ttg::Buffer<FnT>& fb,
@@ -29,7 +29,9 @@ namespace mra{
     const T thresh, /// should be scalar value not complex
     ttg::Edge<mra::Key<NDIM>, void> control,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> result,
-    const char *name = "project")
+    const char *name = "project",
+    ProcMap procmap = {},
+    DeviceMap devicemap = {})
   {
     /* create a non-owning buffer for domain and capture it */
     auto fn = [&, N, K, max_level, thresh, gl = mra::GLbuffer<T>()]
@@ -170,7 +172,10 @@ namespace mra{
     };
 
     ttg::Edge<mra::Key<NDIM>, void> refine("refine");
-    return ttg::make_tt<Space>(std::move(fn), ttg::edges(fuse(control, refine)), ttg::edges(refine,result), name);
+    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(fuse(control, refine)), ttg::edges(refine,result), name);
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt.set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt.set_devicemap(devicemap);
+    return tt;
   }
 } // namespace mra
 
