@@ -92,7 +92,7 @@ namespace mra
           p = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
           p.set_all_leaf(false);
           assert(p.is_all_leaf() == false);
-          FunctionNorms<T, NDIM> norms(name, in0, in1, in2, in3, in4, in5, in6, in7, result);
+          FunctionNorms<T, NDIM> norms("compress", in0, in1, in2, in3, in4, in5, in6, in7, result);
 
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
@@ -138,8 +138,9 @@ namespace mra
           norms.compute();
           /* wait for kernel and transfer sums back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(d_sumsq);
+          co_await ttg::device::wait(d_sumsq, norms.buffer());
 #endif
+          norms.verify();
 
           auto* d_sumsq_arr = d_sumsq.host_ptr();
           for (std::size_t i = 0; i < N; ++i) {

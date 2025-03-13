@@ -82,7 +82,7 @@ namespace mra{
         }
 #endif // 0
 
-        auto norms = FunctionNorms(name, out, t1, t2);
+        auto norms = FunctionNorms("gaxpy", out, t1, t2);
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer());

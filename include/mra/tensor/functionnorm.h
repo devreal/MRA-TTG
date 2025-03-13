@@ -1,9 +1,9 @@
 #ifndef HAVE_MRA_FUNCTIONNORM_H
 #define HAVE_MRA_FUNCTIONNORM_H
 
-#include "mra/misc/key.h"
-#include "mra/tensor/tensor.h"
-#include "mra/tensor/functionnode.h"
+#include "key.h"
+#include "tensor.h"
+#include "functionnode.h"
 #include "kernels/simple_norm.h"
 
 
@@ -106,27 +106,22 @@ namespace mra {
       using value_type = T;
 
     private:
-      inline static const ttg::Buffer<value_type> empty_buffer;
 
     public:
       template<typename NodeT, typename... NodeTs>
       FunctionNorms(std::string name, NodeT&& node, NodeTs&&... nodes)
       { }
 
-      template<typename NodeT, typename... NodeTs>
-      FunctionNorms(const char* name, NodeT&& node, NodeTs&&... nodes)
-      { }
-
-      auto& buffer() {
-        return empty_buffer;
+      auto buffer() {
+        return ttg::Buffer<value_type>();
       }
 
       void compute() {
         return;
       }
 
-      void verify() const {
-        return;
+      bool verify(std::string name) const {
+        return false;
       }
     };
 #endif // MRA_CHECK_NORMS
