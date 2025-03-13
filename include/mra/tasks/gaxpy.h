@@ -170,8 +170,8 @@ namespace mra{
                                   {"in1", "in2"},
                                   {"out", "S1", "S2"});
 
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt.set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt.set_devicemap(devicemap);
     return tt;
 }
 

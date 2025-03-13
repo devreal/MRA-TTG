@@ -173,9 +173,9 @@ namespace mra{
     };
 
     ttg::Edge<mra::Key<NDIM>, void> refine("refine");
-    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(ttg::fuse(control, refine)), ttg::edges(refine,result), name);
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(fuse(control, refine)), ttg::edges(refine,result), name);
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt.set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt.set_devicemap(devicemap);
     return tt;
   }
 } // namespace mra
