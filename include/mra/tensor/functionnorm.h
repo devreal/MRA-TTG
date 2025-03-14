@@ -120,7 +120,7 @@ namespace mra {
         return;
       }
 
-      bool verify(std::string name) const {
+      bool verify() const {
         return false;
       }
     };

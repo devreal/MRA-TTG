@@ -109,9 +109,9 @@ using Dim3 = dim3;
 // current have to make sure we use scope::SyncIn for host
 // this will be fixed once TTG supports coros for host tasks
 #if defined(MRA_ENABLE_HOST)
-constexpr const static ttg::scope TempScope = ttg::scope::SyncIn;
+#define TempScope ttg::scope::SyncIn
 #else
-constexpr const static ttg::scope TempScope = ttg::scope::Allocate;
+#define TempScope ttg::scope::Allocate
 #endif
 
 

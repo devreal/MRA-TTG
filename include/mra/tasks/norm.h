@@ -48,7 +48,7 @@ namespace mra{
       // TODO: pass ttg::scope::Allocate once that's possible
       // TODO: reuse of one of the input norms?
       auto norms_result = norm_tensor_type(N);
-      auto fnnorms = FunctionNorms("norm", norm0, norm1, norm2, norm3, norm4, norm5, norm6, norm7);
+      auto fnnorms = FunctionNorms(name, norm0, norm1, norm2, norm3, norm4, norm5, norm6, norm7);
       //std::cout << name << " " << key << std::endl;
 #ifndef MRA_ENABLE_HOST
       co_await ttg::device::select(norms_result.buffer(), in.coeffs().buffer(), fnnorms.buffer(),

@@ -101,7 +101,7 @@ namespace mra{
 
       // compute norms
       auto norms = [&]<std::size_t... Is>(std::index_sequence<Is...>){
-        return FunctionNorms("reconstruct", node, from_parent, r_arr[Is]...);
+        return FunctionNorms(name, node, from_parent, r_arr[Is]...);
       }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
 
 #ifndef MRA_ENABLE_HOST
@@ -156,8 +156,8 @@ namespace mra{
 
     auto s = ttg::make_tt<Space>(std::move(do_reconstruct), ttg::edges(in, S), ttg::edges(S, out), name, {"input", "s"}, {"s", "output"});
 
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) s.set_keymap(procmap);
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) s.set_devicemap(devicemap);
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) s->set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) s->set_devicemap(devicemap);
 
     if (ttg::default_execution_context().rank() == 0) {
       s->template in<1>()->send(mra::Key<NDIM>{0,{0}},
