@@ -1,9 +1,9 @@
 #ifndef HAVE_MRA_FUNCTIONNORM_H
 #define HAVE_MRA_FUNCTIONNORM_H
 
-#include "key.h"
-#include "tensor.h"
-#include "functionnode.h"
+#include "mra/misc/key.h"
+#include "mra/tensor/tensor.h"
+#include "mra/tensor/functionnode.h"
 #include "kernels/simple_norm.h"
 
 
