@@ -1,7 +1,7 @@
 #ifndef MRA_KEYMAPS_H
 #define MRA_KEYMAPS_H
 
-#include <key.h>
+#include "mra/misc/key.h"
 
 #include<cmath>
 
