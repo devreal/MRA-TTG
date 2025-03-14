@@ -59,7 +59,7 @@ namespace mra{
         const auto& phiT = functiondata.get_phiT();
         const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*N;
         ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
-        auto norms = FunctionNorms("multiply", t1, t2, out);
+        auto norms = FunctionNorms(name, t1, t2, out);
 
   #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer(), phibar.buffer(), phiT.buffer(),

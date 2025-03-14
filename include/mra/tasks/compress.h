@@ -92,7 +92,7 @@ namespace mra
           p = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
           p.set_all_leaf(false);
           assert(p.is_all_leaf() == false);
-          FunctionNorms<T, NDIM> norms("compress", in0, in1, in2, in3, in4, in5, in6, in7, result);
+          FunctionNorms<T, NDIM> norms(name, in0, in1, in2, in3, in4, in5, in6, in7, result);
 
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
@@ -181,14 +181,20 @@ namespace mra
 #endif
         }
     };
-    auto tt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, "send_leaves_up"),
-                              ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name));
+    auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, "send_leaves_up"),
+                               ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name));
 
     // set maps if provided
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
+      std::get<0>(ttt)->set_keymap(procmap);
+      std::get<1>(ttt)->set_keymap(procmap);
+    }
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
+      std::get<0>(ttt)->set_devicemap(devicemap);
+      std::get<1>(ttt)->set_devicemap(devicemap);
+    }
 
-    return tt;
+    return ttt;
   }
 
 }

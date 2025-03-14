@@ -82,7 +82,7 @@ namespace mra{
         }
 #endif // 0
 
-        auto norms = FunctionNorms("gaxpy", out, t1, t2);
+        auto norms = FunctionNorms(name, out, t1, t2);
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer());
@@ -170,8 +170,8 @@ namespace mra{
                                   {"in1", "in2"},
                                   {"out", "S1", "S2"});
 
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt.set_keymap(procmap);
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt.set_devicemap(devicemap);
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
     return tt;
 }
 
