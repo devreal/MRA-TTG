@@ -66,7 +66,7 @@ namespace mra{
 
       fnnorms.compute();
 #ifndef MRA_ENABLE_HOST
-      co_await ttg::device::wait(fnnorms);
+      co_await ttg::device::wait(fnnorms.buffer());
 #endif // MRA_ENABLE_HOST
       fnnorms.verify();
 

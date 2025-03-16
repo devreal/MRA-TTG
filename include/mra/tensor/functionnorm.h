@@ -106,22 +106,23 @@ namespace mra {
       using value_type = T;
 
     private:
+      static const ttg::Buffer<value_type> empty_buffer;
 
     public:
       template<typename NodeT, typename... NodeTs>
       FunctionNorms(std::string name, NodeT&& node, NodeTs&&... nodes)
       { }
 
-      auto buffer() {
-        return ttg::Buffer<value_type>();
+      auto& buffer() {
+        return empty_buffer;
       }
 
       void compute() {
         return;
       }
 
-      bool verify() const {
-        return false;
+      void verify() const {
+        return;
       }
     };
 #endif // MRA_CHECK_NORMS
