@@ -100,11 +100,11 @@ namespace mra::detail {
 #define MAX_THREADS_PER_BLOCK 1024
 #endif
 
-#if !defined(MRA_HAVE_DEVICE_ARCH)
+#if defined(MRA_ENABLE_HOST)
 using Dim3 = mra::detail::dim3;
 #else
 using Dim3 = dim3;
-#endif // MRA_HAVE_DEVICE_ARCH
+#endif // HAVE_DEVICE_ARCH
 
 // current have to make sure we use scope::SyncIn for host
 // this will be fixed once TTG supports coros for host tasks
