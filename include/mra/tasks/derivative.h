@@ -43,7 +43,7 @@ namespace mra{
     constexpr static const int RIGHT = 2;
     constexpr static const int RESULT = RIGHT+1;
 
-    if (axis < 0 || axis >= NDIM) {
+    if (axis >= NDIM) {
       throw std::runtime_error("Invalid axis for derivative");
     }
 
