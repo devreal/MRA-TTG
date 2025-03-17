@@ -8,10 +8,10 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, int max_level) {
+void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, int max_level, int d) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
-  D[0].set_cube(-6.0,6.0);
+  D[0].set_cube(-d,d);
   T g1 = 0;
   T g2 = 0;
 
@@ -108,14 +108,15 @@ int main(int argc, char **argv) {
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 10);
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int axis    = opt.parse("-a", 1);
+  int axis    = opt.parse("-a", 0);
   int log_precision = opt.parse("-p", 4); // default: 1e-4
   int max_level = opt.parse("-l", -1);
+  int domain = opt.parse("-d", 6);
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
-  test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level);
+  test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level, domain);
 
   ttg::finalize();
 }
