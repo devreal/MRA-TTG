@@ -35,6 +35,9 @@ if (MRA_ENABLE_ASAN)
     add_link_options(-fsanitize=address)
 endif (MRA_ENABLE_ASAN)
 
+# look for Kokkos
+find_package(Kokkos COMPONENTS separable_compilation)
+
 # disable tests, may want to re-enable later
 set(BUILD_TESTING OFF)
 

@@ -115,3 +115,16 @@ if (HAVE_HIP)
   target_compile_definitions(transformbench-hip-parsec PUBLIC MRA_ENABLE_HIP=1 TTG_USE_PARSEC=1)
   target_link_libraries(transformbench-hip-parsec PUBLIC MADworld ttg-parsec)
 endif (HAVE_HIP)
+
+
+if (TARGET Kokkos::kokkos)
+  add_library(transformbench-kokkos-parsec STATIC benchmarks/transformbench-kokkos/transformbench.cc)
+  target_link_libraries(transformbench-kokkos-parsec PRIVATE Kokkos::kokkos)
+  target_compile_options(transformbench-kokkos-parsec PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --extended-lambda>)
+  # we still need to tell MRA whether we're using CUDA or HIP
+  target_compile_definitions(transformbench-kokkos-parsec PRIVATE $<$<HAVE_CUDA>:MRA_ENABLE_CUDA=1> $<$<HAVE_HIP>:MRA_ENABLE_HIP=1> TTG_USE_PARSEC=1)
+  # TODO: target_include_directories does not seem to work with CUDA :/
+  #include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../ttg/ ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/potrf)
+  #add_library(plgsy-host STATIC potrf/core_plgsy.cc)
+  #target_link_libraries(plgsy-host PRIVATE Kokkos::kokkos)
+endif(TARGET Kokkos::kokkos)
