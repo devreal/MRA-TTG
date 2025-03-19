@@ -15,6 +15,8 @@ namespace mra{
 
       auto tid = thread_id();
       SHARED aT block_a[MAX_THREADS_PER_BLOCK];
+      SHARED cT block_c[MAX_THREADS_PER_BLOCK];
+
       size_type a_block_dimi;
       a_block_dimi = block_size() / dimk;
 
@@ -40,16 +42,21 @@ namespace mra{
             bT b_ = b[k*dimj + threadIdx.x];
             sum += a_ * b_;
           }
-          if constexpr (Q) {
-            c[c_idx] += sum;
-          } else {
-            c[c_idx] = sum;
-          }
+          block_c[c_idx] = sum;
         }
 
-        /* synchronize before entering next iteration or completing */
         SYNCTHREADS();
+        /* copy shared memory block to global memory */
+        if (tid < dimj*dimk) {
+          if constexpr (Q) {
+            c_i[tid] += block_c[tid];
+          } else {
+            c_i[tid]  = block_c[tid];
+          }
+        }
       }
+      /* synchronize before returning */
+      SYNCTHREADS();
       return true;
     }
   } // namespace detail
