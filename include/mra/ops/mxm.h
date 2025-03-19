@@ -33,8 +33,10 @@ namespace mra{
         /* make sure the block is written */
         SYNCTHREADS();
 
+        cT *c_i = c + i*dimj;
+
         if (i+a_trans_i < dimi && threadIdx.x < dimj) { /* in case dimi is not a multiple of Y*Z */
-          size_type c_idx = (i+(threadIdx.z*blockDim.y+threadIdx.y))*dimj + threadIdx.x; // works!
+          size_type c_idx = (threadIdx.z*blockDim.y+threadIdx.y)*dimj + threadIdx.x; // works!
           cT sum = 0.0;
           /* k is not parallel */
           for (size_type k = 0; k < dimk; ++k) {
@@ -47,7 +49,7 @@ namespace mra{
 
         SYNCTHREADS();
         /* copy shared memory block to global memory */
-        if (tid < dimj*dimk) {
+        if (tid < a_block_dimi*dimj) {
           if constexpr (Q) {
             c_i[tid] += block_c[tid];
           } else {
