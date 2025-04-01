@@ -83,6 +83,21 @@ if (HAVE_CUDA)
   target_compile_definitions(transformbench-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(transformbench-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
   target_link_libraries(transformbench-cuda-parsec PUBLIC MADworld ttg-parsec)
+
+  if (TARGET nvidia::cutlass::cutlass)
+    target_include_directories(
+      transformbench-cuda-parsec
+      PRIVATE
+      ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+      )
+
+    target_link_libraries(
+      transformbench-cuda-parsec
+      PRIVATE
+      nvidia::cutlass::cutlass
+      #nvidia::cutlass::library
+      )
+    endif()
 endif (HAVE_CUDA)
 
 if (HAVE_HIP)

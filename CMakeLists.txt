@@ -40,4 +40,12 @@ set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
 
+# look for CUTLASS
+if (CUTLASS_DIR)
+  message(STATUS "Using CUTLASS specified at ${CUTLASS_DIR}.")
+  list(APPEND CMAKE_PREFIX_PATH ${CUTLASS_DIR})
+endif()
+find_package(NvidiaCutlass 2.0)
+message(STATUS "CUTLASS: ${NvidiaCutlass_DIR}")
+
 add_subdirectory(src)
