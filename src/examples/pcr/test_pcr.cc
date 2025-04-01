@@ -99,8 +99,10 @@ int main(int argc, char **argv) {
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
+  allocator_init(argc, argv);
 
   test_pcr<double, 3>(N, K, max_level);
 
+  allocator_fini();
   ttg::finalize();
 }

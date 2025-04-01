@@ -114,8 +114,10 @@ int main(int argc, char **argv) {
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
+  allocator_init(argc, argv);
 
   test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level);
 
+  allocator_fini();
   ttg::finalize();
 }
