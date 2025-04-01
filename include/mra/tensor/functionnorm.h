@@ -106,7 +106,7 @@ namespace mra {
       using value_type = T;
 
     private:
-      static const ttg::Buffer<value_type> empty_buffer;
+      inline static const ttg::Buffer<value_type> empty_buffer;
 
     public:
       template<typename NodeT, typename... NodeTs>
