@@ -51,9 +51,9 @@ namespace mra{
         /* copy shared memory block to global memory */
         if (tid < a_block_dimi*dimj) {
           if constexpr (Q) {
-            c_i[tid] += block_c[tid];
-          } else {
             c_i[tid]  = block_c[tid];
+          } else {
+            c_i[tid] += block_c[tid];
           }
         }
       }
