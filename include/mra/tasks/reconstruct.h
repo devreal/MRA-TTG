@@ -43,6 +43,7 @@ namespace mra{
       // Send empty interior node to result tree
       auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
       r_empty.set_all_leaf(false);
+      //std::cout << name << " " << key << std::endl;
 #ifndef MRA_ENABLE_HOST
       // forward() returns a vector that we can push into
       auto sends = ttg::device::forward(ttg::device::send<1>(key, std::move(r_empty)));

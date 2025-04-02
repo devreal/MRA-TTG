@@ -148,7 +148,7 @@ namespace mra
                                     in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
             auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
             p.sum(i) = d_sumsq_arr[i] + child_sumsq; // result sumsq is last element in sumsqs
-            //std::cout << "compress " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
+            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
             //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
           }
 
