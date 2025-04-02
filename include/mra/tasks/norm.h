@@ -77,6 +77,7 @@ namespace mra{
         co_await ttg::device::send<num_children>(key, std::move(norms_result));
       } else {
         // send norms upstream
+        //std::cout << name << " " << key << " sending upstream " << std::endl;
         co_await select_send_up(key, std::move(norms_result), std::make_index_sequence<num_children>{}, "norm");
       }
 #else
