@@ -1,7 +1,7 @@
 #ifndef MRA_ALLOCATOR_H
 #define MRA_ALLOCATOR_H
 
-#ifdef MRA_HAVE_TILEDARRAY
+#if __has_include(<TiledArray/external/device.h>)
 #include <TiledArray/external/device.h>
 #if defined(TILEDARRAY_HAS_DEVICE)
 
