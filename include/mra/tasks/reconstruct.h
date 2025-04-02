@@ -32,7 +32,7 @@ namespace mra{
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> S("S");  // passes scaling functions down
 
-    auto do_reconstruct = [&, N, K](const mra::Key<NDIM>& key,
+    auto do_reconstruct = [&, N, K, name](const mra::Key<NDIM>& key,
                                     const mra::FunctionsCompressedNode<T, NDIM>& node,
                                     const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*N;
@@ -43,6 +43,7 @@ namespace mra{
       // Send empty interior node to result tree
       auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
       r_empty.set_all_leaf(false);
+      //std::cout << name << " " << key << std::endl;
 #ifndef MRA_ENABLE_HOST
       // forward() returns a vector that we can push into
       auto sends = ttg::device::forward(ttg::device::send<1>(key, std::move(r_empty)));

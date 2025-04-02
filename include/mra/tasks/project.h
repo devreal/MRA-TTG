@@ -35,7 +35,7 @@ namespace mra{
     DeviceMap devicemap = {})
   {
     /* create a non-owning buffer for domain and capture it */
-    auto fn = [&, N, K, max_level, thresh, gl = mra::GLbuffer<T>()]
+    auto fn = [&, N, K, max_level, thresh, gl = mra::GLbuffer<T>(), name]
               (const mra::Key<NDIM>& key) -> TASKTYPE {
       using tensor_type = typename mra::Tensor<T, NDIM+1>;
       using key_type = typename mra::Key<NDIM>;
