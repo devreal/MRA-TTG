@@ -32,7 +32,7 @@ namespace mra{
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> S("S");  // passes scaling functions down
 
-    auto do_reconstruct = [&, N, K](const mra::Key<NDIM>& key,
+    auto do_reconstruct = [&, N, K, name](const mra::Key<NDIM>& key,
                                     const mra::FunctionsCompressedNode<T, NDIM>& node,
                                     const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*N;

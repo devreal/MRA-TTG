@@ -47,7 +47,7 @@ namespace mra{
       throw std::runtime_error("Invalid axis for derivative");
     }
 
-    auto dispatch_fn = [&, axis](const mra::Key<NDIM>& key,
+    auto dispatch_fn = [&, N, K, axis](const mra::Key<NDIM>& key,
                           const mra::FunctionsReconstructedNode<T, NDIM>& in_node) -> TASKTYPE {
 
       //std::cout << "derivative dispatch " << key << " axis " << axis << std::endl;
@@ -94,7 +94,7 @@ namespace mra{
                                           ttg::edges(left, center, right),
                                           name+"-dispatch");
 
-    auto derivative_fn = [&, N, K, g1, g2, axis, bc_left, bc_right](
+    auto derivative_fn = [&, N, K, g1, g2, axis, bc_left, bc_right, name](
                                 const mra::Key<NDIM>& key,
                                 const mra::FunctionsReconstructedNode<T, NDIM>& left,
                                 const mra::FunctionsReconstructedNode<T, NDIM>& center,
