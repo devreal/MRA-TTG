@@ -31,7 +31,7 @@ namespace mra{
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> S1, S2; // to balance trees
 
-    auto func = [&, N, K](
+    auto func = [&, N, K, name](
               const mra::Key<NDIM>& key,
               const mra::FunctionsReconstructedNode<T, NDIM>& t1,
               const mra::FunctionsReconstructedNode<T, NDIM>& t2) -> TASKTYPE {
