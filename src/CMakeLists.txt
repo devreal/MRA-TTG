@@ -8,6 +8,11 @@ add_executable(mra-pcr-host-parsec
 target_compile_definitions(mra-pcr-host-parsec PUBLIC MRA_ENABLE_HOST=1 TTG_USE_PARSEC=1)
 target_link_libraries(mra-pcr-host-parsec PUBLIC MADworld ttg-parsec)
 
+add_executable(mad-pcr
+               examples/pcr/test_pcr_madness.cc)
+target_link_libraries(mad-pcr PUBLIC MADchem)
+
+
 add_executable(mra-derivative-host-parsec
                examples/derivative/test_derivative.cc
                gl.cc
