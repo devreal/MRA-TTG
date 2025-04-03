@@ -113,6 +113,10 @@ namespace mra {
       FunctionNorms(std::string name, NodeT&& node, NodeTs&&... nodes)
       { }
 
+      template<typename NodeT, typename... NodeTs>
+      FunctionNorms(const char* name, NodeT&& node, NodeTs&&... nodes)
+      { }
+
       auto& buffer() {
         return empty_buffer;
       }
