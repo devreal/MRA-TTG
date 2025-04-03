@@ -9,7 +9,7 @@ using namespace mra;
 
 
 template<typename T, mra::Dimension NDIM>
-void test_pcr(std::size_t N, std::size_t K, int max_level) {
+void test_pcr(std::size_t N, std::size_t K, int nrep, bool norand, int max_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
@@ -29,10 +29,10 @@ void test_pcr(std::size_t N, std::size_t K, int max_level) {
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
   // T expnt = 1000.0;
   for (int i = 0; i < N; ++i) {
-    T expnt = 1500 + 1500*drand48();
+    T expnt = (norand) ? 2000.0 : (1500 + 1500*drand48());
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = T(-6.0) + T(12.0)*drand48();
+      r[d] = (norand) ? 0.0 : T(-6.0) + T(12.0)*drand48();
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
@@ -94,6 +94,8 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 10);
+  int nrep = opt.parse("-n", 3);
+  bool norand = opt.exists("-norand");
   int max_level = opt.parse("-l", -1);
   int cores   = opt.parse("-c", -1); // -1: use all cores
 
@@ -101,7 +103,13 @@ int main(int argc, char **argv) {
   mra::GLinitialize();
   allocator_init(argc, argv);
 
-  test_pcr<double, 3>(N, K, max_level);
+  /**
+   * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the
+   * with the first key it receives. We need to find a way to do that automatically outside of make_project.
+   */
+  for (int i = 0; i < nrep; ++i) {
+    test_pcr<double, 3>(N, K, nrep, norand, max_level);
+  }
 
   allocator_fini();
   ttg::finalize();
