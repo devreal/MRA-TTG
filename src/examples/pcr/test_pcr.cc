@@ -32,7 +32,7 @@ void test_pcr(std::size_t N, std::size_t K, int nrep, bool norand, int max_level
     T expnt = (norand) ? 2000.0 : (1500 + 1500*drand48());
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = (norand) ? 0.0 : T(-6.0) + T(12.0)*drand48();
+      r[d] = (norand) ? 0.0 : (T(-6.0) + T(12.0)*drand48());
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
