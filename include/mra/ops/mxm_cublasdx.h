@@ -2,9 +2,26 @@
 #define MRA_OPS_MXM_CUBLASDX_H
 
 #include "mra/misc/types.h"
+#include "mra/misc/platform.h"
 
 #if __has_include(<cublasdx.hpp>)
+
+#if !defined(MRA_CUDA_ARCH) || MRA_CUDA_ARCH < 70
+#error "MRA_CUDA_ARCH must be defined and >= 70 to use cublasdx"
+#endif
+
 #include <cublasdx.hpp>
+
+#if MRA_CUDA_ARCH == 70
+#define MRA_CUBLASDX_SM 700
+#elif MRA_CUDA_ARCH == 80
+#define MRA_CUBLASDX_SM 800
+#elif MRA_CUDA_ARCH == 90
+#define MRA_CUBLASDX_SM 900
+#else
+#warning "Unknown MRA_CUDA_ARCH for cublasdx, using 80"
+#define MRA_CUBLASDX_SM 800
+#endif
 
 namespace mra {
 
@@ -54,7 +71,7 @@ namespace mra {
       using BaseGEMM = decltype(cublasdx::Precision<T>()
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<MRA_CUDA_ARCH>() // TODO
+                              + cublasdx::SM<MRA_CUBLASDX_SM>() // TODO
                               + cublasdx::Block()
                               + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                               + cublasdx::MaxAlignment());
@@ -70,16 +87,16 @@ namespace mra {
     }
 
     template<size_type M, size_type N, size_type K, typename aT, typename bT, typename cT>
-    __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
+    DEVSCOPE void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
       constexpr auto blockdims = mra::max_thread_dims(K);
-      extern __shared__ __align__(16) char smem[];
+      extern SHARED __align__(16) char smem[];
 
       using GEMM = decltype(cublasdx::Size<std::min(CUBLAS_MAX_MN, M), std::min(CUBLAS_MAX_MN, N), K>()
                           + cublasdx::Precision<cT>()
                           + cublasdx::Type<cublasdx::type::real>()
                           + cublasdx::Function<cublasdx::function::MM>()
                           + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
-                          + cublasdx::SM<MRA_CUDA_ARCH>() // TODO
+                          + cublasdx::SM<MRA_CUBLASDX_SM>() // TODO
                           + cublasdx::Block()
                           + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                           + cublasdx::MaxAlignment()
@@ -118,7 +135,7 @@ namespace mra {
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Function<cublasdx::function::MM>()
                               + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
-                              + cublasdx::SM<MRA_CUDA_ARCH>() // TODO
+                              + cublasdx::SM<MRA_CUBLASDX_SM>() // TODO
                               + cublasdx::Block()
                               + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                               + cublasdx::MaxAlignment()
