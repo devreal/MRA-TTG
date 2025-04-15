@@ -34,14 +34,14 @@ namespace mra::detail {
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
 #define SHARED __shared__
-#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT)
+#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #elif defined(__HIP__)
 #define SCOPE __device__ __host__
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
 #define SHARED __shared__
-#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT)
+#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #else // __CUDA_ARCH__
 #define SCOPE
@@ -97,7 +97,7 @@ namespace mra::detail {
 #if defined(MRA_ENABLE_HOST)
 #define MAX_THREADS_PER_BLOCK 1
 #else
-#define MAX_THREADS_PER_BLOCK 1024
+#define MAX_THREADS_PER_BLOCK 512
 #endif
 
 #if defined(MRA_ENABLE_HOST)
