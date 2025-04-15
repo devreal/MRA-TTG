@@ -174,7 +174,7 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(K);
 
     /* launch one block per child */
-    CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, 0, stream,
+    CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, mTxmq_shmem_size(2*K), stream,
       (D, gldata, fns, key, N, K, tmp,
        phibar_view, hgT_view, coeffs_view,
        is_leaf_scratch, thresh));
