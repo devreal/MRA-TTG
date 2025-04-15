@@ -4,6 +4,8 @@
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 
+#include "mra/ops/mxm_cublasdx.h"
+
 namespace mra{
 
   /**
@@ -35,6 +37,9 @@ namespace mra{
     }
     SYNCTHREADS();
   }
+
+
+#ifndef MRA_HAVE_MTXMQ
 
   // /**
   //  * reference implementation, adapted from madness
@@ -71,6 +76,14 @@ namespace mra{
     }
     SYNCTHREADS();
   }
+
+
+  template<typename T>
+  constexpr size_type mTxmq_shmem_size(size_type K) {
+    return 0;
+  }
+
+#endif // MRA_HAVE_MTXMQ
 
   /**
    * reference implementation, adapted from madness
