@@ -71,7 +71,7 @@ namespace mra {
     }
 
     template<size_type M, size_type N, size_type K, typename aT, typename bT, typename cT>
-    __device__ void mTxmq_cublasdx_block(cT __restrict__* c, aT* a, bT* b) {
+    __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
       constexpr auto blockdims = mra::max_thread_dims(K);
       extern __shared__ __align__(16) char smem[];
 
@@ -143,7 +143,7 @@ namespace mra {
 
   template <typename aT, typename bT, typename cT>
   __device__ void mTxmq(long dimi, long dimj, long dimk,
-                        cT* __restrict__ c, const aT* a, const bT* b) {
+                        cT* c, const aT* a, const bT* b) {
     int M = dimi;
     int N = dimj;
     int K = dimk;
