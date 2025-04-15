@@ -111,7 +111,7 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-    CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, 0, stream,
+    CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, mTxmq_shmem_size(2*K), stream,
       (key, N, K, node, tmp, hg, from_parent, r_arr));
     checkSubmit();
   }
