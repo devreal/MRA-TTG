@@ -67,8 +67,10 @@ if (HAVE_CUDA)
                      gl.cc
                      twoscale.cc)
   target_compile_definitions(mra-pcr-device-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
-  target_compile_options(mra-pcr-device-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:tiledarray>:tiledarray> $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
+  target_compile_options(mra-pcr-device-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr> MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES})
+  target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC MADworld ttg-parsec
+                                                          $<$<TARGET_EXISTS:tiledarray>:tiledarray>
+                                                          $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
 
   add_executable(mra-derivative-device-cuda-parsec
                      examples/derivative/test_derivative.cu
