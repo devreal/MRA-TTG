@@ -3,9 +3,12 @@
 
 #include "mra/misc/types.h"
 
-#if defined(__CUDA_ARCH__) && __has_include(<cublasdx.hpp>)
-
+#if __has_include(<cublasdx.hpp>)
 #include <cublasdx.hpp>
+
+#if defined(__CUDA_ARCH__)
+
+#define MRA_SM __CUDA_ARCH__
 
 namespace mra {
 
@@ -55,7 +58,7 @@ namespace mra {
       using BaseGEMM = decltype(cublasdx::Precision<T>()
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<800>() // TODO
+                              + cublasdx::SM<MRA_SM>() // TODO
                               + cublasdx::Block()
                               + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                               + cublasdx::MaxAlignment());
@@ -80,7 +83,7 @@ namespace mra {
                           + cublasdx::Type<cublasdx::type::real>()
                           + cublasdx::Function<cublasdx::function::MM>()
                           + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
-                          + cublasdx::SM<800>() // TODO
+                          + cublasdx::SM<MRA_SM>() // TODO
                           + cublasdx::Block()
                           + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                           + cublasdx::MaxAlignment()
@@ -119,7 +122,7 @@ namespace mra {
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Function<cublasdx::function::MM>()
                               + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
-                              + cublasdx::SM<800>() // TODO
+                              + cublasdx::SM<MRA_SM>() // TODO
                               + cublasdx::Block()
                               + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                               + cublasdx::MaxAlignment()
@@ -202,8 +205,10 @@ namespace mra {
 
 } // namespace mra
 
+#endif // __CUDA_ARCH__
+
 #define MRA_HAVE_MTXMQ 1
 
-#endif // __CUDA_ARCH__
+#endif // __has_include(<cublasdx.hpp>)
 
 #endif // MRA_OPS_MXM_CUBLASDX_H
