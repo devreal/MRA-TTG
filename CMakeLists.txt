@@ -40,4 +40,13 @@ set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
 
+# look for cublasDx
+find_package(mathdx COMPONENTS cublasdx)
+if (mathdx_CUBLASDX_FOUND)
+  message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
+else()
+  message(STATUS "cublasDx not found")
+endif()
+
+
 add_subdirectory(src)
