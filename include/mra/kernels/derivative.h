@@ -310,7 +310,10 @@ namespace mra {
     size_type max_threads = std::min(K, MRA_MAX_K_SIZET);
     Dim3 thread_dims = Dim3(max_threads, max_threads, 1);
 
-    CALL_KERNEL(detail::derivative_kernel, N, thread_dims, K*K*NDIM*sizeof(T), stream,
+    auto smem_size = std::max(K*K*NDIM*sizeof(T), // used in fcube_for_mul
+                              mTxmq_shmem_size(2*K));
+
+    CALL_KERNEL(detail::derivative_kernel, N, thread_dims, smem_size, stream,
       (D, key, left, center, right, node_left, node_center, node_right, operators,
         deriv, phi, phibar, quad_x, tmp, N, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
