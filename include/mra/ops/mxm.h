@@ -72,7 +72,7 @@ namespace mra{
   SCOPE void mTxm(size_type dimi, size_type dimj, size_type dimk,
           cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
     if (ldb == -1) ldb=dimj;
-    if (ldb == dimj && detail::mTxm_block_a(dimi, dimj, dimk, c, a, b)) {
+    if (ldb == dimj && detail::mTxm_block_a<aT, bT, cT, Q>(dimi, dimj, dimk, c, a, b)) {
       return; // succesfully blocked on A
     }
     /* TODO: block on B */
