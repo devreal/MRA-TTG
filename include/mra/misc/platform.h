@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <iostream>
 
 #if defined(MRA_ENABLE_CUDA)
 #include <cuda.h>
