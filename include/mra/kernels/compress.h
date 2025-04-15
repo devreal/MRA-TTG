@@ -113,7 +113,7 @@ namespace mra {
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    CALL_KERNEL(detail::compress_kernel, N, thread_dims, 0, stream,
+    CALL_KERNEL(detail::compress_kernel, N, thread_dims, mTxmq_shmem_size<T>(2*K), stream,
       (key, N, K, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
     checkSubmit();
   }

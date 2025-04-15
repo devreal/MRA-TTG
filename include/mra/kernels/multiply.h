@@ -100,7 +100,7 @@ namespace mra {
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    CALL_KERNEL(detail::multiply_kernel, N, thread_dims, mTxmq_shmem_size(2*K), stream,
+    CALL_KERNEL(detail::multiply_kernel, N, thread_dims, mTxmq_shmem_size<T>(2*K), stream,
       (D, funcA, funcB, funcR, tmp,
         phiT, phibar, key, N, K));
     checkSubmit();
