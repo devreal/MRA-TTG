@@ -28,6 +28,7 @@ set(HAVE_HIP ${CMAKE_HIP_COMPILER} CACHE BOOL "True if we can compile .hip files
 set(TTG_FETCH_BOOST OFF)
 set(TTG_PARSEC_USE_BOOST_SERIALIZATION OFF)
 set(TTG_EXAMPLES ON) # to pull in TA
+set(MADNESS_BUILD_MADWORLD_ONLY OFF) # MADchem needed for tests
 
 option(MRA_ENABLE_ASAN "Whether to enable address sanitizer" OFF)
 if (MRA_ENABLE_ASAN)
@@ -47,5 +48,13 @@ if (CUTLASS_DIR)
 endif()
 find_package(NvidiaCutlass 2.0)
 message(STATUS "CUTLASS: ${NvidiaCutlass_DIR}")
+
+# look for cublasDx
+find_package(mathdx COMPONENTS cublasdx)
+if (mathdx_CUBLASDX_FOUND)
+  message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
+else()
+  message(STATUS "cublasDx not found")
+endif()
 
 add_subdirectory(src)

@@ -82,7 +82,7 @@ if (HAVE_CUDA)
   add_executable(transformbench-cuda-parsec benchmarks/transformbench/transformbench.cu)
   target_compile_definitions(transformbench-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1 TTG_USE_PARSEC=1)
   target_compile_options(transformbench-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(transformbench-cuda-parsec PUBLIC MADworld ttg-parsec)
+  target_link_libraries(transformbench-cuda-parsec PUBLIC MADworld ttg-parsec $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
 
   if (TARGET nvidia::cutlass::cutlass)
     target_include_directories(
