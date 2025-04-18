@@ -155,7 +155,14 @@ namespace mra {
   }
 
   constexpr inline Dim3 max_thread_dims(int K) {
-    return Dim3(K, K, std::min(((MAX_THREADS_PER_BLOCK) / (K*K)), K));
+#if !defined(MRA_ENABLE_HOST)
+    int x = 32;
+    int y = MAX_THREADS_PER_BLOCK / x;
+    int z = 1;
+    return Dim3(x, y, z);
+#else
+    return Dim3(1, 1, 1);
+#endif
   }
 
   constexpr inline int max_threads(int K) {
