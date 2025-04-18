@@ -194,6 +194,8 @@ namespace mra {
     } else {
         printf("mTxmq: Unknown configuration with M = %d, N = %d, K = %d\n", M, N, K);
     }
+    /* make sure all is done */
+    SYNCTHREADS();
   }
 
   template<typename T>
