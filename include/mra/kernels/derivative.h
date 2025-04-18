@@ -243,6 +243,7 @@ namespace mra {
       }
 
     template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void derivative_kernel(
       const Domain<NDIM>& D,
       const Key<NDIM> key,

@@ -56,7 +56,7 @@ namespace mra {
     }
 
     template<typename T, Dimension NDIM>
-    LAUNCH_BOUNDS(max_threads(MAX_THREADS_PER_BLOCK))
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
       size_type N,
