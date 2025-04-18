@@ -30,19 +30,17 @@ namespace mra {
     constexpr size_type CUBLAS_MAX_MN = 32;
 
     template<typename GEMM>
-    DEVSCOPE void mTxmq_cublasdx_core(auto& a_global_tensor, auto& b_global_tensor, auto& c_global_tensor,
-                                        auto& a_shared_tensor, auto& b_shared_tensor, auto& c_shared_tensor,
-                                        bool load_a = true, bool load_b = true) {
+    __device__ void mTxmq_cublasdx_core(auto& a_shared_tensor, auto& b_shared_tensor,
+                                        auto& c_shared_tensor, auto& c_global_tensor,
+                                        auto&& load = [](){}, auto prefetch = [](){}) {
 
-      /* copy to shared memory */
-      using alignment = cublasdx::alignment_of<GEMM>;
-      if (load_a) {
-        cublasdx::copy<GEMM, alignment::a>(a_global_tensor, a_shared_tensor);
-      }
-      if (load_b) {
-        cublasdx::copy<GEMM, alignment::b>(b_global_tensor, b_shared_tensor);
-      }
+      /* load data to shared memory */
+      load();
+      /* wait for load to complete */
       cublasdx::copy_wait();
+
+      /* prefetch data for next iteration */
+      prefetch();
 
       // Execute using register API
       auto [c_register_fragment, partitioner] = GEMM().execute(a_shared_tensor, b_shared_tensor);
@@ -79,7 +77,7 @@ namespace mra {
     }
 
     template<size_type M, size_type N, size_type K, typename aT, typename bT, typename cT>
-    DEVSCOPE void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
+    __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
       constexpr auto blockdims = mra::max_thread_dims(K);
       extern SHARED __align__(16) char smem[];
 
@@ -116,8 +114,9 @@ namespace mra {
           // Make global memory tensors
           auto a_global_tensor = cublasdx::make_tensor(a+(i*CUBLAS_MAX_MN),     GEMM::get_layout_gmem_a(cute::Int<M>{}));
           auto c_global_tensor = cublasdx::make_tensor(c+(i*(CUBLAS_MAX_MN*N)), GEMM::get_layout_gmem_c());
-          mTxmq_cublasdx_core<GEMM>(a_global_tensor, b_global_tensor, c_global_tensor,
-                                    a_shared_tensor, b_shared_tensor, true, false);
+          mTxmq_cublasdx_core<GEMM>(a_shared_tensor, b_shared_tensor,
+                                    c_shared_tensor, c_global_tensor,
+                                    [&](){ cublasdx::copy<GEMM, alignment::a>(a_global_tensor, a_shared_tensor); });
         }
 
         /* handle remainder */
@@ -129,7 +128,7 @@ namespace mra {
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Function<cublasdx::function::MM>()
                               + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
-                              + cublasdx::SM<MRA_CUBLASDX_SM>() // TODO
+                              + cublasdx::SM<MRA_CUBLASDX_SM>()
                               + cublasdx::Block()
                               + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                               + cublasdx::MaxAlignment()
@@ -140,8 +139,9 @@ namespace mra {
           auto a_shared_tensor = cublasdx::make_tensor(smem_a, GEMM::suggest_layout_smem_a());
           auto a_global_tensor = cublasdx::make_tensor(a+((M/CUBLAS_MAX_MN)*CUBLAS_MAX_MN),   GEMM::get_layout_gmem_a(cute::Int<M>{}));
           auto c_global_tensor = cublasdx::make_tensor(c+((M/CUBLAS_MAX_MN)*CUBLAS_MAX_MN*N), GEMM::get_layout_gmem_c());
-          mTxmq_cublasdx_core<GEMM>(a_global_tensor, b_global_tensor, c_global_tensor,
-                                    a_shared_tensor, b_shared_tensor, c_shared_tensor, true, true);
+          mTxmq_cublasdx_core<GEMM>(a_shared_tensor, b_shared_tensor,
+                                    c_shared_tensor, c_global_tensor,
+                                    [&](){ cublasdx::copy<GEMM, alignment::a>(a_global_tensor, a_shared_tensor); });
         }
       } else {
         // TODO: implement!
@@ -152,7 +152,7 @@ namespace mra {
   } // namespace detail
 
   template <typename aT, typename bT, typename cT>
-  DEVSCOPE void mTxmq(long dimi, long dimj, long dimk,
+  __device__ void mTxmq(long dimi, long dimj, long dimk,
                         cT* c, const aT* a, const bT* b) {
     int M = dimi;
     int N = dimj;
@@ -201,7 +201,6 @@ namespace mra {
   template<typename T>
   constexpr size_type mTxmq_shmem_size(size_type K) {
     switch (K) {
-      /* TODO: assume GEMM for compressed form, so 2K */
       case 6: return detail::cublasdx_shmem_size_k<T, 6>();
       case 8: return detail::cublasdx_shmem_size_k<T, 8>();
       case 10: return detail::cublasdx_shmem_size_k<T, 10>();
