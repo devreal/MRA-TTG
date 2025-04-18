@@ -70,7 +70,7 @@ if (HAVE_CUDA)
   if (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
     add_executable(mxm-test-cuda tests/mxm_test.cu)
     target_link_libraries(mxm-test-cuda PUBLIC CUDA::cublas libmra-cuda-parsec)
-  endif (TARGET CUDA::cublas)
+  endif (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
 endif (HAVE_CUDA)
 
 if (HAVE_HIP)
