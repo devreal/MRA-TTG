@@ -76,6 +76,9 @@ if (HAVE_CUDA)
   add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
+  add_executable(transformbench-cuda-parsec benchmarks/transformbench/transformbench.cu)
+  target_link_libraries(transformbench-cuda-parsec PUBLIC libmra-cuda-parsec)
+
   find_package(CUDAToolkit)
   if (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
     add_executable(mxm-test-cuda tests/mxm_test.cu)
