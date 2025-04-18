@@ -9,13 +9,15 @@ using namespace mra;
 
 
 template<typename T, mra::Dimension NDIM>
-void test_pcr(std::size_t N, std::size_t K, int max_level) {
+void test_pcr(std::size_t N, std::size_t K, int max_level, int seed) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
 
-  srand48(5551212); // for reproducible results
-  for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
+  if (seed > 0) {
+    srand48(seed);
+    for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
+  }
 
   auto pmap = PartitionKeymap<NDIM>(); // process map
   auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
@@ -29,10 +31,19 @@ void test_pcr(std::size_t N, std::size_t K, int max_level) {
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
   // T expnt = 1000.0;
   for (int i = 0; i < N; ++i) {
-    T expnt = 1500 + 1500*drand48();
+    T expnt;
+    if (seed > 0) {
+      expnt = 1500 + 1500*drand48();
+    } else {
+      expnt = 1500;
+    }
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = T(-6.0) + T(12.0)*drand48();
+      if (seed > 0) {
+        r[d] = T(-6.0) + T(12.0)*drand48();
+      } else {
+        r[d] = 0.0;
+      }
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
@@ -96,12 +107,13 @@ int main(int argc, char **argv) {
   size_type K = opt.parse("-K", 10);
   int max_level = opt.parse("-l", -1);
   int cores   = opt.parse("-c", -1); // -1: use all cores
+  int seed    = opt.parse("-s", 5551212); // seed for random number generator, 0 for deterministic
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
   allocator_init(argc, argv);
 
-  test_pcr<double, 3>(N, K, max_level);
+  test_pcr<double, 3>(N, K, max_level, seed);
 
   allocator_fini();
   ttg::finalize();
