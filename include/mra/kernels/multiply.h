@@ -2,9 +2,12 @@
 #define MRA_KERNELS_MULTIPLY_H
 
 #include "mra/misc/maxk.h"
+#include "mra/misc/key.h"
+#include "mra/misc/domain.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
+#include "mra/kernels/transform.h"
 
 namespace mra {
 
@@ -105,6 +108,21 @@ namespace mra {
         phiT, phibar, key, N, K));
     checkSubmit();
   }
+
+  /* explicit instanatiation */
+  extern template
+  void submit_multiply_kernel<double, 3>(
+    const Domain<3>& D,
+    const TensorView<double, 3+1>& funcA,
+    const TensorView<double, 3+1>& funcB,
+    TensorView<double, 3+1>& funcR,
+    const TensorView<double, 2>& phiT,
+    const TensorView<double, 2>& phibar,
+    size_type N,
+    size_type K,
+    const Key<3>& key,
+    double* tmp,
+    ttg::device::Stream stream);
 
 } // namespace mra
 

@@ -25,6 +25,8 @@ constexpr const ttg::ExecutionSpace Space = ttg::ExecutionSpace::CUDA;
 #define TASKTYPE ttg::device::Task
 constexpr const ttg::ExecutionSpace Space = ttg::ExecutionSpace::HIP;
 #endif
+#else
+#error One of MRA_ENABLE_HOST, MRA_ENABLE_CUDA, or MRA_ENABLE_HIP must be defined.
 #endif
 
 namespace mra {
