@@ -34,6 +34,12 @@ namespace mra {
       Key<NDIM> key,
       size_type K)
     {
+      // ### Draft
+      // compare the keys of nodeA and nodeB to determine difference in level say n;
+      // project the finer node 1 level and coarser node n+1 to have same common level
+      // convert to function values, multiply function values, convert back to coefficients
+      // project both nodes one level up.
+
       // convert coeffs to function values
       transform(nodeA, phiT, r1, workspace);
       transform(nodeB, phiT, r2, workspace);
