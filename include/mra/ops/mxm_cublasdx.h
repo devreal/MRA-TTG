@@ -30,8 +30,7 @@ namespace mra {
     constexpr size_type CUBLAS_MAX_MN = 64;
 
     template<typename GEMM>
-    __device__ void mTxmq_cublasdx_core(auto& a_shared_tensor, auto& b_shared_tensor,
-                                        auto& c_shared_tensor, auto& c_global_tensor,
+    __device__ void mTxmq_cublasdx_core(auto& a_shared_tensor, auto& b_shared_tensor, auto& c_global_tensor,
                                         auto&& load = [](){}, auto&& prefetch = [](){}) {
 
       using alignment = cublasdx::alignment_of<GEMM>;
