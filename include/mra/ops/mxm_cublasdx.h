@@ -69,16 +69,16 @@ namespace mra {
     template<typename GEMM>
     constexpr size_type cublasdx_shmem_size_for(bool block_a, bool block_b, bool block_c) {
       auto calc = cublasdx::make_shared_storage_calc()
-                  .add(cublasdx::alignment_of_v_a<GEMM>, sizeof(GEMM::a_value_type), GEMM::suggest_layout_smem_a())
-                  .add(cublasdx::alignment_of_v_b<GEMM>, sizeof(GEMM::b_value_type), GEMM::suggest_layout_smem_b());
+                  .add(cublasdx::alignment_of_v_a<GEMM>, sizeof(typename GEMM::a_value_type), GEMM::suggest_layout_smem_a())
+                  .add(cublasdx::alignment_of_v_b<GEMM>, sizeof(typename GEMM::b_value_type), GEMM::suggest_layout_smem_b());
       if (block_a) {
-        calc.add(cublasdx::alignment_of_v_a<GEMM>, sizeof(GEMM::a_value_type), GEMM::suggest_layout_smem_a());
+        calc.add(cublasdx::alignment_of_v_a<GEMM>, sizeof(typename GEMM::a_value_type), GEMM::suggest_layout_smem_a());
       }
       if (block_b) {
-        calc.add(cublasdx::alignment_of_v_b<GEMM>, sizeof(GEMM::b_value_type), GEMM::suggest_layout_smem_b());
+        calc.add(cublasdx::alignment_of_v_b<GEMM>, sizeof(typename GEMM::b_value_type), GEMM::suggest_layout_smem_b());
       }
       if (block_c) {
-        calc.add(cublasdx::alignment_of_v_c<GEMM>, sizeof(GEMM::c_value_type), GEMM::suggest_layout_smem_c());
+        calc.add(cublasdx::alignment_of_v_c<GEMM>, sizeof(typename GEMM::c_value_type), GEMM::suggest_layout_smem_c());
       }
 
       size_type shared_memory_size = calc.get();
