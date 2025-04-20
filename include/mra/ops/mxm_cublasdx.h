@@ -148,7 +148,7 @@ namespace mra {
             // Make global memory tensors
             auto a_shared_tensor = cublasdx::make_tensor(smem_a_1, GEMM::suggest_layout_smem_a());
             auto a_global_tensor = cublasdx::make_tensor(a+(i*CUBLAS_MAX_MN),     GEMM::get_layout_gmem_a(cute::Int<M>{}));
-            auto c_global_tensor = c+((i*CUBLAS_MAX_MN)*N), GEMM::get_layout_gmem_c());
+            auto c_global_tensor = cublasdx::make_tensor(c+((i*CUBLAS_MAX_MN)*N), GEMM::get_layout_gmem_c());
             mTxmq_cublasdx_core<GEMM>(a_shared_tensor, b_shared_tensor, c_global_tensor,
                                       [&](){
                                         /* load only on first iteration, all others are prefetched */
