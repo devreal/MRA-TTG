@@ -593,8 +593,10 @@ int main(int argc, char **argv) {
             << N << " functions, " << K << " coefficients, " << M << " blocks"
             << std::endl;
   ttg::initialize(argc, argv);
+  allocator_init(argc, argv);
 
   transform_bench(nreps, ntasks, N, M, K, blas_type);
 
+  allocator_fini();
   ttg::finalize();
 }
