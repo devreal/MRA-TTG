@@ -112,7 +112,7 @@ namespace mra {
                           + cublasdx::Type<cublasdx::type::real>()
                           + cublasdx::Function<cublasdx::function::MM>()
                           + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
-                          + cublasdx::SM<MRA_CUBLASDX_SM>() // TODO
+                          + cublasdx::SM<MRA_CUBLASDX_SM>()
                           + cublasdx::Block()
                           + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
                           + cublasdx::MaxAlignment()
