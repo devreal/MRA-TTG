@@ -29,6 +29,9 @@ set(TTG_FETCH_BOOST OFF)
 set(TTG_PARSEC_USE_BOOST_SERIALIZATION OFF)
 set(TTG_EXAMPLES ON) # to pull in TA
 
+# needed for tests
+set(MADNESS_BUILD_MADWORLD_ONLY OFF)
+
 option(MRA_ENABLE_ASAN "Whether to enable address sanitizer" OFF)
 if (MRA_ENABLE_ASAN)
     add_compile_options(-fsanitize=address)
