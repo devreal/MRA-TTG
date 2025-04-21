@@ -57,13 +57,15 @@ namespace mra{
         mra::apply_leaf_info(out, t1, t2);
         const auto& phibar = functiondata.get_phibar();
         const auto& phiT = functiondata.get_phiT();
+        const auto& phi = functiondata.get_phi();
+        const auto& quad_x = functiondata.get_quad_x();
         const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*N;
         ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
         auto norms = FunctionNorms(name, t1, t2, out);
 
   #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer(), phibar.buffer(), phiT.buffer(),
-                                        tmp_scratch, norms.buffer());
+                                        phi.buffer(), quad_x.buffer(), tmp_scratch, norms.buffer());
         // if (!t1.empty()) {
         //   input.add(t1.coeffs().buffer());
         // }
@@ -79,11 +81,13 @@ namespace mra{
 
         auto phiT_view = phiT.current_view();
         auto phibar_view = phibar.current_view();
+        auto phi_view = phi.current_view();
+        auto quad_x_view = quad_x.current_view();
         auto& D = *db.current_device_ptr();
         T* tmp_device = tmp_scratch.current_device_ptr();
 
-        submit_multiply_kernel(D, t1_view, t2_view, out_view, phiT_view, phibar_view,
-                            N, K, key, tmp_device, ttg::device::current_stream());
+        submit_multiply_kernel(D, t1_view, t2_view, out_view, phi_view, phiT_view, phibar_view,
+                            quad_x_view, N, K, key, tmp_device, ttg::device::current_stream());
 
         norms.compute();
 #ifndef MRA_ENABLE_HOST
