@@ -30,7 +30,7 @@ set(TTG_PARSEC_USE_BOOST_SERIALIZATION OFF)
 set(TTG_EXAMPLES ON) # to pull in TA
 
 # needed for tests
-set(MADNESS_BUILD_MADWORLD_ONLY OFF)
+set(MADNESS_BUILD_MADWORLD_ONLY OFF CACHE BOOL "Whether to build MADNESS runtime only")
 
 option(MRA_ENABLE_ASAN "Whether to enable address sanitizer" OFF)
 if (MRA_ENABLE_ASAN)
