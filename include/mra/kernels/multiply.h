@@ -48,20 +48,6 @@ namespace mra {
           scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
           cnodeA[i] *= scale;
         }
-
-
-        // fcube_for_mul(D, keyA, keyB.right_child(), nodeB, rcnodeB, phibar, phi, quad_x, K, workspace);
-        // T scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
-        // rcnodeB *= scale;
-        // fcube_for_mul(D, keyA, keyB.left_child(), nodeB, lcnodeB, phibar, phi, quad_x, K, workspace);
-        // scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.left_child().level())));
-        // lcnodeB *= scale;
-        // fcube_for_mul(D, keyA, keyA.right_child(), nodeA, rcnodeA, phibar, phi, quad_x, K, workspace);
-        // scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
-        // rcnodeA *= scale;
-        // fcube_for_mul(D, keyA, keyA.left_child(), nodeA, lcnodeA, phibar, phi, quad_x, K, workspace);
-        // scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.left_child().child.level())));
-        // lcnodeA *= scale;
       }
       else if (keyB.level() <= keyB.level()){
         T scale;
@@ -74,34 +60,18 @@ namespace mra {
           scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
           cnodeA[i] *= scale;
         }
-
-        // fcube_for_mul(D, keyB, keyA.right_child(), nodeA, rcnodeA, phibar, phi, quad_x, K, workspace);
-        // T scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
-        // rcnodeA *= scale;
-        // fcube_for_mul(D, keyB, keyA.left_child(), nodeA, lcnodeA, phibar, phi, quad_x, K, workspace);
-        // scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.left_child().level())));
-        // lcnodeA *= scale;
-        // fcube_for_mul(D, keyB, keyB.right_child(), nodeB, rcnodeB, phibar, phi, quad_x, K, workspace);
-        // scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
-        // rcnodeB *= scale;
-        // fcube_for_mul(D, keyB, keyB.left_child(), nodeB, lcnodeB, phibar, phi, quad_x, K, workspace);
-        // scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.left_child().child.level())));
-        // lcnodeB *= scale;
-
-        // fcube_for_mul() returns function values evaluated at quadrature points
       }
-      foreach_idx(nodeA, [&](size_type i) {
+
+      // fcube_for_mul() returns function values evaluated at quadrature points
+      for (int i=0; i< keyA.num_children(); ++i)
         foreach_idx(cnodeA[i], [&](size_type j) {
           cnodeA[i][j] = cnodeA[i][j] * cnodeB[i][j];
       });
-    });
 
       // convert back to coeffs
       foreach_idx(nodeA, [&](size_type i) {
         transform(cnodeA[i], phibar, r1[i], workspace);
     });
-      // transform(lcnodeA, phibar, r1, workspace);
-      // transform(rcnodeA, phibar, r2, workspace);
 
       // compress the result to nodeR
     }
