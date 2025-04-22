@@ -69,11 +69,11 @@ namespace mra {
       });
 
       // convert back to coeffs
-      foreach_idx(nodeA, [&](size_type i) {
+      foreach_idx(cnodeA, [&](size_type i) {
         transform(cnodeA[i], phibar, r1[i], workspace);
     });
 
-      // compress the result to nodeR
+      // compress the result(r1 which is NDIM+1 tensorview) and store scaling functions to nodeR
     }
 
     template <typename T, Dimension NDIM>
