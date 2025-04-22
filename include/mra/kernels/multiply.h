@@ -69,9 +69,9 @@ namespace mra {
       });
 
       // convert back to coeffs
-      foreach_idx(cnodeA, [&](size_type i) {
+      for (int i=0; i< keyA.num_children(); ++i){
         transform(cnodeA[i], phibar, r1[i], workspace);
-    });
+      }
 
       // compress the result(r1 which is NDIM+1 tensorview) and store scaling functions to nodeR
     }
