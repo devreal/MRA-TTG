@@ -37,23 +37,23 @@ namespace mra {
       if (keyA.level() > keyB.level()){
         T scale;
         for (int i=0; i< keyA.num_children(); ++i){
-          fcube_for_mul(D, keyA.child_at(i), keyB.child_at(i), nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
+          fcube_for_mul(D, keyA.child_at(i), keyB, nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
           scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
           cnodeB[i] *= scale;
 
-          fcube_for_mul(D, keyA.child_at[i], keyA.child_at(i), nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
+          fcube_for_mul(D, keyA.child_at(i), keyA, nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
           scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
           cnodeA[i] *= scale;
         }
       }
-      else if (keyB.level() <= keyB.level()){
+      else if (keyA.level() <= keyB.level()){
         T scale;
         for (int i=0; i< keyA.num_children(); ++i){
-          fcube_for_mul(D, keyB.child_at(i), keyA.child_at(i), nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
+          fcube_for_mul(D, keyB.child_at(i), keyA, nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
           scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
           cnodeB[i] *= scale;
 
-          fcube_for_mul(D, keyB.child_at[i], keyB.child_at(i), nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
+          fcube_for_mul(D, keyB.child_at(i), keyB, nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
           scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
           cnodeA[i] *= scale;
         }
