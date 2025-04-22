@@ -55,6 +55,7 @@ namespace mra{
       } else {
         auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);
+        const auto& hgT = functiondata.get_hgT();
         const auto& phibar = functiondata.get_phibar();
         const auto& phiT = functiondata.get_phiT();
         const auto& phi = functiondata.get_phi();
@@ -83,10 +84,11 @@ namespace mra{
         auto phibar_view = phibar.current_view();
         auto phi_view = phi.current_view();
         auto quad_x_view = quad_x.current_view();
+        auto hgT_view = hgT.current_view();
         auto& D = *db.current_device_ptr();
         T* tmp_device = tmp_scratch.current_device_ptr();
 
-        submit_multiply_kernel(D, t1_view, t2_view, out_view, phi_view, phiT_view, phibar_view,
+        submit_multiply_kernel(D, t1_view, t2_view, out_view, hgT_view, phi_view, phiT_view, phibar_view,
                             quad_x_view, N, K, key, tmp_device, ttg::device::current_stream());
 
         norms.compute();
