@@ -34,29 +34,22 @@ namespace mra {
       const TensorView<T, 1>& quad_x,
       size_type K)
     {
-      if (keyA.level() > keyB.level()){
-        T scale;
-        for (int i=0; i< keyA.num_children(); ++i){
-          fcube_for_mul(D, keyA.child_at(i), keyB, nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
-          scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
-          cnodeB[i] *= scale;
+      Key<NDIM> source = keyA, target = keyB;
 
-          fcube_for_mul(D, keyA.child_at(i), keyA, nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
-          scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
-          cnodeA[i] *= scale;
-        }
+      if(keyA.level() > keyB.level()){
+        source = keyB;
+        target = keyA;
       }
-      else if (keyA.level() <= keyB.level()){
-        T scale;
-        for (int i=0; i< keyA.num_children(); ++i){
-          fcube_for_mul(D, keyB.child_at(i), keyA, nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
-          scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
-          cnodeB[i] *= scale;
 
-          fcube_for_mul(D, keyB.child_at(i), keyB, nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
-          scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
-          cnodeA[i] *= scale;
-        }
+      T scale;
+      for (int i=0; i< keyA.num_children(); ++i){
+        fcube_for_mul(D, target.child_at(i), source, nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
+        scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyB.right_child().level())));
+        cnodeB[i] *= scale;
+
+        fcube_for_mul(D, target.child_at(i), target, nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
+        scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*keyA.right_child().level())));
+        cnodeA[i] *= scale;
       }
 
       // fcube_for_mul() returns function values evaluated at quadrature points
