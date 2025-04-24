@@ -14,6 +14,7 @@ namespace mra {
   template<mra::Dimension NDIM>
   SCOPE size_type multiply_tmp_size(size_type K) {
     const size_type K2NDIM = std::pow(K,NDIM);
+    const size_type TWOK2NDIM = std::pow(2*K, NDIM);
     return 32*K2NDIM + 3 * TWOK2NDIM; // workspace, r1*8, cnodeA*8, cnodeB*8,
   }
 
@@ -28,8 +29,8 @@ namespace mra {
       const TensorView<T, NDIM>& nodeB,
       TensorView<T, NDIM+1>& cnodeA,
       TensorView<T, NDIM+1>& cnodeB,
-      TensorView<T, NDIM+1>& cnodeR,
-      TensorView<T, NDIM+1>& cnodeD,
+      TensorView<T, NDIM>& cnodeR,
+      TensorView<T, NDIM>& cnodeD,
       TensorView<T, NDIM>& nodeR,
       TensorView<T, NDIM+1>& r1,
       T* workspace,
@@ -42,20 +43,20 @@ namespace mra {
     {
       Key<NDIM> target;
       if (keyA.level()>keyB.level()) target = keyA;
-      else target = keyB
+      else target = keyB;
       T scale;
 
       for (int i=0; i< keyA.num_children(); ++i){
         auto child = target.child_at(i);
-        fcube_for_mul(D, child, keyB, nodeB, cnodeB[i], phibar, phi, quad_x, K, workspace);
-        fcube_for_mul(D, child, keyA, nodeA, cnodeA[i], phibar, phi, quad_x, K, workspace);
+        fcube_for_mul(D, child, keyB, nodeB, cnodeB(i), phibar, phi, quad_x, K, workspace);
+        fcube_for_mul(D, child, keyA, nodeA, cnodeA(i), phibar, phi, quad_x, K, workspace);
         scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level())));
         cnodeB[i] *= scale;
         cnodeA[i] *= scale;
       }
 
       // fcube_for_mul() returns function values evaluated at quadrature points
-      foreach_idx(cnodeA[i], [&](size_type j) {
+      foreach_idx(cnodeA, [&](size_type i) {
         cnodeA[i] = cnodeA[i] * cnodeB[i];
       });
 
@@ -72,8 +73,8 @@ namespace mra {
       }
 
       transform<NDIM>(cnodeR, hgT, cnodeD, workspace);
-      if (key.level() > 0) {
-        auto child_slice = get_child_slice<NDIM>(key, K, 0);
+      if (keyA.level() > 0) {
+        auto child_slice = get_child_slice<NDIM>(target, K, 0);
         nodeR = cnodeD(child_slice);
       }
     }
@@ -97,16 +98,18 @@ namespace mra {
       size_type N,
       size_type K)
     {
-      SHARED TensorView<T, NDIM> nodeA, nodeB, nodeR, cnodesA, cnodesB, cnodesR, r1;
+      SHARED TensorView<T, NDIM> nodeA, nodeB, nodeR, cnodesR, cnodesD;
+      SHARED TensorView<T, NDIM+1> cnodesA, cnodesB, r1;
       SHARED T* workspace;
       size_type blockId = blockIdx.x;
       if (is_team_lead()){
         const size_type K2NDIM = std::pow(K, NDIM);
+        const size_type TWO2NDIM = std::pow(2, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
         T* block_tmp = &tmp[blockId*multiply_tmp_size<NDIM>(K)];
-        r1        = TensorView<T, NDIM+1>(&block_tmp[       0], K);
-        cnodesA   = TensorView<T, NDIM+1>(&block_tmp[8*K2NDIM], 8, K, K, K);
-        cnodesB   = TensorView<T, NDIM+1>(&block_tmp[16*K2NDIM], 8, K, K, K);
+        r1        = TensorView<T, NDIM+1>(&block_tmp[        0], TWO2NDIM, K, K, K);
+        cnodesA   = TensorView<T, NDIM+1>(&block_tmp[ 8*K2NDIM], TWO2NDIM, K, K, K);
+        cnodesB   = TensorView<T, NDIM+1>(&block_tmp[16*K2NDIM], TWO2NDIM, K, K, K);
         cnodesR   = TensorView<T, NDIM>(&block_tmp  [24*K2NDIM], 2*K, 2*K, 2*K);
         cnodesD   = TensorView<T, NDIM>(&block_tmp  [32*K2NDIM + TWOK2NDIM], 2*K, 2*K, 2*K);
         workspace = &block_tmp[32*K2NDIM + 2*TWOK2NDIM];
