@@ -32,28 +32,40 @@ namespace mra{
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> S1, S2; // to balance trees
 
     auto func = [&, N, K, name](
-              const mra::Key<NDIM>& key,
+              const mra::Key<NDIM>& keyA,
+              const mra::Key<NDIM>& keyB,
               const mra::FunctionsReconstructedNode<T, NDIM>& t1,
               const mra::FunctionsReconstructedNode<T, NDIM>& t2) -> TASKTYPE {
+
+      mra::Key<NDIM> target;
+
+      if (keyA.level() > keyB.level()) target = keyA;
+      else target = keyB;
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(S&& out){
-        sends.push_back(ttg::device::send<0>(key, std::forward<S>(out)));
+        sends.push_back(ttg::device::send<0>(target, std::forward<S>(out)));
       };
 #else
       auto send_out = [&]<typename S>(S&& out){
-        ttg::send<0>(key, std::forward<S>(out));
+        ttg::send<0>(target, std::forward<S>(out));
       };
 #endif
 
+      // If nodeA and nodeB leaf:
+      // call the kernel
+      // If nodeA == non-leaf and nodeB = leaf:
+      //  forward B to leaf nodes in A
+      // If nodeB == non-leaf and nodeA = leaf:
+      //  forward A to leaf nodes in B
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(keyB, N);
         mra::apply_leaf_info(out, t1, t2);
         send_out(std::move(out));
       } else {
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(target, N, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);
         const auto& hgT = functiondata.get_hgT();
         const auto& phibar = functiondata.get_phibar();
@@ -88,8 +100,8 @@ namespace mra{
         auto& D = *db.current_device_ptr();
         T* tmp_device = tmp_scratch.current_device_ptr();
 
-        submit_multiply_kernel(D, t1_view, t2_view, out_view, hgT_view, phi_view, phiT_view, phibar_view,
-                            quad_x_view, N, K, key, tmp_device, ttg::device::current_stream());
+        submit_multiply_kernel(D, keyA, keyB, t1_view, t2_view, out_view, hgT_view, phi_view,
+          phiT_view, phibar_view, quad_x_view, N, K, tmp_device, ttg::device::current_stream());
 
         norms.compute();
 #ifndef MRA_ENABLE_HOST
