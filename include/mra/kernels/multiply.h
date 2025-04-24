@@ -27,8 +27,8 @@ namespace mra {
       const Key<NDIM>& keyB,
       const TensorView<T, NDIM>& nodeA,
       const TensorView<T, NDIM>& nodeB,
-      TensorView<T, NDIM+1>& cnodeA,
-      TensorView<T, NDIM+1>& cnodeB,
+      TensorView<T, NDIM+1>& cnodesA,
+      TensorView<T, NDIM+1>& cnodesB,
       TensorView<T, NDIM>& cnodeR,
       TensorView<T, NDIM>& cnodeD,
       TensorView<T, NDIM>& nodeR,
@@ -48,21 +48,27 @@ namespace mra {
 
       for (int i=0; i< keyA.num_children(); ++i){
         auto child = target.child_at(i);
-        fcube_for_mul(D, child, keyB, nodeB, cnodeB(i), phibar, phi, quad_x, K, workspace);
-        fcube_for_mul(D, child, keyA, nodeA, cnodeA(i), phibar, phi, quad_x, K, workspace);
+        auto cnodeA = cnodesA(i);
+        auto cnodeB = cnodesB(i);
+        fcube_for_mul(D, child, keyB, nodeB, cnodeB, phibar, phi, quad_x, K, workspace);
+        fcube_for_mul(D, child, keyA, nodeA, cnodeA, phibar, phi, quad_x, K, workspace);
         scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level())));
-        cnodeB[i] *= scale;
-        cnodeA[i] *= scale;
+        cnodeB *= scale;
+        cnodeA *= scale;
+        cnodesA(i) = cnodeA;
+        cnodesB(i) = cnodeB;
       }
 
       // fcube_for_mul() returns function values evaluated at quadrature points
-      foreach_idx(cnodeA, [&](size_type i) {
-        cnodeA[i] = cnodeA[i] * cnodeB[i];
+      foreach_idx(cnodesA, [&](size_type i) {
+        cnodesA[i] = cnodesA[i] * cnodesB[i];
       });
 
       // convert back to coeffs
       for (int i=0; i< keyA.num_children(); ++i){
-        transform(cnodeA(i), phibar, r1(i), workspace);
+        auto cnodeA = cnodesA(i);
+        auto r = r1(i);
+        transform(cnodeA, phibar, r, workspace);
       }
 
       // compress the result(r1 which is NDIM+1 tensorview) and store scaling functions to nodeR
