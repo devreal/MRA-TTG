@@ -32,15 +32,9 @@ namespace mra{
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> S1, S2; // to balance trees
 
     auto func = [&, N, K, name](
-              const mra::Key<NDIM>& keyA,
-              const mra::Key<NDIM>& keyB,
+              const mra::Key<NDIM>& key,
               const mra::FunctionsReconstructedNode<T, NDIM>& t1,
               const mra::FunctionsReconstructedNode<T, NDIM>& t2) -> TASKTYPE {
-
-      mra::Key<NDIM> target;
-
-      if (keyA.level() > keyB.level()) target = keyA;
-      else target = keyB;
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
@@ -49,7 +43,7 @@ namespace mra{
       };
 #else
       auto send_out = [&]<typename S>(S&& out){
-        ttg::send<0>(target, std::forward<S>(out));
+        ttg::send<0>(key, std::forward<S>(out));
       };
 #endif
 
@@ -61,11 +55,13 @@ namespace mra{
       //  forward A to leaf nodes in B
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(keyB, N);
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
         mra::apply_leaf_info(out, t1, t2);
         send_out(std::move(out));
       } else {
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(target, N, K, ttg::scope::Allocate);
+        auto keyA = t1.key();
+        auto keyB = t2.key();
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);
         const auto& hgT = functiondata.get_hgT();
         const auto& phibar = functiondata.get_phibar();
@@ -128,18 +124,6 @@ namespace mra{
     return tt;
   }
 
-
-  /* forward a reconstructed function node to the right input of do_compress
-  * this is a device task to prevent data from being pulled back to the host
-  * even though it will not actually perform any computation */
-  template<typename T, mra::Dimension NDIM>
-  static TASKTYPE send_norms_up(const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& node) {
-#ifndef MRA_ENABLE_HOST
-    co_await select_send_up(key, node, std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "send-norms-up");
-#else
-    select_send_up(key, node, std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "send-norms-up");
-#endif
-  }
 } // namespace mra
 
 #endif // MRA_TASKS_MULTIPLY_H
