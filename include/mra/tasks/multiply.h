@@ -39,7 +39,7 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(S&& out){
-        sends.push_back(ttg::device::send<0>(target, std::forward<S>(out)));
+        sends.push_back(ttg::device::send<0>(out, std::forward<S>(out)));
       };
 #else
       auto send_out = [&]<typename S>(S&& out){
