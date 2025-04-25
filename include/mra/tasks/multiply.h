@@ -53,11 +53,18 @@ namespace mra{
       //  forward B to leaf nodes in A
       // If nodeB == non-leaf and nodeA = leaf:
       //  forward A to leaf nodes in B
+
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
-        mra::apply_leaf_info(out, t1, t2);
-        send_out(std::move(out));
+        if(!t1.empty()){
+          auto out = mra::FunctionsReconstructedNode<T, NDIM>(t1.key(), N, K, ttg::scope::Allocate);
+          mra::apply_leaf_info(out, t2);
+          send_out(std::move(out));
+        } else if (!t2.empty()) {
+          auto out = mra::FunctionsReconstructedNode<T, NDIM>(t2.key(), N, K, ttg::scope::Allocate);
+          mra::apply_leaf_info(out, t1);
+          send_out(std::move(out));
+        }
       } else {
         auto keyA = t1.key();
         auto keyB = t2.key();
