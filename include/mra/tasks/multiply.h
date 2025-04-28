@@ -39,7 +39,7 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(S&& out){
-        sends.push_back(ttg::device::send<0>(out, std::forward<S>(out)));
+        sends.push_back(ttg::device::send<0>(key, std::forward<S>(out)));
       };
 #else
       auto send_out = [&]<typename S>(S&& out){
@@ -47,23 +47,28 @@ namespace mra{
       };
 #endif
 
-      // If nodeA and nodeB leaf:
-      // call the kernel
-      // If nodeA == non-leaf and nodeB = leaf:
-      //  forward B to leaf nodes in A
-      // If nodeB == non-leaf and nodeA = leaf:
-      //  forward A to leaf nodes in B
-
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K);
+        out.set_all_leaf(false);
+        send_out(std::move(out));
         if(!t1.empty()){
-          auto out = mra::FunctionsReconstructedNode<T, NDIM>(t1.key(), N, K, ttg::scope::Allocate);
-          mra::apply_leaf_info(out, t2);
-          send_out(std::move(out));
+          std::vector<mra::Key<NDIM>> bcast_keys;
+          for (auto child : children(key)) bcast_keys.push_back(child); // inside if
+
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<1>(std::move(bcast_keys), t1));
+#else
+          ttg::broadcast<1>(bcast_keys, t1);
+#endif
         } else if (!t2.empty()) {
-          auto out = mra::FunctionsReconstructedNode<T, NDIM>(t2.key(), N, K, ttg::scope::Allocate);
-          mra::apply_leaf_info(out, t1);
-          send_out(std::move(out));
+          std::vector<mra::Key<NDIM>> bcast_keys;
+          for (auto child : children(key)) bcast_keys.push_back(child); // inside if
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<2>(std::move(bcast_keys), t2));
+#else
+          ttg::broadcast<2>(bcast_keys, t2);
+#endif
         }
       } else {
         auto keyA = t1.key();
