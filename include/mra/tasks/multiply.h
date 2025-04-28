@@ -39,7 +39,7 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(S&& out){
-        sends.push_back(ttg::device::send<0>(key, std::forward<S>(out)));
+        sends.push_back(ttg::device::send<0>(out, std::forward<S>(out)));
       };
 #else
       auto send_out = [&]<typename S>(S&& out){
@@ -49,7 +49,7 @@ namespace mra{
 
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K);
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
         out.set_all_leaf(false);
         send_out(std::move(out));
         if(!t1.empty()){
