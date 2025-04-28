@@ -39,7 +39,7 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(S&& out){
-        sends.push_back(ttg::device::send<0>(key, std::forward<S>(out)));
+        sends.push_back(ttg::device::send<0>(out, std::forward<S>(out)));
       };
 #else
       auto send_out = [&]<typename S>(S&& out){
@@ -50,20 +50,43 @@ namespace mra{
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
         auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
-        mra::apply_leaf_info(out, t1, t2);
+        out.set_all_leaf(false);
         send_out(std::move(out));
+        if(!t1.empty()){
+          std::vector<mra::Key<NDIM>> bcast_keys;
+          for (auto child : children(key)) bcast_keys.push_back(child); // inside if
+
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<1>(std::move(bcast_keys), t1));
+#else
+          ttg::broadcast<1>(bcast_keys, t1);
+#endif
+        } else if (!t2.empty()) {
+          std::vector<mra::Key<NDIM>> bcast_keys;
+          for (auto child : children(key)) bcast_keys.push_back(child); // inside if
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<2>(std::move(bcast_keys), t2));
+#else
+          ttg::broadcast<2>(bcast_keys, t2);
+#endif
+        }
       } else {
+        auto keyA = t1.key();
+        auto keyB = t2.key();
         auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);
+        const auto& hgT = functiondata.get_hgT();
         const auto& phibar = functiondata.get_phibar();
         const auto& phiT = functiondata.get_phiT();
+        const auto& phi = functiondata.get_phi();
+        const auto& quad_x = functiondata.get_quad_x();
         const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*N;
         ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
         auto norms = FunctionNorms(name, t1, t2, out);
 
   #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(out.coeffs().buffer(), phibar.buffer(), phiT.buffer(),
-                                        tmp_scratch, norms.buffer());
+                                        phi.buffer(), quad_x.buffer(), tmp_scratch, norms.buffer());
         // if (!t1.empty()) {
         //   input.add(t1.coeffs().buffer());
         // }
@@ -79,11 +102,14 @@ namespace mra{
 
         auto phiT_view = phiT.current_view();
         auto phibar_view = phibar.current_view();
+        auto phi_view = phi.current_view();
+        auto quad_x_view = quad_x.current_view();
+        auto hgT_view = hgT.current_view();
         auto& D = *db.current_device_ptr();
         T* tmp_device = tmp_scratch.current_device_ptr();
 
-        submit_multiply_kernel(D, t1_view, t2_view, out_view, phiT_view, phibar_view,
-                            N, K, key, tmp_device, ttg::device::current_stream());
+        submit_multiply_kernel(D, keyA, keyB, t1_view, t2_view, out_view, hgT_view, phi_view,
+          phiT_view, phibar_view, quad_x_view, N, K, tmp_device, ttg::device::current_stream());
 
         norms.compute();
 #ifndef MRA_ENABLE_HOST
@@ -110,18 +136,6 @@ namespace mra{
     return tt;
   }
 
-
-  /* forward a reconstructed function node to the right input of do_compress
-  * this is a device task to prevent data from being pulled back to the host
-  * even though it will not actually perform any computation */
-  template<typename T, mra::Dimension NDIM>
-  static TASKTYPE send_norms_up(const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& node) {
-#ifndef MRA_ENABLE_HOST
-    co_await select_send_up(key, node, std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "send-norms-up");
-#else
-    select_send_up(key, node, std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "send-norms-up");
-#endif
-  }
 } // namespace mra
 
 #endif // MRA_TASKS_MULTIPLY_H
