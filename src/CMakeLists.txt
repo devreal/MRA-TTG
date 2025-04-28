@@ -46,13 +46,17 @@ target_link_libraries(mra-matrixtest PUBLIC libmra-host-parsec)
 if (HAVE_CUDA)
 
   #define a target for CUDA
+  add_library(libmra-cuda-base-parsec INTERFACE)
+  target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_ENABLE_CUDA=1)
+  target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES})
+  target_compile_options(libmra-cuda-base-parsec INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+  target_link_libraries(libmra-cuda-base-parsec INTERFACE libmra-base-parsec
+                                                $<$<TARGET_EXISTS:tiledarray>:tiledarray>
+                                                $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
+
   add_library(libmra-cuda-parsec OBJECT gl.cc twoscale.cc kernels/compress.cu kernels/reconstruct.cu kernels/multiply.cu)
-  target_compile_definitions(libmra-cuda-parsec PUBLIC MRA_ENABLE_CUDA=1)
-  target_compile_definitions(libmra-cuda-parsec PUBLIC MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES})
-  target_compile_options(libmra-cuda-parsec PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-  target_link_libraries(libmra-cuda-parsec PUBLIC libmra-base-parsec
-                                               $<$<TARGET_EXISTS:tiledarray>:tiledarray>
-                                               $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
+  target_link_libraries(libmra-cuda-parsec PUBLIC libmra-cuda-base-parsec)
+
 
   add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
   target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC libmra-cuda-parsec)
@@ -64,12 +68,12 @@ if (HAVE_CUDA)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
   add_executable(transformbench-cuda-parsec benchmarks/transformbench/transformbench.cu)
-  target_link_libraries(transformbench-cuda-parsec PUBLIC libmra-cuda-parsec)
+  target_link_libraries(transformbench-cuda-parsec PUBLIC libmra-cuda-base-parsec)
 
   find_package(CUDAToolkit)
   if (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
     add_executable(mxm-test-cuda tests/mxm_test.cu)
-    target_link_libraries(mxm-test-cuda PUBLIC CUDA::cublas libmra-cuda-parsec)
+    target_link_libraries(mxm-test-cuda PUBLIC CUDA::cublas libmra-cuda-base-parsec)
   endif (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
 endif (HAVE_CUDA)
 
