@@ -54,18 +54,27 @@ namespace mra::detail {
 
 #if defined(__CUDACC__)
 #define checkSubmit() \
-  if (cudaPeekAtLastError() != cudaSuccess)                         \
+  if (cudaPeekAtLastError() != cudaSuccess) {                                           \
+    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": "  \
+    << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;                          \
+  }                                                                                     \
+  assert(cudaPeekAtLastError() == cudaSuccess);
+#define CALL_KERNEL(name, block, thread, shared, stream, args)                          \
+  do {                                                                                  \
+    name<<<block, thread, shared, stream>>> args ;                                      \
+    checkSubmit();                                                                      \
+  } while (0)
+#define checkSubmit()                                                                  \
+  if (hipPeekAtLastError() != hipSuccess) {                                            \
     std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-    << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;
-#define CALL_KERNEL(name, block, thread, shared, stream, args) \
-  name<<<block, thread, shared, stream>>> args
-#elif defined(__HIPCC__)
-#define checkSubmit() \
-  if (hipPeekAtLastError() != hipSuccess)                           \
-    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-    << hipGetErrorString(hipPeekAtLastError()) << std::endl;
-#define CALL_KERNEL(name, block, thread, shared, stream, args) \
-  name<<<block, thread, shared, stream>>> args
+    << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
+  }
+  assert(hipPeekAtLastError() == hipSuccess); \
+#define CALL_KERNEL(name, block, thread, shared, stream, args)  \
+  do {                                                          \
+    name<<<block, thread, shared, stream>>> args;               \
+    checkSubmit();                                              \
+  } while (0)
 #else  // __CUDACC__
 #define checkSubmit() do {} while(0)
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
