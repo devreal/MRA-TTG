@@ -49,10 +49,10 @@ namespace mra {
 
       // Store back to global memory using cublasdx::copy_fragment API
       // TODO: copying directly to global memory leads zero result tensors. WTF?!
-      //cublasdx::copy_fragment<alignment::c>(c_register_fragment, c_global_tensor, partitioner);
 
       cublasdx::copy_fragment<alignment::c>(c_register_fragment, c_shared_tensor, partitioner);
 
+      //GEMM().execute(1.0, a_shared_tensor, b_shared_tensor, 0.0, c_shared_tensor);
       __syncthreads();
 
       // Store data from shared memory tensor to global memory tensor
@@ -121,13 +121,14 @@ namespace mra {
                           + cublasdx::MaxAlignment()
                           + cublasdx::LeadingDimension<M, N, N>());
 
-      //if (is_team_lead()) printf("mTxmq_cublasdx_block: shared_memory %u, smem %p, M = %d, N = %d, K = %d\n", cublasdx::get_shared_storage_size_ab<GEMM>(), smem, M, N, K);
-      //__syncthreads();
       using alignment = cublasdx::alignment_of<GEMM>;
 
       if constexpr (M == K*K) {
+        constexpr auto num_iter = M/CUBLAS_MAX_MN;
+        //if (is_team_lead()) printf("mTxmq_cublasdx_block: shared_memory %u, smem %p, M = %d, N = %d, K = %d iter %d\n", cublasdx_shmem_size_for<GEMM>(true, false, true), smem, M, N, K, num_iter);
+        //__syncthreads();
 
-        if (M > CUBLAS_MAX_MN) {
+        if constexpr (num_iter > 0) {
           auto [smem_a, smem_b, smem_a_n, smem_c] =
             cublasdx::slice_shared_memory_generic<GEMM::a_value_type, GEMM::b_value_type, GEMM::a_value_type, GEMM::c_value_type>(
                 smem,
@@ -141,13 +142,10 @@ namespace mra {
           auto b_shared_tensor = cublasdx::make_tensor(smem_b, GEMM::suggest_layout_smem_b());
           cublasdx::copy<GEMM, alignment::b>(b_global_tensor, b_shared_tensor);
 
-          auto b_shared_tensor = cublasdx::make_tensor(smem_b, GEMM::suggest_layout_smem_b());
-
           auto a_shared_tensor   = cublasdx::make_tensor(smem_a,   GEMM::suggest_layout_smem_a());
           auto a_shared_tensor_n = cublasdx::make_tensor(smem_a_n, GEMM::suggest_layout_smem_a());
           auto c_shared_tensor   = cublasdx::make_tensor(smem_c,   GEMM::suggest_layout_smem_c());
 
-          constexpr auto num_iter = M/CUBLAS_MAX_MN;
           for (int i = 0; i < num_iter; i++) {
             // Make global memory tensors
             auto a_global_tensor = cublasdx::make_tensor(a+(i*CUBLAS_MAX_MN),     GEMM::get_layout_gmem_a(cute::Int<M>{}));
@@ -156,12 +154,14 @@ namespace mra {
                                       [&](){
                                         /* load only on first iteration, all others are prefetched */
                                         if (i == 0) {
+                                          //if (is_team_lead()) printf("Loading initial block %d\n", i);
                                           cublasdx::copy<GEMM, alignment::a>(a_global_tensor, a_shared_tensor);
                                         }
                                       },
                                       [&](){
                                         /* prefetch into shared memory */
                                         if ((i+1) < num_iter) {
+                                          //if (is_team_lead()) printf("Prefetching block %d\n", i);
                                           auto a_global_tensor = cublasdx::make_tensor(a+((i+1)*CUBLAS_MAX_MN), GEMM::get_layout_gmem_a(cute::Int<M>{}));
                                           cublasdx::copy<GEMM, alignment::a>(a_global_tensor, a_shared_tensor_n);
                                         }
