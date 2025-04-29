@@ -83,7 +83,7 @@ real_functor_3d random_gaussian(int seed) {
   const double expntmax = 3000;
   const real_tensor &cell = FunctionDefaults<3>::get_cell();
   coord_3d origin;
-  Random::setstate(seed);
+  default_random_generator.setstate(seed);
   for (int i = 0; i < 3; i++) {
     origin[i] = RandomValue<double>() * (cell(i, 1) - cell(i, 0)) + cell(i, 0);
   }
