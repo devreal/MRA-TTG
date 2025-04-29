@@ -15,6 +15,7 @@ inline void allocator_init(int argc, char **argv) {
   madness::ParsecRuntime::initialize_with_existing_context(ttg::default_execution_context().impl().context());
 #endif // TTG_PARSEC_IMPORTED
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
+  TiledArray::device::Env::initialize(TiledArray::get_default_world(), 1UL<<32, 1UL<<40);
 }
 
 inline void allocator_fini() {

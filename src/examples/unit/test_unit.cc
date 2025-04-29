@@ -14,7 +14,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   D[0].set_cube(-6.0,6.0);
   T g1 = 0;
   T g2 = 0;
-  Dimension axis = 1;
+  Dimension axis = 0;
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator

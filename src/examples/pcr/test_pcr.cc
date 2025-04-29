@@ -31,19 +31,10 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed) {
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
   // T expnt = 1000.0;
   for (int i = 0; i < N; ++i) {
-    T expnt;
-    if (seed > 0) {
-      expnt = 1500 + 1500*drand48();
-    } else {
-      expnt = 1500;
-    }
+    T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      if (seed > 0) {
-        r[d] = T(-6.0) + T(12.0)*drand48();
-      } else {
-        r[d] = 0.0;
-      }
+      r[d] = (seed > 0) ? (T(-6.0) + T(12.0)*drand48()) : 0.0;
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
@@ -105,6 +96,8 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 10);
+  int nrep = opt.parse("-n", 3);
+  bool norand = opt.exists("-norand");
   int max_level = opt.parse("-l", -1);
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int seed    = opt.parse("-s", 5551212); // seed for random number generator, 0 for deterministic
@@ -113,7 +106,13 @@ int main(int argc, char **argv) {
   mra::GLinitialize();
   allocator_init(argc, argv);
 
-  test_pcr<double, 3>(N, K, max_level, seed);
+  /**
+   * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the
+   * with the first key it receives. We need to find a way to do that automatically outside of make_project.
+   */
+  for (int i = 0; i < nrep; ++i) {
+    test_pcr<double, 3>(N, K, max_level, seed);
+  }
 
   allocator_fini();
   ttg::finalize();
