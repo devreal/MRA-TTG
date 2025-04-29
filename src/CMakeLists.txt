@@ -17,7 +17,7 @@ target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
 add_executable(mad-pcr
                examples/pcr/test_pcr_madness.cc)
 target_link_libraries(mad-pcr PUBLIC MADchem)
-target_include_directories(mad-pcr INTERFACE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(mad-pcr PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 
 add_executable(mad-pcr
