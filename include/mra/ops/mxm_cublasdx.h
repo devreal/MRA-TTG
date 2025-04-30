@@ -126,7 +126,7 @@ namespace mra {
     __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
       constexpr auto blockdims = mra::max_thread_dims(K);
       extern SHARED __align__(16) char smem[];
-      constexpr auto max_mn = cublasdx_max_mn<T, K>();
+      constexpr auto max_mn = cublasdx_max_mn<cT, K>();
       using GEMM = decltype(cublasdx::Size<std::min(max_mn, M), std::min(max_mn, N), K>()
                           + cublasdx::Precision<cT>()
                           + cublasdx::Type<cublasdx::type::real>()
