@@ -6,6 +6,8 @@
 
 #if __has_include(<cublasdx.hpp>)
 
+#define MRA_HAVE_CUBLASDX 1
+
 #if !defined(MRA_CUDA_ARCH) || MRA_CUDA_ARCH < 70
 #error "MRA_CUDA_ARCH must be defined and >= 70 to use cublasdx"
 #endif
@@ -14,10 +16,13 @@
 
 #if MRA_CUDA_ARCH == 70
 #define MRA_CUBLASDX_SM 700
+#define MRA_CUBLASDX_MAX_SHM (30*1024)
 #elif MRA_CUDA_ARCH == 80
 #define MRA_CUBLASDX_SM 800
+#define MRA_CUBLASDX_MAX_SHM (80*1024)
 #elif MRA_CUDA_ARCH == 90
 #define MRA_CUBLASDX_SM 900
+#define MRA_CUBLASDX_MAX_SHM (110*1024)
 #else
 #warning "Unknown MRA_CUDA_ARCH for cublasdx, using 80"
 #define MRA_CUBLASDX_SM 800
@@ -28,7 +33,6 @@ namespace mra {
   namespace detail {
 
     constexpr size_type CUBLAS_MIN_MN = 16;
-    constexpr size_type MAX_SHMEM_BYTES = 48*1024; // devices have possibly more but CUDA limits this to 48kB without explicit increases
 
     template<typename T, size_type K>
     constexpr size_type cublasdx_max_mn() {
@@ -38,7 +42,7 @@ namespace mra {
                 + K*K    // buffering for B/A
                )*sizeof(T);
       };
-      while (size(max_mn) < MAX_SHMEM_BYTES/2) {
+      while (size(max_mn*2) <= MRA_CUBLASDX_MAX_SHM) {
         max_mn *= 2;
       }
       return max_mn;
@@ -123,7 +127,7 @@ namespace mra {
     }
 
     template<size_type M, size_type N, size_type K, typename aT, typename bT, typename cT>
-    __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b) {
+    __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b, bool all_shared = false) {
       constexpr auto blockdims = mra::max_thread_dims(K);
       extern SHARED __align__(16) char smem[];
       constexpr auto max_mn = cublasdx_max_mn<cT, K>();
@@ -140,6 +144,15 @@ namespace mra {
 
       using alignment = cublasdx::alignment_of<GEMM>;
 
+      if (all_shared) {
+        auto a_shared_tensor   = cublasdx::make_tensor(a,   GEMM::suggest_layout_smem_a());
+        auto b_shared_tensor   = cublasdx::make_tensor(b,   GEMM::suggest_layout_smem_b());
+        auto c_shared_tensor   = cublasdx::make_tensor(c,   GEMM::suggest_layout_smem_c());
+        mTxmq_cublasdx_core<GEMM>(a_shared_tensor, b_shared_tensor, c_shared_tensor,
+                                  [](){}, [](){});
+        return;
+      }
+
       if constexpr (M == K*K) {
         constexpr auto num_iter = M/max_mn;
         //if (is_team_lead()) printf("mTxmq_cublasdx_block: shared_memory %u, smem %p, M = %d, N = %d, K = %d iter %d\n", cublasdx_shmem_size_for<GEMM>(true, false, true), smem, M, N, K, num_iter);
@@ -147,7 +160,8 @@ namespace mra {
 
         if constexpr (num_iter > 0) {
           auto [smem_a, smem_b, smem_a_n, smem_c, smem_c_n] =
-            cublasdx::slice_shared_memory_generic<GEMM::a_value_type, GEMM::b_value_type, GEMM::a_value_type, GEMM::c_value_type, GEMM::c_value_type>(
+            cublasdx::slice_shared_memory_generic<GEMM::a_value_type, GEMM::b_value_type, GEMM::a_value_type,
+                                                  GEMM::c_value_type, GEMM::c_value_type>(
                 smem,
                 cute::make_tuple(cublasdx::cosize(GEMM::suggest_layout_smem_a()), cublasdx::alignment_of_v_a<GEMM>),
                 cute::make_tuple(cublasdx::cosize(GEMM::suggest_layout_smem_b()), cublasdx::alignment_of_v_b<GEMM>),
@@ -247,24 +261,24 @@ namespace mra {
 
   template <typename aT, typename bT, typename cT>
   __device__ void mTxmq(long dimi, long dimj, long dimk,
-                        cT* c, const aT* a, const bT* b) {
+                        cT* c, const aT* a, const bT* b, bool all_shared = false) {
     int M = dimi;
     int N = dimj;
     int K = dimk;
     if (M == K*K) {
       // A is tall and skinny, B is square
       if (K == 6) {
-        detail::mTxmq_cublasdx_block<36, 6, 6>(c, a, b);
+        detail::mTxmq_cublasdx_block<36, 6, 6>(c, a, b, all_shared);
       } else if (K == 8) {
-        detail::mTxmq_cublasdx_block<64, 8, 8>(c, a, b);
+        detail::mTxmq_cublasdx_block<64, 8, 8>(c, a, b, all_shared);
       } else if (K == 10) {
-        detail::mTxmq_cublasdx_block<100, 10, 10>(c, a, b);
+        detail::mTxmq_cublasdx_block<100, 10, 10>(c, a, b, all_shared);
       } else if (K == 12) {
-        detail::mTxmq_cublasdx_block<12*12, 12, 12>(c, a, b);
+        detail::mTxmq_cublasdx_block<12*12, 12, 12>(c, a, b, all_shared);
       } else if (K == 16) {
-        detail::mTxmq_cublasdx_block<16*16, 16, 16>(c, a, b);
+        detail::mTxmq_cublasdx_block<16*16, 16, 16>(c, a, b, all_shared);
       } else if (K == 20) {
-        detail::mTxmq_cublasdx_block<400, 20, 20>(c, a, b);
+        detail::mTxmq_cublasdx_block<400, 20, 20>(c, a, b, all_shared);
       } else {
         if (is_team_lead()) printf("mTxmq: Unsupport K = %d\n", K);
       }

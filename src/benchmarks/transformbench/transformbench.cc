@@ -255,7 +255,9 @@ GLOBALSCOPE void transform_kernel(int N, TensorView<T, 3+1> A, TensorView<T, 2+1
 template<typename T>
 static void submit_transform_bench(int N, int M, int K, TensorView<T, 3+1> A, TensorView<T, 2+1> B, TensorView<T, 3+1> C, TensorView<T, 3+1> workspace) {
   Dim3 thread_dims = max_thread_dims(K);
-  CALL_KERNEL(transform_kernel, std::min(N, M), thread_dims, mTxmq_shmem_size<T>(K), ttg::device::current_stream(), (N, A, B, C, workspace));
+  auto smem_size = mTxmq_shmem_size<T>(K);
+  CONFIGURE_KERNEL(transform_kernel<T>, smem_size);
+  CALL_KERNEL(transform_kernel, std::min(N, M), thread_dims, smem_size, ttg::device::current_stream(), (N, A, B, C, workspace));
   checkSubmit();
 }
 
