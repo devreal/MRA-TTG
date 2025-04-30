@@ -67,19 +67,19 @@ namespace mra::detail {
     }                                                                                   \
     checkSubmit();                                                                      \
   } while (0)
-
-#define CONFIGURE_KERNEL(name, shared)                                                  \
-  do {                                                                                  \
-    static size_type smem_size_config = 0;                                              \
-    if (smem_size_config < shared) {                                                    \
-      cudaFuncSetAttribute(name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
-      if (cudaPeekAtLastError() != cudaSuccess) {                                       \
-        std::cout << "kernel configuration failed with " << shared << "B smem at "      \
-                  << __FILE__ << ":" << __LINE__ << ": "                                \
-                  << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;            \
-        throw std::runtime_error("kernel configuration failed");                        \
-      }                                                                                 \
-    }                                                                                   \
+#elif defined(__HIP__)
+#define checkSubmit()                                                                    \
+  do {
+    if (hipPeekAtLastError() != hipSuccess) {                                            \
+      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
+      << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
+    }                                                                                    \
+    assert(hipPeekAtLastError() == hipSuccess);                                          \
+  } while(0)
+#define CALL_KERNEL(name, block, thread, shared, stream, args)  \
+  do {                                                          \
+    name<<<block, thread, shared, stream>>> args;               \
+    checkSubmit();                                              \
   } while (0)
 
 #elif defined(__HIP__)
