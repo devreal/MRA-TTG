@@ -314,6 +314,7 @@ namespace mra {
     auto smem_size = std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
                               mTxmq_shmem_size<T>(2*K));
 
+    CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::derivative_kernel, N, thread_dims, smem_size, stream,
       (D, key, left, center, right, node_left, node_center, node_right, operators,
         deriv, phi, phibar, quad_x, tmp, N, K, g1, g2, axis, bc_left, bc_right));
