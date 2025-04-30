@@ -38,7 +38,7 @@ namespace mra {
                 + K*K   // buffering for B/A
                )*sizeof(T);
       };
-      while (max_mn(max_mn) < MAX_SHMEM_BYTES/2) {
+      while (size(max_mn) < MAX_SHMEM_BYTES/2) {
         max_mn *= 2;
       }
       return max_mn;
