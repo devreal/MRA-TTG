@@ -8,6 +8,8 @@
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/kernels/transform.h"
+#include "mra/kernels/fcube_for_mul.h"
+#include "mra/tensor/child_slice.h"
 
 namespace mra {
 
