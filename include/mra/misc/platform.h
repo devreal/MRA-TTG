@@ -65,12 +65,14 @@ namespace mra::detail {
     checkSubmit();                                                                      \
   } while (0)
 #elif defined(__HIP__)
-#define checkSubmit()                                                                  \
-  if (hipPeekAtLastError() != hipSuccess) {                                            \
-    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-    << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
-  }                                                                                    \
-  assert(hipPeekAtLastError() == hipSuccess);                                          \
+#define checkSubmit()                                                                    \
+  do {
+    if (hipPeekAtLastError() != hipSuccess) {                                            \
+      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
+      << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
+    }                                                                                    \
+    assert(hipPeekAtLastError() == hipSuccess);                                          \
+  } while(0)
 #define CALL_KERNEL(name, block, thread, shared, stream, args)  \
   do {                                                          \
     name<<<block, thread, shared, stream>>> args;               \
