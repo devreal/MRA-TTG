@@ -33,9 +33,9 @@ namespace mra {
     template<typename T, size_type K>
     constexpr size_type cublasdx_max_mn() {
       size_type max_mn = CUBLAS_MIN_MN;
-      auto size = [](size_type K){
-        return (K*K*K*4 // double buffering for A/B and C
-                + K*K   // buffering for B/A
+      auto size = [](size_type k){
+        return (k*k*k*4 // double buffering for A/B and C
+                + k*k   // buffering for B/A
                )*sizeof(T);
       };
       while (size(max_mn) < MAX_SHMEM_BYTES/2) {
