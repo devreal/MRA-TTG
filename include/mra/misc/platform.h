@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <iostream>
 
 #if defined(MRA_ENABLE_CUDA)
 #include <cuda.h>
@@ -34,14 +35,14 @@ namespace mra::detail {
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
 #define SHARED __shared__
-#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT)
+#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #elif defined(__HIP__)
 #define SCOPE __device__ __host__
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
 #define SHARED __shared__
-#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT)
+#define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #else // __CUDA_ARCH__
 #define SCOPE
@@ -53,18 +54,30 @@ namespace mra::detail {
 
 #if defined(__CUDACC__)
 #define checkSubmit() \
-  if (cudaPeekAtLastError() != cudaSuccess)                         \
-    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-    << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;
-#define CALL_KERNEL(name, block, thread, shared, stream, args) \
-  name<<<block, thread, shared, stream>>> args
-#elif defined(__HIPCC__)
-#define checkSubmit() \
-  if (hipPeekAtLastError() != hipSuccess)                           \
-    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-    << hipGetErrorString(hipPeekAtLastError()) << std::endl;
-#define CALL_KERNEL(name, block, thread, shared, stream, args) \
-  name<<<block, thread, shared, stream>>> args
+  if (cudaPeekAtLastError() != cudaSuccess) {                                           \
+    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": "  \
+    << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;                          \
+  }                                                                                     \
+  assert(cudaPeekAtLastError() == cudaSuccess);
+#define CALL_KERNEL(name, block, thread, shared, stream, args)                          \
+  do {                                                                                  \
+    name<<<block, thread, shared, stream>>> args ;                                      \
+    checkSubmit();                                                                      \
+  } while (0)
+#elif defined(__HIP__)
+#define checkSubmit()                                                                    \
+  do {
+    if (hipPeekAtLastError() != hipSuccess) {                                            \
+      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
+      << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
+    }                                                                                    \
+    assert(hipPeekAtLastError() == hipSuccess);                                          \
+  } while(0)
+#define CALL_KERNEL(name, block, thread, shared, stream, args)  \
+  do {                                                          \
+    name<<<block, thread, shared, stream>>> args;               \
+    checkSubmit();                                              \
+  } while (0)
 #else  // __CUDACC__
 #define checkSubmit() do {} while(0)
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
@@ -97,7 +110,7 @@ namespace mra::detail {
 #if defined(MRA_ENABLE_HOST)
 #define MAX_THREADS_PER_BLOCK 1
 #else
-#define MAX_THREADS_PER_BLOCK 1024
+#define MAX_THREADS_PER_BLOCK 512
 #endif
 
 #if defined(MRA_ENABLE_HOST)
@@ -154,7 +167,14 @@ namespace mra {
   }
 
   constexpr inline Dim3 max_thread_dims(int K) {
-    return Dim3(K, K, std::min(((MAX_THREADS_PER_BLOCK) / (K*K)), K));
+#if !defined(MRA_ENABLE_HOST)
+    int x = 32;
+    int y = MAX_THREADS_PER_BLOCK / x;
+    int z = 1;
+    return Dim3(x, y, z);
+#else
+    return Dim3(1, 1, 1);
+#endif
   }
 
   constexpr inline int max_threads(int K) {
