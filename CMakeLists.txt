@@ -6,7 +6,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 set(BUILD_TESTING OFF CACHE BOOL "Whether to build tests in this project and its subprojects")
 
 # needed for atomicAdd_block
-set(CMAKE_CUDA_ARCHITECTURES 70)
+set(CMAKE_CUDA_ARCHITECTURES 80)
 
 include(CheckLanguage)
 check_language(CUDA)
@@ -42,5 +42,14 @@ endif (MRA_ENABLE_ASAN)
 set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
+
+# look for cublasDx
+find_package(mathdx COMPONENTS cublasdx)
+if (TARGET mathdx::cublasdx)
+  message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
+else()
+  message(STATUS "cublasDx not found")
+endif()
+
 
 add_subdirectory(src)

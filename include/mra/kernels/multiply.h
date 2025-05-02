@@ -2,9 +2,14 @@
 #define MRA_KERNELS_MULTIPLY_H
 
 #include "mra/misc/maxk.h"
+#include "mra/misc/key.h"
+#include "mra/misc/domain.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
+#include "mra/kernels/transform.h"
+#include "mra/kernels/fcube_for_mul.h"
+#include "mra/tensor/child_slice.h"
 
 namespace mra {
 
@@ -150,12 +155,30 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-
-    CALL_KERNEL(detail::multiply_kernel, N, thread_dims, 0, stream,
+    CALL_KERNEL(detail::multiply_kernel, N, thread_dims, mTxmq_shmem_size<T>(2*K), stream,
       (D, keyA, keyB, funcA, funcB, funcR, tmp, hgT, phi, phiT, phibar,
         quad_x, N, K));
     checkSubmit();
   }
+
+  /* explicit instanatiation */
+  extern template
+  void submit_multiply_kernel<double, 3>(
+    const Domain<3>& D,
+    const Key<3>& keyA,
+    const Key<3>& keyB,
+    const TensorView<double, 3+1>& funcA,
+    const TensorView<double, 3+1>& funcB,
+    TensorView<double, 3+1>& funcR,
+    const TensorView<double, 2>& hgT,
+    const TensorView<double, 2>& phi,
+    const TensorView<double, 2>& phiT,
+    const TensorView<double, 2>& phibar,
+    const TensorView<double, 1>& quad_x,
+    size_type N,
+    size_type K,
+    double* tmp,
+    ttg::device::Stream stream);
 
 } // namespace mra
 

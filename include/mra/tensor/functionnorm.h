@@ -4,7 +4,7 @@
 #include "mra/misc/key.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/functionnode.h"
-#include "kernels/simple_norm.h"
+#include "mra/kernels/simple_norm.h"
 
 
 namespace mra {

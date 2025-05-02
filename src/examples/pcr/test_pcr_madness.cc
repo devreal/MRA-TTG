@@ -78,11 +78,12 @@ public:
 
 // Makes a new square-normalized Gaussian functor with random origin and
 // exponent
-real_functor_3d random_gaussian() {
+real_functor_3d random_gaussian(int seed) {
   const double expntmin = 1500;
   const double expntmax = 3000;
   const real_tensor &cell = FunctionDefaults<3>::get_cell();
   coord_3d origin;
+  default_random_generator.setstate(seed);
   for (int i = 0; i < 3; i++) {
     origin[i] = RandomValue<double>() * (cell(i, 1) - cell(i, 0)) + cell(i, 0);
   }
@@ -96,10 +97,10 @@ real_functor_3d random_gaussian() {
 
 // Makes a vector of new square-normalized Gaussian functions with random origin
 // and exponent
-std::vector<real_function_3d> random_gaussians(size_t n, World &world) {
+std::vector<real_function_3d> random_gaussians(size_t n, World &world, int seed) {
   std::vector<real_function_3d> result(n);
   for (size_t i = 0; i < n; i++) {
-    result[i] = FunctionFactory<double, 3>(world).functor(random_gaussian());
+    result[i] = FunctionFactory<double, 3>(world).functor(random_gaussian(seed));
   }
   return result;
 }
@@ -107,7 +108,7 @@ std::vector<real_function_3d> random_gaussians(size_t n, World &world) {
 // Makes a new square-normalized Gaussian functor with fixed origin and
 // exponent
 real_functor_3d fixed_gaussian() {
-  const double expnt = 2000;
+  const double expnt = 1500.0;
   const real_tensor &cell = FunctionDefaults<3>::get_cell();
   coord_3d origin;
   for (int i = 0; i < 3; i++) {
@@ -128,7 +129,7 @@ std::vector<real_function_3d> fixed_gaussians(size_t n, World &world) {
   return result;
 }
 
-void test(World &world, int N, int K, int nrep, bool norand) {
+void test(World &world, int N, int K, int nrep, int seed) {
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
 
@@ -144,10 +145,10 @@ void test(World &world, int N, int K, int nrep, bool norand) {
   for (int i = 0; i < nrep; ++i) {
     beg = std::chrono::high_resolution_clock::now();
     std::vector<real_function_3d> a;
-    if (norand) {
+    if (seed == 0) {
       a = fixed_gaussians(N, world);
     } else {
-      a = random_gaussians(N, world);
+      a = random_gaussians(N, world, seed);
     }
     truncate(world, a);
     compress(world, a, true);
@@ -177,7 +178,7 @@ int main(int argc, char **argv) {
   int N = opt.parse("-N", 1);
   int K = opt.parse("-K", 10);
   int nrep = opt.parse("-n", 3);
-  bool norand = opt.exists("-norand");
+  int seed = opt.exists("-s");
 
 
   startup(world, argc, argv);
@@ -185,7 +186,7 @@ int main(int argc, char **argv) {
   if (world.rank() == 0)
     FunctionDefaults<3>::print();
 
-  test(world, N, K, nrep, norand);
+  test(world, N, K, nrep, seed);
 
   finalize();
   return 0;

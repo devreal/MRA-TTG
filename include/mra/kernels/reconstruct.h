@@ -111,10 +111,24 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-    CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, 0, stream,
+    CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, mTxmq_shmem_size<T>(2*K), stream,
       (key, N, K, node, tmp, hg, from_parent, r_arr));
     checkSubmit();
   }
+
+
+  /* explicit declaration */
+  extern template
+  void submit_reconstruct_kernel<double, 3>(
+    const Key<3>& key,
+    size_type N,
+    size_type K,
+    TensorView<double, 3+1>& node,
+    const TensorView<double, 2>& hg,
+    const TensorView<double, 3+1>& from_parent,
+    const std::array<TensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,
+    double* tmp,
+    ttg::device::Stream stream);
 
 } // namespace mra
 
