@@ -36,16 +36,27 @@ namespace mra {
 
     template<typename T, size_type K>
     constexpr size_type cublasdx_max_mn() {
+      // K^2 for square B/A, double buffering for A/B and C
+      auto max_nm = ((MRA_CUBLASDX_MAX_SHM / sizeof(T)) - K*K) / (4*K);
+      // round down to the nearest power of 2
+      // TODO: std::log2 is constexpr only since C++26
+      //size_type p = std::pow(2, (int)std::log2(max_nm));
+      size_type l = 1;
+      while ((l<<1) <= max_nm) l <<= 1;
+      return std::min(l, K*K);
+#if 0
       size_type max_mn = CUBLAS_MIN_MN;
       auto size = [](size_type mn){
-        return (mn*K*K*4 // double buffering for A/B and C
+        return (mn*K*4 // double buffering for A/B and C
                 + K*K    // buffering for B/A
                )*sizeof(T);
       };
       while (size(max_mn*2) <= MRA_CUBLASDX_MAX_SHM) {
         max_mn *= 2;
       }
-      return max_mn;
+
+      return (max_mn > 64) ? 64 : max_mn;
+#endif // 0
     }
 
     template<typename GEMM>
