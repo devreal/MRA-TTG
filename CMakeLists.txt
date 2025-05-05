@@ -43,6 +43,9 @@ set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
 
+# look for Kokkos
+find_package(Kokkos COMPONENTS separable_compilation)
+
 # look for cublasDx
 find_package(mathdx COMPONENTS cublasdx)
 if (TARGET mathdx::cublasdx)

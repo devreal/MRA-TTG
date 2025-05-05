@@ -8,6 +8,10 @@
 
 #include <ttg.h>
 
+#ifdef MRA_HAVE_KOKKOS
+#include <Kokkos_Core.hpp>
+#endif // MRA_HAVE_KOKKOS
+
 using namespace mra; // lazy
 
 #if __has_include(<cutlass/cutlass.h>)
@@ -252,12 +256,34 @@ GLOBALSCOPE void transform_kernel(int N, TensorView<T, 3+1> A, TensorView<T, 2+1
   }
 }
 
+#ifdef MRA_HAVE_KOKKOS
+static std::map<std::map<int, ttg::device::Stream>, Kokkos::DefaultExecutionSpace> streams;
+
+auto& get_execution_space() {
+  auto key = std::make_pair(ttg::device::current_device(), ttg::device::current_stream());
+  auto it = streams.find(key);
+  if (it == streams.end()) {
+    streams[std::map<int, ttg::device::Stream>()] = Kokkos::DefaultExecutionSpace(ttg::device::current_stream());
+    it = streams.find(key);
+  }
+  return *it;
+}
+#endif // MRA_HAVE_KOKKOS
+
 template<typename T>
 static void submit_transform_bench(int N, int M, int K, TensorView<T, 3+1> A, TensorView<T, 2+1> B, TensorView<T, 3+1> C, TensorView<T, 3+1> workspace) {
   Dim3 thread_dims = max_thread_dims(K);
   auto smem_size = mTxmq_shmem_size<T>(K);
+#ifdef MRA_HAVE_KOKKOS
+  auto team = Kokkos::TeamPolicy<>(std::min(N, M),thread_dims.x);
+  Kokkos::parallel_for(get_execution_space(), team,
+    KOKKOS_LAMBDA(const int i) {
+      transform_kernel<T>(N, A, B, C, workspace);
+    });
+#else  // MRA_HAVE_KOKKOS
   CONFIGURE_KERNEL(transform_kernel<T>, smem_size);
   CALL_KERNEL(transform_kernel, std::min(N, M), thread_dims, smem_size, ttg::device::current_stream(), (N, A, B, C, workspace));
+#endif // MRA_HAVE_KOKKOS
   checkSubmit();
 }
 
