@@ -14,12 +14,6 @@ add_executable(mra-pcr-host-parsec
                examples/pcr/test_pcr.cc)
 target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
 
-add_executable(mad-pcr
-               examples/pcr/test_pcr_madness.cc)
-target_link_libraries(mad-pcr PUBLIC MADchem)
-target_include_directories(mad-pcr PUBLIC ${CMAKE_SOURCE_DIR}/include)
-
-
 add_executable(mra-derivative-host-parsec
                examples/derivative/test_derivative.cc)
 target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)
@@ -53,16 +47,21 @@ if (HAVE_CUDA)
 
   #define a target for CUDA
   add_library(libmra-cuda-base-parsec INTERFACE)
+  #if (TARGET Kokkos::kokkos)
+  #  target_link_libraries(libmra-cuda-base-parsec INTERFACE Kokkos::kokkos)
+  #  target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_HAVE_KOKKOS=1)
+  #else (TARGET Kokkos::kokkos)
+    target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES})
+    target_compile_options(libmra-cuda-base-parsec INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+  #endif (TARGET Kokkos::kokkos)
+
   target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_ENABLE_CUDA=1)
-  target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES})
-  target_compile_options(libmra-cuda-base-parsec INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
   target_link_libraries(libmra-cuda-base-parsec INTERFACE libmra-base-parsec
-                                                $<$<TARGET_EXISTS:tiledarray>:tiledarray>
-                                                $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
+                                               $<$<TARGET_EXISTS:tiledarray>:tiledarray>
+                                               $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
 
   add_library(libmra-cuda-parsec OBJECT gl.cc twoscale.cc kernels/compress.cu kernels/reconstruct.cu kernels/multiply.cu)
   target_link_libraries(libmra-cuda-parsec PUBLIC libmra-cuda-base-parsec)
-
 
   add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
   target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC libmra-cuda-parsec)
@@ -73,14 +72,21 @@ if (HAVE_CUDA)
   add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
+  if (TARGET Kokkos::kokkos)
+    add_executable(transformbench-cuda-kokkos-parsec benchmarks/transformbench/transformbench.cc)
+    target_link_libraries(transformbench-cuda-kokkos-parsec PUBLIC libmra-cuda-parsec Kokkos::kokkos)
+    target_compile_definitions(transformbench-cuda-kokkos-parsec PUBLIC MRA_HAVE_KOKKOS=1)
+  endif (TARGET Kokkos::kokkos)
+
   add_executable(transformbench-cuda-parsec benchmarks/transformbench/transformbench.cu)
-  target_link_libraries(transformbench-cuda-parsec PUBLIC libmra-cuda-base-parsec)
+  target_link_libraries(transformbench-cuda-parsec PUBLIC libmra-cuda-parsec)
 
   find_package(CUDAToolkit)
   if (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
     add_executable(mxm-test-cuda tests/mxm_test.cu)
     target_link_libraries(mxm-test-cuda PUBLIC CUDA::cublas libmra-cuda-base-parsec)
   endif (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
+
 endif (HAVE_CUDA)
 
 if (HAVE_HIP)
