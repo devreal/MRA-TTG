@@ -129,8 +129,27 @@ namespace mra {
     template<size_type M, size_type N, size_type K, typename aT, typename bT, typename cT>
     __device__ void mTxmq_cublasdx_block(cT* c, aT* a, bT* b, bool all_shared = false) {
       constexpr auto blockdims = mra::max_thread_dims(K);
+      if (all_shared) {
+        using GEMM = decltype(cublasdx::Size<M, N, K>()
+                            + cublasdx::Precision<cT>()
+                            + cublasdx::Type<cublasdx::type::real>()
+                            + cublasdx::Function<cublasdx::function::MM>()
+                            + cublasdx::Arrangement<cublasdx::col_major, cublasdx::row_major, cublasdx::row_major>()
+                            + cublasdx::SM<MRA_CUBLASDX_SM>()
+                            + cublasdx::Block()
+                            + cublasdx::BlockDim<blockdims.x, blockdims.y, blockdims.z>()
+                            + cublasdx::MaxAlignment());
+        auto a_shared_tensor   = cublasdx::make_tensor(a,   GEMM::suggest_layout_smem_a());
+        auto b_shared_tensor   = cublasdx::make_tensor(b,   GEMM::suggest_layout_smem_b());
+        auto c_shared_tensor   = cublasdx::make_tensor(c,   GEMM::suggest_layout_smem_c());
+        mTxmq_cublasdx_core<GEMM>(a_shared_tensor, b_shared_tensor, c_shared_tensor,
+                                  [](){}, [](){});
+        return;
+      }
+
       extern SHARED __align__(16) char smem[];
       constexpr auto max_mn = cublasdx_max_mn<cT, K>();
+
       using GEMM = decltype(cublasdx::Size<std::min(max_mn, M), std::min(max_mn, N), K>()
                           + cublasdx::Precision<cT>()
                           + cublasdx::Type<cublasdx::type::real>()
@@ -143,15 +162,6 @@ namespace mra {
                           + cublasdx::LeadingDimension<M, N, N>());
 
       using alignment = cublasdx::alignment_of<GEMM>;
-
-      if (all_shared) {
-        auto a_shared_tensor   = cublasdx::make_tensor(a,   GEMM::suggest_layout_smem_a());
-        auto b_shared_tensor   = cublasdx::make_tensor(b,   GEMM::suggest_layout_smem_b());
-        auto c_shared_tensor   = cublasdx::make_tensor(c,   GEMM::suggest_layout_smem_c());
-        mTxmq_cublasdx_core<GEMM>(a_shared_tensor, b_shared_tensor, c_shared_tensor,
-                                  [](){}, [](){});
-        return;
-      }
 
       if constexpr (M == K*K) {
         constexpr auto num_iter = M/max_mn;
@@ -279,6 +289,8 @@ namespace mra {
         detail::mTxmq_cublasdx_block<16*16, 16, 16>(c, a, b, all_shared);
       } else if (K == 20) {
         detail::mTxmq_cublasdx_block<400, 20, 20>(c, a, b, all_shared);
+      } else if (K == 32) {
+        detail::mTxmq_cublasdx_block<32*32, 32, 32>(c, a, b, all_shared);
       } else {
         if (is_team_lead()) printf("mTxmq: Unsupport K = %d\n", K);
       }
@@ -315,6 +327,7 @@ namespace mra {
       case 12: return detail::cublasdx_shmem_size_k<T, 12>();
       case 16: return detail::cublasdx_shmem_size_k<T, 16>();
       case 20: return detail::cublasdx_shmem_size_k<T, 20>();
+      case 32: return detail::cublasdx_shmem_size_k<T, 32>();
       default: THROW("CUBLASdx: Unsupported K");
     }
   }
