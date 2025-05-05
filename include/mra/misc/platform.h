@@ -53,27 +53,28 @@ namespace mra::detail {
 #endif // __CUDA_ARCH__
 
 #if defined(__CUDACC__)
-#define checkSubmit()                                                                   \
-  do {
-    if (cudaPeekAtLastError() != cudaSuccess) {                                           \
-      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": "  \
-      << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;                          \
-    }                                                                                     \
-  } while (0)
+#define checkSubmit()                                                                     \
+  do { } while (0)
 
 #define CALL_KERNEL(name, block, thread, shared, stream, args)                          \
   do {                                                                                  \
     name<<<block, thread, shared, stream>>> args ;                                      \
+    if (cudaPeekAtLastError() != cudaSuccess) {                                         \
+      std::cout << "kernel submission failed with " << shared << "B smem at "           \
+                << __FILE__ << ":" << __LINE__ << ": "                                  \
+                << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;              \
+      throw std::runtime_error("kernel configuration failed");                          \
+    }                                                                                   \
     checkSubmit();                                                                      \
   } while (0)
 
-#define CONFIGURE_KERNEL(name, shared) \
+#define CONFIGURE_KERNEL(name, shared)                                                  \
   do {                                                                                  \
     static size_type smem_size_config = 0;                                              \
     if (smem_size_config < shared) {                                                    \
       cudaFuncSetAttribute(name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
       if (cudaPeekAtLastError() != cudaSuccess) {                                       \
-        std::cout << "kernel configuration failed for smem " << shared << " at "        \
+        std::cout << "kernel configuration failed with " << shared << "B smem at "      \
                   << __FILE__ << ":" << __LINE__ << ": "                                \
                   << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;            \
         throw std::runtime_error("kernel configuration failed");                        \
@@ -84,18 +85,16 @@ namespace mra::detail {
 #elif defined(__HIP__)
 
 #define checkSubmit()                                                                    \
-  do {                                                                                   \
-    if (hipPeekAtLastError() != hipSuccess) {                                            \
-      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-      << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
-      throw std::runtime_error("kernel submission failed");                              \
-    }                                                                                    \
-  } while (0)
+  do { } while (0)
 
 #define CALL_KERNEL(name, block, thread, shared, stream, args)  \
   do {                                                          \
     name<<<block, thread, shared, stream>>> args;               \
-    checkSubmit();                                              \
+    if (hipPeekAtLastError() != hipSuccess) {                                            \
+      std::cout << "kernel submission failed with " << shared << "B smem at " << __FILE__ << ":" << __LINE__ << ": " \
+      << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
+      throw std::runtime_error("kernel submission failed");                              \
+    }                                                                                    \
   } while (0)
 
 #define CONFIGURE_KERNEL(name, shared) \
