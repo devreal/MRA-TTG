@@ -1,4 +1,4 @@
-
+#include "mra/misc/autocorr.h"
 namespace mra{
 
   constexpr size_type autocorr_size = 11317;
@@ -11327,5 +11327,36 @@ namespace mra{
       {30.0, 30.0, 60.0, -3.394045853154864e-18},
       {30.0, 30.0, 61.0, -2.782098258598781e-20}
     };
+
+    static inline int parity (int i){
+      return 1 - ((i&1) << 1);
+    }
+
+    template <typename T>
+    void autocorr_get(const size_type K, T* cread){
+
+      int i, j, k, it=0, twoK = 2*K;
+      double val;
+
+      while(1){
+        if(it >= K) break;
+        i   = (int)autocorr[it][0];
+        j   = (int)autocorr[it][1];
+        k   = (int)autocorr[it][2];
+        val = (int)autocorr[it][3];
+
+        double ij  = parity(i+j);
+        double ijk = parity(i+j+k);
+        cread[i][j][k] = val * ijk; // c-
+        cread[j][i][k] = val * ij * ijk;
+        cread[i][j][k+twoK] = val; // c+
+        cread[j][i][k+twoK] = val * ij;
+
+        ++it;
+      }
+
+    }
+
+
 
 }
