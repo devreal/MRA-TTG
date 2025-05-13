@@ -1,6 +1,7 @@
 #ifndef MRA_ADQUAD_H
 #define MRA_ADQUAD_H
 
+#include "mra/misc/gl.h"
 #include "mra/misc/types.h"
 
 namespace mra {
