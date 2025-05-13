@@ -39,6 +39,16 @@ namespace mra {
       }
     }
 
+
+    template <typename functorT, typename T>
+    void adq(const T lo, const T hi, const functorT& func,
+             const T thresh, T result){
+      const int n = 20;
+      T x[n], w[n];
+      GLget(&x, &w, n);
+
+      adq1(lo, hi, func, thresh, n, 0, x, w, result);
+    }
   }
 }
 
