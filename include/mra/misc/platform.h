@@ -201,7 +201,9 @@ namespace mra {
   }
 
   constexpr inline Dim3 max_thread_dims(int K) {
-#if !defined(MRA_ENABLE_HOST)
+#if defined(MRA_HAVE_KOKKOS)
+    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+#elif !defined(MRA_ENABLE_HOST)
     int x = 32;
     int y = MAX_THREADS_PER_BLOCK / x;
     int z = 1;
