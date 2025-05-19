@@ -53,31 +53,64 @@ namespace mra::detail {
 #endif // __CUDA_ARCH__
 
 #if defined(__CUDACC__)
-#define checkSubmit() \
-  if (cudaPeekAtLastError() != cudaSuccess) {                                           \
-    std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": "  \
-    << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;                          \
-  }                                                                                     \
-  assert(cudaPeekAtLastError() == cudaSuccess);
+#define checkSubmit()                                                                     \
+  do { } while (0)
+
 #define CALL_KERNEL(name, block, thread, shared, stream, args)                          \
   do {                                                                                  \
     name<<<block, thread, shared, stream>>> args ;                                      \
+    if (cudaPeekAtLastError() != cudaSuccess) {                                         \
+      std::cout << "kernel submission failed with " << shared << "B smem at "           \
+                << __FILE__ << ":" << __LINE__ << ": "                                  \
+                << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;              \
+      throw std::runtime_error("kernel configuration failed");                          \
+    }                                                                                   \
     checkSubmit();                                                                      \
   } while (0)
+
+#define CONFIGURE_KERNEL(name, shared)                                                  \
+  do {                                                                                  \
+    static size_type smem_size_config = 0;                                              \
+    if (smem_size_config < shared) {                                                    \
+      cudaFuncSetAttribute(name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
+      if (cudaPeekAtLastError() != cudaSuccess) {                                       \
+        std::cout << "kernel configuration failed with " << shared << "B smem at "      \
+                  << __FILE__ << ":" << __LINE__ << ": "                                \
+                  << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;            \
+        throw std::runtime_error("kernel configuration failed");                        \
+      }                                                                                 \
+    }                                                                                   \
+
 #elif defined(__HIP__)
+
 #define checkSubmit()                                                                    \
-  do {
+  do { } while (0)
+
+#define CALL_KERNEL(name, block, thread, shared, stream, args)                           \
+  do {                                                                                   \
+    name<<<block, thread, shared, stream>>> args;                                        \
     if (hipPeekAtLastError() != hipSuccess) {                                            \
-      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
+      std::cout << "kernel submission failed with " << shared << "B smem at "            \
+                << __FILE__ << ":" << __LINE__ << ": "                                   \
       << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
+      throw std::runtime_error("kernel submission failed");                              \
     }                                                                                    \
-    assert(hipPeekAtLastError() == hipSuccess);                                          \
-  } while(0)
-#define CALL_KERNEL(name, block, thread, shared, stream, args)  \
-  do {                                                          \
-    name<<<block, thread, shared, stream>>> args;               \
-    checkSubmit();                                              \
   } while (0)
+
+#define CONFIGURE_KERNEL(name, shared) \
+  do {                                                                                  \
+    static size_type smem_size_config = 0;                                              \
+    if (smem_size_config < shared) {                                                    \
+      hipFuncSetAttribute(name, hipFuncAttributeMaxDynamicSharedMemorySize, shared);    \
+      if (hipPeekAtLastError() != hipSuccess) {                                         \
+        std::cout << "kernel configuration failed for smem " << shared << " at "        \
+                  << __FILE__ << ":" << __LINE__ << ": "                                \
+                  << hipGetErrorString(hipPeekAtLastError()) << std::endl;              \
+        throw std::runtime_error("kernel configuration failed");                        \
+      }                                                                                 \
+    }                                                                                   \
+  } while (0)
+
 #else  // __CUDACC__
 #define checkSubmit() do {} while(0)
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
@@ -88,6 +121,7 @@ namespace mra::detail {
       name args;                                \
     }                                           \
   } while (0)
+#define CONFIGURE_KERNEL(name, shared) do {} while(0)
 #endif // __CUDACC__
 
 #if defined(__CUDA_ARCH__)
@@ -167,7 +201,9 @@ namespace mra {
   }
 
   constexpr inline Dim3 max_thread_dims(int K) {
-#if !defined(MRA_ENABLE_HOST)
+#if defined(MRA_HAVE_KOKKOS)
+    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+#elif !defined(MRA_ENABLE_HOST)
     int x = 32;
     int y = MAX_THREADS_PER_BLOCK / x;
     int z = 1;

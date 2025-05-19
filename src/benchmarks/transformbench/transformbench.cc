@@ -8,6 +8,12 @@
 
 #include <ttg.h>
 
+#ifdef MRA_HAVE_KOKKOS
+#include <Kokkos_Core.hpp>
+#endif // MRA_HAVE_KOKKOS
+
+#define KERNEL_NREP 1
+
 using namespace mra; // lazy
 
 #if __has_include(<cutlass/cutlass.h>)
@@ -248,14 +254,51 @@ GLOBALSCOPE void transform_kernel(int N, TensorView<T, 3+1> A, TensorView<T, 2+1
       w = workspace(i);
     }
     SYNCTHREADS();
-    transform(a, b, c, w.data());
+    //for (int i = 0; i < KERNEL_NREP; ++i) {
+      transform(a, b, c, w.data());
+    //}
   }
 }
+
+#ifdef MRA_HAVE_KOKKOS
+static std::map<std::pair<int, ttg::device::Stream>, Kokkos::DefaultExecutionSpace> streams;
+
+Kokkos::Cuda& get_execution_space() {
+  auto key = std::make_pair(ttg::device::current_device(), ttg::device::current_stream());
+  auto it = streams.find(key);
+  if (it == streams.end()) {
+    streams[key] = Kokkos::DefaultExecutionSpace(ttg::device::current_stream());
+    it = streams.find(key);
+  }
+  return it->second;
+}
+#endif // MRA_HAVE_KOKKOS
 
 template<typename T>
 static void submit_transform_bench(int N, int M, int K, TensorView<T, 3+1> A, TensorView<T, 2+1> B, TensorView<T, 3+1> C, TensorView<T, 3+1> workspace) {
   Dim3 thread_dims = max_thread_dims(K);
-  CALL_KERNEL(transform_kernel, std::min(N, M), thread_dims, mTxmq_shmem_size<T>(K), ttg::device::current_stream(), (N, A, B, C, workspace));
+  auto smem_size = mTxmq_shmem_size<T>(K);
+#ifdef MRA_HAVE_KOKKOS
+  using Policy = Kokkos::TeamPolicy<Kokkos::Cuda, Kokkos::LaunchBounds<MAX_THREADS_PER_BLOCK,2>>;
+  auto team = Policy(get_execution_space(), N, thread_dims.y, thread_dims.x);
+  //std::cout << "smem " << smem_size << " of max " << team.scratch_size_max(0) << std::endl;
+  team.set_scratch_size(0, Kokkos::Impl::PerTeamValue(smem_size));
+  Kokkos::parallel_for(team,
+    KOKKOS_LAMBDA(const Policy::member_type& member) {
+      int i = member.league_rank();
+      //for (int i = blockIdx.x; i < N; i += gridDim.x)
+      {
+        auto a = A(i);
+        auto b = B(i);
+        auto c = C(i);
+        auto w = workspace(i);
+        transform(a, b, c, w.data());
+      }
+    });
+#else  // MRA_HAVE_KOKKOS
+  CONFIGURE_KERNEL(transform_kernel<T>, smem_size);
+  CALL_KERNEL(transform_kernel, std::min(N, M), thread_dims, smem_size, ttg::device::current_stream(), (N, A, B, C, workspace));
+#endif // MRA_HAVE_KOKKOS
   checkSubmit();
 }
 
@@ -305,7 +348,7 @@ void transform_bench(int nreps, int ntasks, mra::size_type N, mra::size_type M, 
     /* skip warm-up */
     if (i > 0) {
       auto us = (std::chrono::duration_cast<std::chrono::microseconds>(end - beg).count());
-      uint64_t flops = (uint64_t)ntasks * K * K * K * K * 3 * 2 /* multiply-add */ * N;
+      uint64_t flops = (uint64_t)ntasks * K * K * K * K * 3 * 2 /* multiply-add */ * N * KERNEL_NREP;
       std::cout << "Transform N = " << N << ";M = " << M << ";K = " << K << ";tasks = " << ntasks
                 << ";Time (microseconds) = "
                 << us
@@ -333,9 +376,16 @@ int main(int argc, char **argv) {
             << std::endl;
   ttg::initialize(argc, argv);
   allocator_init(argc, argv);
+#ifdef MRA_HAVE_KOKKOS
+  Kokkos::initialize(argc, argv);
+#endif // MRA_HAVE_KOKKOS
 
   transform_bench(nreps, ntasks, N, M, K, blas_type);
 
+#ifdef MRA_HAVE_KOKKOS
+  streams.clear();
+  Kokkos::finalize();
+#endif // MRA_HAVE_KOKKOS
   allocator_fini();
   ttg::finalize();
 }
