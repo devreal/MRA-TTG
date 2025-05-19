@@ -80,6 +80,7 @@ namespace mra::detail {
         throw std::runtime_error("kernel configuration failed");                        \
       }                                                                                 \
     }                                                                                   \
+  } while (0)
 
 #elif defined(__HIP__)
 
@@ -114,12 +115,12 @@ namespace mra::detail {
 #else  // __CUDACC__
 #define checkSubmit() do {} while(0)
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
-  do { \
-    blockIdx = {0, 0, 0};                       \
-    for (std::size_t i = 0; i < blocks; ++i) {  \
-      blockIdx.x = i;                           \
-      name args;                                \
-    }                                           \
+  do {                                                          \
+    blockIdx = {0, 0, 0};                                       \
+    for (std::size_t i = 0; i < blocks; ++i) {                  \
+      blockIdx.x = i;                                           \
+      name args;                                                \
+    }                                                           \
   } while (0)
 #define CONFIGURE_KERNEL(name, shared) do {} while(0)
 #endif // __CUDACC__
