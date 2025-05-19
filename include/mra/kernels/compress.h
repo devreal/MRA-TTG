@@ -37,21 +37,23 @@ namespace mra {
       T* d_sumsq,
       const std::array<TensorView<T, NDIM>, Key<NDIM>::num_children()>& in_views)
     {
-      d = 0.0;
-      p = 0.0;
 
       for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
         auto child_slice = get_child_slice<NDIM>(key, K, i);
         const TensorView<T, NDIM>& in = in_views[i];
         s(child_slice) = in;
       }
-      //filter<T,K,NDIM>(s,d);  // Apply twoscale transformation
+
+
       transform<NDIM>(s, hgT, d, workspace);
+
+
       if (key.level() > 0) {
         auto child_slice = get_child_slice<NDIM>(key, K, 0);
         p = d(child_slice);
         d(child_slice) = 0.0;
       }
+
       sumabssq(d, d_sumsq);
     }
 
