@@ -38,7 +38,6 @@ namespace mra {
     }
 
     int parse(std::string_view option, int default_value) {
-      size_t pos;
       std::string token;
       int N = default_value;
       char **itr = std::find(m_begin, m_end, option);
@@ -49,7 +48,6 @@ namespace mra {
     }
 
     long parse(std::string_view option, long default_value) {
-      size_t pos;
       std::string token;
       long N = default_value;
       char **itr = std::find(m_begin, m_end, option);
@@ -60,7 +58,6 @@ namespace mra {
     }
 
     double parse(std::string_view option, double default_value = 0.25) {
-      size_t pos;
       std::string token;
       double N = default_value;
       char **itr = std::find(m_begin, m_end, option);
