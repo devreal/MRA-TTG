@@ -67,19 +67,19 @@ namespace mra::detail {
     }                                                                                   \
     checkSubmit();                                                                      \
   } while (0)
-#elif defined(__HIP__)
-#define checkSubmit()                                                                    \
-  do {
-    if (hipPeekAtLastError() != hipSuccess) {                                            \
-      std::cout << "kernel submission failed at " << __FILE__ << ":" << __LINE__ << ": " \
-      << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
-    }                                                                                    \
-    assert(hipPeekAtLastError() == hipSuccess);                                          \
-  } while(0)
-#define CALL_KERNEL(name, block, thread, shared, stream, args)  \
-  do {                                                          \
-    name<<<block, thread, shared, stream>>> args;               \
-    checkSubmit();                                              \
+
+#define CONFIGURE_KERNEL(name, shared)                                                  \
+  do {                                                                                  \
+    static size_type smem_size_config = 0;                                              \
+    if (smem_size_config < shared) {                                                    \
+      cudaFuncSetAttribute(name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
+      if (cudaPeekAtLastError() != cudaSuccess) {                                       \
+        std::cout << "kernel configuration failed with " << shared << "B smem at "      \
+                  << __FILE__ << ":" << __LINE__ << ": "                                \
+                  << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;            \
+        throw std::runtime_error("kernel configuration failed");                        \
+      }                                                                                 \
+    }                                                                                   \
   } while (0)
 
 #elif defined(__HIP__)
@@ -114,12 +114,12 @@ namespace mra::detail {
 #else  // __CUDACC__
 #define checkSubmit() do {} while(0)
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
-  do { \
-    blockIdx = {0, 0, 0};                       \
-    for (std::size_t i = 0; i < blocks; ++i) {  \
-      blockIdx.x = i;                           \
-      name args;                                \
-    }                                           \
+  do {                                                          \
+    blockIdx = {0, 0, 0};                                       \
+    for (std::size_t i = 0; i < blocks; ++i) {                  \
+      blockIdx.x = i;                                           \
+      name args;                                                \
+    }                                                           \
   } while (0)
 #define CONFIGURE_KERNEL(name, shared) do {} while(0)
 #endif // __CUDACC__
