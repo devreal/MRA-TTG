@@ -127,9 +127,9 @@ namespace mra {
       parent_to_child(D, right,  key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
       deriv = 0;
 
-      transform_dir(node_left, operators((int)FunctionData<T, NDIM>::DerivOp::RP), left_tmp, deriv, axis);
-      transform_dir(node_center, operators((int)FunctionData<T, NDIM>::DerivOp::R0), center_tmp, deriv, axis);
-      transform_dir(node_right, operators((int)FunctionData<T, NDIM>::DerivOp::RM), right_tmp, deriv, axis);
+      transform_dir(node_left, operators((int)FunctionData<T, NDIM>::DerivOp::RPT), left_tmp, deriv, axis);
+      transform_dir(node_center, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), center_tmp, deriv, axis);
+      transform_dir(node_right, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), right_tmp, deriv, axis);
 
       T scale = std::sqrt(D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level())));
       T thresh = T(1e-12);
