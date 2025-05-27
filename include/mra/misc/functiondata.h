@@ -142,19 +142,19 @@ namespace mra {
                 iphase = -iphase;
             }
 
-            // for (size_type i=0; i< K; ++i){
-            //     for (size_type j=0; j< K; ++j){
-            //         rmt(i,j) = rm(j,i);
-            //         r0t(i,j) = r0(j,i);
-            //         rpt(i,j) = rp(j,i);
+            for (size_type i=0; i< K; ++i){
+                for (size_type j=0; j< K; ++j){
+                    rmt(i,j) = rm(j,i);
+                    r0t(i,j) = r0(j,i);
+                    rpt(i,j) = rp(j,i);
 
-            //         left_rmt(i,j) = left_rm(j,i);
-            //         left_r0t(i,j) = left_r0(j,i);
+                    left_rmt(i,j) = left_rm(j,i);
+                    left_r0t(i,j) = left_r0(j,i);
 
-            //         right_r0t(i,j) = right_r0(j,i);
-            //         right_rpt(i,j) = right_rp(j,i);
-            //     }
-            // }
+                    right_r0t(i,j) = right_r0(j,i);
+                    right_rpt(i,j) = right_rp(j,i);
+                }
+            }
 
 
         }
