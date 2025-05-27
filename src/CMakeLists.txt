@@ -2,7 +2,7 @@
 # define a base target for the MRA
 add_library(libmra-base-parsec INTERFACE)
 target_include_directories(libmra-base-parsec INTERFACE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(libmra-base-parsec INTERFACE MADworld ttg-parsec)
+target_link_libraries(libmra-base-parsec INTERFACE MADworld ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
 #define a target for the host
