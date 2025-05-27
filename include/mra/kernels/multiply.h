@@ -57,8 +57,6 @@ namespace mra {
         scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level())));
         cnodeB *= scale;
         cnodeA *= scale;
-        cnodesA(i) = cnodeA;
-        cnodesB(i) = cnodeB;
       }
 
       // fcube_for_mul() returns function values evaluated at quadrature points
