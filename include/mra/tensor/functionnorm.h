@@ -110,7 +110,7 @@ namespace mra {
 
     public:
       template<typename NodeT, typename... NodeTs>
-      FunctionNorms(std::string name, NodeT&& node, NodeTs&&... nodes)
+      FunctionNorms(const std::string& name, NodeT&& node, NodeTs&&... nodes)
       { }
 
       template<typename NodeT, typename... NodeTs>
@@ -133,7 +133,7 @@ namespace mra {
 
     // deduction guide
     template<typename NodeT, typename... NodeTs>
-    FunctionNorms(std::string, NodeT&&, NodeTs...) -> FunctionNorms<typename std::decay_t<NodeT>::value_type, std::decay_t<NodeT>::ndim()>;
+    FunctionNorms(std::string, NodeT&&, NodeTs&&...) -> FunctionNorms<typename std::decay_t<NodeT>::value_type, std::decay_t<NodeT>::ndim()>;
 
 } // namespace mra
 
