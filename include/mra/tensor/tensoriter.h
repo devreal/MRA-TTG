@@ -117,8 +117,9 @@ namespace mra {
           }
         }
       }
-      m_p0 += stride(d);
-      ++(m_idx[d]);
+      // TODO: why do we need this?
+      //m_p0 += stride(d);
+      //++(m_idx[d]);
       return *this;
     }
 
