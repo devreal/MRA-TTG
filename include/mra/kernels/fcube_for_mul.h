@@ -87,7 +87,7 @@ namespace mra {
     else if (child.level() == parent.level()) {
       // coeffs_to_values()
       transform(coeffs, phibar, result_values, workspace);
-      T scale = std::pow(2.0, 0.5*NDIM*parent.level())/sqrt(D.template get_volume<T>());
+      T scale = std::pow(2.0, 0.5*NDIM*parent.level())/std::sqrt(D.template get_volume<T>());
       result_values *= scale;
     }
     else {

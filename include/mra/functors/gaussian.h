@@ -6,6 +6,8 @@
 #include "mra/misc/platform.h"
 #include "mra/ops/functions.h"
 
+#include <numbers>
+
 /**
  * Defines a Gaussian functor that we use across this example.
  * We want to template the whole stack on the functor but we
@@ -28,7 +30,7 @@ namespace mra {
         Gaussian(const Domain<NDIM>& domain, T expnt, const Coordinate<T,NDIM>& origin)
         : expnt(expnt)
         , origin(origin)
-        , fac(std::pow(T(2.0*expnt/M_PI),T(0.25*NDIM)))
+        , fac(std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*NDIM)))
         , maxr(std::sqrt(std::log(fac/1e-12)/expnt))
         {
             // Pick initial level such that average gap between quadrature points
@@ -103,7 +105,7 @@ namespace mra {
         GaussianDerivative(const Domain<NDIM>& domain, T expnt, const Coordinate<T,NDIM>& origin)
         : expnt(expnt)
         , origin(origin)
-        , fac(std::pow(T(2.0*expnt/M_PI),T(0.25*NDIM)))
+        , fac(std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*NDIM)))
         , maxr(std::sqrt(std::log(fac/1e-12)/expnt))
         {
             // Pick initial level such that average gap between quadrature points
