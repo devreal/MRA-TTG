@@ -70,7 +70,7 @@ namespace mra {
             for (int i=0; i<K; ++i) {
                 double jphase = 1.0;
                 for (int j=0; j<K; ++j) {
-                    double gammaij = sqrt(double((2*i+1)*(2*j+1)));
+                    double gammaij = std::sqrt(double((2*i+1)*(2*j+1)));
                     double Kij;
                     if (((i-j)>0) && (((i-j)%2)==1))
                         Kij = 2.0;
@@ -88,16 +88,16 @@ namespace mra {
                         double phi_tmpj_left = 0;
 
                         for (int l=0; l<K; ++l) {
-                            double gammalj = sqrt(double((2*l+1)*(2*j+1)));
+                            double gammalj = std::sqrt(double((2*l+1)*(2*j+1)));
                             double Klj;
 
                             if (((l-j)>0) && (((l-j)%2)==1))  Klj = 2.0;
                             else   Klj = 0.0;
 
-                            phi_tmpj_left += sqrt(double(2*l+1))*Klj*gammalj;
+                            phi_tmpj_left += std::sqrt(double(2*l+1))*Klj*gammalj;
                         }
                         phi_tmpj_left = -jphase*phi_tmpj_left;
-                        left_r0(i,j) = (0.5*(1.0 + iphase*kphase/K) - Kij)*gammaij + iphase*sqrt(double(2*i+1))*phi_tmpj_left/pow(K,2.);
+                        left_r0(i,j) = (0.5*(1.0 + iphase*kphase/K) - Kij)*gammaij + iphase*std::sqrt(double(2*i+1))*phi_tmpj_left/pow(K,2.);
                     }
                     else if (bc_left == BC_ZERO || bc_left == BC_DIRICHLET || bc_left == BC_FREE) {
                         left_rm(i,j) = rm(i,j);
@@ -117,13 +117,13 @@ namespace mra {
 
                         double phi_tmpj_right = 0;
                         for (int l=0; l<K; ++l) {
-                            double gammalj = sqrt(double((2*l+1)*(2*j+1)));
+                            double gammalj = std::sqrt(double((2*l+1)*(2*j+1)));
                             double Klj;
                             if (((l-j)>0) && (((l-j)%2)==1))  Klj = 2.0;
                             else   Klj = 0.0;
-                            phi_tmpj_right += sqrt(double(2*l+1))*Klj*gammalj;
+                            phi_tmpj_right += std::sqrt(double(2*l+1))*Klj*gammalj;
                         }
-                        right_rp(i,j) = -(0.5*jphase*(iphase+ kphase/K) + Kij)*gammaij + sqrt(double(2*i+1))*phi_tmpj_right/pow(K,2.);
+                        right_rp(i,j) = -(0.5*jphase*(iphase+ kphase/K) + Kij)*gammaij + std::sqrt(double(2*i+1))*phi_tmpj_right/std::pow(K,2.);
                     }
                     else if (bc_right == BC_ZERO || bc_right == BC_FREE || bc_right == BC_DIRICHLET) {
                         right_rp(i,j) = rp(i,j);
