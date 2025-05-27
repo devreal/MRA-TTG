@@ -116,8 +116,14 @@ namespace mra {
                        phi_views[d], p, nn1, phi_norms, quad_x, K);
       }
 
-      general_transform(coeffs, phi_views, result_values);
-      T scale = T(1)/sqrt(D.template get_volume<T>());
+      SHARED TensorView<T, NDIM> result_tmp;
+      if (is_team_lead()) {
+        result_tmp = TensorView<T, NDIM>(workspace, result_values.dims());
+      }
+      SYNCTHREADS();
+
+      general_transform(coeffs, phi_views, result_values, result_tmp);
+      T scale = T(1)/std::sqrt(D.template get_volume<T>());
       result_values *= scale;
 #ifndef HAVE_DEVICE_ARCH
       delete[] phi;
