@@ -22,8 +22,8 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed) {
   auto pmap = PartitionKeymap<NDIM>(); // process map
   auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
 
-  auto pmap = PartitionKeymap<NDIM>(); // process map
-  auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
+  // auto pmap = PartitionKeymap<NDIM>(); // process map
+  // auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
