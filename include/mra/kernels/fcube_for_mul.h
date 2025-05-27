@@ -63,7 +63,7 @@ namespace mra {
       compute_scaling(xmu, K, pv, phi_norms, nn1);
       for (size_type i = 0; i < K; ++i) phi(i, mu) = pv[i];
     }
-    T scale_phi = pow(2.0, 0.5*np);
+    T scale_phi = std::pow(2.0, 0.5*np);
     phi *= scale_phi;
   }
 
@@ -87,7 +87,7 @@ namespace mra {
     else if (child.level() == parent.level()) {
       // coeffs_to_values()
       transform(coeffs, phibar, result_values, workspace);
-      T scale = pow(2.0, 0.5*NDIM*parent.level())/sqrt(D.template get_volume<T>());
+      T scale = std::pow(2.0, 0.5*NDIM*parent.level())/sqrt(D.template get_volume<T>());
       result_values *= scale;
     }
     else {
