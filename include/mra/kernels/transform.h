@@ -105,11 +105,21 @@ namespace mra {
   SCOPE void general_transform(
     const TensorView<T, NDIM>& t,
     const std::array<TensorView<T, 2>, ARRDIM>& c,
-    TensorView<T, NDIM>& result)
+    TensorView<T, NDIM>& result,
+    TensorView<T, NDIM>& result_tmp)
     {
-      result = t;
+      if constexpr (NDIM % 2) {
+        // make sure result and result_tmp
+        // end up pointing to the same memory
+        std::swap(result, result_tmp);
+      }
+      result = t; // prime result
       for (size_type i = 0; i < NDIM; ++i){
-        detail::inner(t, c[i], result, 0, 0);
+        // inner accumulates but we're passing
+        // TODO: make accumulation optional?
+        result_tmp = 0;
+        detail::inner(result, c[i], result_tmp, 0, 0);
+        std::swap(result, result_tmp);
       }
     }
 

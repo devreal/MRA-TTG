@@ -20,11 +20,11 @@ namespace mra{
       long k0 = -1,
       long k1 = 0)
     {
-      assert(left.dim(k0) == right.dim(k1));
 
       if (k0 < 0) k0 += left.ndim();
       if (k1 < 0) k1 += right.ndim();
 
+      assert(left.dim(k0) == right.dim(k1));
       if (k0==0 && k1==0) {
         // c[i,j] = a[k,i]*b[k,j] ... collapsing extra indices to i & j
         long dimk = left.dim(k0);
