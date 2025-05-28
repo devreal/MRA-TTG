@@ -131,6 +131,13 @@ namespace mra {
       return *this;
     }
 
+    void fill(value_type value) {
+      if (m_buffer.empty()) {
+        return;
+      }
+      std::fill(m_buffer.host_ptr(), m_buffer.host_ptr() + size(), value);
+    }
+
     size_type size() const {
       return std::reduce(&m_dims[0], &m_dims[ndim()], 1, std::multiplies<size_type>{});
     }
