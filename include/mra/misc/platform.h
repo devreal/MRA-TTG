@@ -98,19 +98,9 @@ namespace mra::detail {
     }                                                                                    \
   } while (0)
 
+/* nothing to be done yet */
 #define CONFIGURE_KERNEL(name, shared) \
-  do {                                                                                  \
-    static size_type smem_size_config = 0;                                              \
-    if (smem_size_config < shared) {                                                    \
-      hipFuncSetAttribute(name, hipFuncAttributeMaxDynamicSharedMemorySize, shared);    \
-      if (hipPeekAtLastError() != hipSuccess) {                                         \
-        std::cout << "kernel configuration failed for smem " << shared << " at "        \
-                  << __FILE__ << ":" << __LINE__ << ": "                                \
-                  << hipGetErrorString(hipPeekAtLastError()) << std::endl;              \
-        throw std::runtime_error("kernel configuration failed");                        \
-      }                                                                                 \
-    }                                                                                   \
-  } while (0)
+  do { } while (0)
 
 #else  // __CUDACC__
 #define checkSubmit() do {} while(0)
