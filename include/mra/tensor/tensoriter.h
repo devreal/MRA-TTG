@@ -39,7 +39,8 @@ namespace mra {
       }
     }
 
-    friend ::std::ostream& ::std::operator<<(std::ostream& s, const mra::TensorIterator<TensorView>& iter);
+    template<typename View>
+    friend ::std::ostream& ::std::operator<<(std::ostream& s, const mra::TensorIterator<View>& iter);
 
   public:
     constexpr static ssize_type default_jdim = std::numeric_limits<ssize_type>::max();
