@@ -17,21 +17,27 @@ namespace mra {
     private:
       size_type K;
       Level n;
+      int npt;                  // number of quadrature points
       Translation lx;
+      Tensor<T, 1> quad_x;      // quadrature points
+      Tensor<T, 1> quad_w;      // quadrature weights
       Tensor<T, NDIM> autocorr; // autocorrelation coefficients
-      Tensor<T, NDIM> rnlp;     // rnlp coefficients
+      Tensor<T, 1> coeff;       // coefficients for the convolution
+      Tensor<T, 1> rnlp;        // rnlp coefficients
+
+
 
       void autocorr_get() {
         detail::autocorr_get(K, p);
       }
 
-      void autoc(){
+      void autoc(const ){
         size_type twoK = 2*K;
         TensorSlice<T, NDIM> autocorr_view = autocorr.current_view();
         autocorr_get(K, autocorr_view.data());
       }
 
-      void rnlij(){
+      void rnlij(const Level n, const Translation lx, TensorView<T, 2>& rnlij){
 
       }
 
@@ -42,30 +48,39 @@ namespace mra {
 
       }
 
-      void rnlp(const Level n, const Translation lx, TensorView<T, 2>& phi,
-                TensorView<T, 1>& rnlp) {
-        std::pair<T, T> integrange{0, 1};
+      void rnlp(const Level n, const Translation lx) {
 
+        Translation lkeep = lx;
+        if (lx < 0) lx = -lx-1;
 
+        T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
+        T fourn = std::pow(T(4), T(n));
+        T beta = expnt * std::pow(T(0.25), T(n));
+        T h = 1.0/std::sqrt(beta);
+        T nbox = T(1/h);
+        if (nbox < 1) nbox = 1;
+        h = 1.0/nbox;
 
+        T sch = std::abs(scaledcoeff*h);
+
+        T argmax = std::abs(std::log(1e-22/sch));
+
+        for (size_type box=0; box<nbox; ++box){
+          T xlo = box*h + lx;
+          if (beta*xlo*xlo > argmax) break;
+
+          for (size_type i=0; i<npt; ++i){
+            T* phix = new T[2*K];
+            T xx = xlo + h*quad_x(i);
+            T ee = scaledcoeff*std::exp(-beta*xx*xx)*quad_w(i)*h;
+
+            legendre_scaling_functions(xx-lx, 2*K, &phix[0]);
+
+            for (size_type p=0; p<2*K; ++p) rnlp(p) = ee*phix[p];
+          }
+        }
       }
 
-    public:
-
-      void get_rnlp(const size_type K, TensorView<T, NDIM>& rnlp) {
-        autocorr_get(K, rnlp.data());
-      }
-
-      // MADNESS -- function name preserved
-      /// Computes the transition matrix elements for the convolution for n,l
-      /// Returns the tensor
-      /// \code
-      ///   r(i,j) = int(K(x-y) phi[n0](x) phi[nl](y), x=0..1, y=0..1)
-      /// \endcode
-      /// This is computed from the matrix elements over the correlation
-      /// function which in turn are computed from the matrix elements
-      /// over the double order legendre polynomials.
-      /// \note if `this->range_restricted()==true`, `θ(D/2 - |x-y|) K(x-y)` is used as the kernel
       void rnlij(
         const size_type K,
         const Level n,
@@ -80,11 +95,12 @@ namespace mra {
           get_rnlp(n, lx, rnlij_view); // append into rnlij_view
         }
 
-      void get_rnlp(const size_type K, const Translation lx, TensorView<T, NDIM>& rnlp) {
-        size_type twoK = 2*K;
+    public:
 
-      }
+      const auto& get_rnlp() const { return rnlp;}
+      const auto& get_rnlij() const { return rnlij;}
   };
+
 
 } // namespace mra
 
