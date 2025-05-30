@@ -131,6 +131,21 @@ namespace mra {
       return *this;
     }
 
+    Tensor operator*(const T scalar) const {
+      Tensor result(*this);
+      for(size_type i = 0; i < this->size(); ++i) {
+        result.data()[i] *= scalar;
+      }
+      return result;
+    }
+
+    Tensor& operator-=(const T scalar) {
+      for(size_type i = 0; i < this->size(); ++i) {
+        this->data()[i] *= scalar;
+      }
+      return *this;
+    }
+
     void fill(value_type value) {
       if (m_buffer.empty()) {
         return;
