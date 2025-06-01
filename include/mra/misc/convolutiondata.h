@@ -84,20 +84,6 @@ namespace mra {
         }
       }
 
-      void rnlij(
-        const size_type K,
-        const Level n,
-        const Translation lx,
-        bool do_transpose,
-        const TensorView<T, NDIM>& c, // this is the array of coefficients from  autocorr.cc autocorr_get()
-        TensorView<T, NDIM>& rnlij){
-          size_type twoK = 2*K;
-
-          TensorSlice<T, NDIM> rnlij_view = rnlij.current_view();
-          get_rnlp(n, lx-1, rnlij_view); // append into rnlij_view
-          get_rnlp(n, lx, rnlij_view); // append into rnlij_view
-        }
-
     public:
 
       ConvolutionData(size_type K, Level n, int npt, Translation lx)
