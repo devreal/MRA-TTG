@@ -88,10 +88,10 @@ namespace mra {
 
       ConvolutionData(size_type K, Level n, int npt, Translation lx)
         : K(K), n(n), npt(npt), lx(lx),
-          quad_x({K}), quad_w({K}),
-          autocorr({K, K, K}),
-          coeff({K}),
-          rnlp({K})
+          quad_x(K), quad_w(K),
+          autocorr(K, K, 4*K),
+          c(K, K, 4*K), rnlij(K, K),
+          coeff(K), rnlp(K)
       {
         autoc();
       }
