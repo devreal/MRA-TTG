@@ -1,9 +1,10 @@
 #ifndef MRA_CONVOLUTIONDATA_H
 #define MRA_CONVOLUTIONDATA_H
 
-#include "mra/misc/types.h"
+#include "mra/ops/inner.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
+#include "mra/misc/types.h"
 #include "mra/misc/adquad.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/autocorr.h"
@@ -38,7 +39,15 @@ namespace mra {
       }
 
       void rnlij(const Level n, const Translation lx){
+        Tensor<T, 1> R(4*K);
+        R_view = R.current_view();
+        R_view(Slice(0, 2*K-1)) = rnlp(n, lx-1);
+        R_view(Slice(2*K, 4*K-1)) = rnlp(n, lx);
 
+        T scale = std::pow(T(0.5), T(0.5*n));
+        R_view *= scale;
+
+        inner(c, R, rnlij);
       }
 
 
