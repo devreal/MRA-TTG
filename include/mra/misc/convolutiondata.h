@@ -10,11 +10,14 @@
 #include "mra/misc/autocorr.h"
 #include "mra/tensor/tensorview.h"
 
-
+#define MRA_MAX_LX 7
 namespace mra {
 
   template <typename T, Dimension NDIM>
   class ConvolutionData {
+
+    public:
+      using rnl_key = std::tuple<Level, Translation>;
 
     private:
       size_type K;
@@ -25,9 +28,10 @@ namespace mra {
       Tensor<T, 1> quad_w;      // quadrature weights
       Tensor<T, 3> autocorr;    // autocorrelation coefficients
       Tensor<T, 3> c;           // autocorrelation coefficients
-      Tensor<T, 2> rnlij;       // rnlij coefficients
       Tensor<T, 1> coeff;       // coefficients for the convolution
       Tensor<T, 1> rnlp;        // rnlp coefficients
+      std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
+      std::mutex mapmutex; // mutex for thread safety
 
 
       void autoc(){
@@ -88,6 +92,29 @@ namespace mra {
           }
         }
       }
+
+      void construct_matrices(const Level n, const Translation lx) {
+        auto key = std::make_tuple(n, lx);
+        if (matrixmap.find(key) != matrixmap.end()) {
+          return; // already constructed
+        }
+
+        std::map<rnl_key, Tensor<T, 2>> rnl0map;
+
+        for (size_type l0 = -lx-MRA_MAX_LX; l0<=lx+MRA_MAX_LX; ++l0) {
+          Tensor<T, 2> rnlij(2*K, 2*K) = make_rnlij(n, l0);
+          auto rnl0_key = std::make_tuple(n, l0);
+          mapmutex.lock();
+          if (rnl0map.find(rnl0_key) == rnl0map.end()) {
+            assert(rnl0map.find(rnl0_key) == rnl0map.end());
+            rnl0_map[rnl0_key] = rnlij;
+            mapmutex.unlock();
+          }
+        }
+        mapmutex.lock();
+        assert(matrixmap.find(key) == matrixmap.end());
+        matrixmap[key] = rnl0_map;
+        mapmutex.unlock();
       }
 
     public:
@@ -103,6 +130,7 @@ namespace mra {
       }
       const auto& get_rnlp() const { return rnlp;}
       const auto& get_rnlij() const { return rnlij;}
+      const auto& construct_matrices(const Level n){ return matrixmap;}
   };
 
 
