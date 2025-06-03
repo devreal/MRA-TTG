@@ -38,24 +38,29 @@ namespace mra {
         c_view(Slice(0, K-1), Slice(0, K-1), Slice(2K, 4*K-1)) = autocorr(Slice(0, K-1), Slice(0, K-1), Slice(2*K, 4*K-1));
       }
 
-      void rnlij(const Level n, const Translation lx){
+      Tensor& make_rnlij(const Level n, const Translation lx){
         Tensor<T, 1> R(4*K);
+        Tensor<T, 2> rnlij(2*K, 2*K);
         R_view = R.current_view();
-        R_view(Slice(0, 2*K-1)) = rnlp(n, lx-1);
-        R_view(Slice(2*K, 4*K-1)) = rnlp(n, lx);
+        make_rnlp(n, lx-1);
+        R_view(Slice(0, 2*K-1)) = rnlp;
+        make_rnlp(n, lx);
+        R_view(Slice(2*K, 4*K-1)) = rnlp;
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
 
         inner(c, R, rnlij);
+
+        return rnlij;
       }
 
 
       // projection of a Gaussian onto double order polynomials
-      void rnlp(const Level n, const Translation lx) {
+      void make_rnlp(const Level n, const Translation lx) {
 
         if (lx < 0) lx = -lx-1;
-
+        rnlp.fill(0.0);
         auto rnlp_view = rnlp.current_view();
         T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
         T beta = expnt * std::pow(T(0.25), T(n));
@@ -82,6 +87,7 @@ namespace mra {
             for (size_type p=0; p<2*K; ++p) rnlp_view(p) += ee*phix[p];
           }
         }
+      }
       }
 
     public:
