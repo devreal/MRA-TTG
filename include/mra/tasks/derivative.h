@@ -135,7 +135,7 @@ namespace mra{
           do_send.template operator()<RIGHT>(right_key, right);
         }
         /* send an empty node as the result since the output tree needs a node anyways */
-        do_send.template operator()<RESULT>(key, center);
+        do_send.template operator()<RESULT>(key, mra::FunctionsReconstructedNode<T, NDIM>());
       } else { // center is not empty
 
         /**
