@@ -20,10 +20,11 @@ namespace mra {
   public:
     // Default is to try to distribute single chunks
     // but the user can specify an oversubscribe factor
-    PartitionPmap(int factor = 1, Type type = Type::BLOCK, size_t nproc = ttg::default_execution_context()::size())
+    PartitionPmap(int factor = 1, unsigned nblocks = 1, Type type = Type::BLOCK, int nproc = ttg::default_execution_context()::size())
     : nproc(nproc)
     , type(type)
     {
+
       /* the minimum number of levels needed in 3D: (nproc*factor)**(1/8) */
       target_level = std::ceil(std::pow(float(nproc * factor), 1.0/(1<<NDIM)));
     }
@@ -59,12 +60,22 @@ namespace mra {
   private:
     const int m_num_pe = 0;
     Level m_target_level = 0;
+    Batch m_num_batches = 1;
+    int m_batches_per_pe = 1;
+    int m_pes_per_batch = 1;
   public:
 
     // Default is to try to optimize the target_level, but you can specify any value > 0
-    PartitionKeymap(int np = ttg::default_execution_context().size(), const Level target_level=0)
+    PartitionKeymap(int num_batches = 1, int np = ttg::default_execution_context().size(), const Level target_level=0)
     : m_num_pe(np)
+    , m_num_batches(num_batches)
     {
+      if (m_num_batches > np) {
+        /* more batches than procs */
+        m_batches_per_pe = num_batches / np;
+      } else {
+        m_pes_per_batch  = np / num_batches;
+      }
       if (target_level > 0) {
         this->m_target_level = target_level;
       } else if (m_num_pe > 0) {
@@ -86,7 +97,14 @@ namespace mra {
       else {
         hash = key.parent(key.level() - m_target_level).hash();
       }
-      return (m_num_pe > 0) ? hash%m_num_pe : 0;
+      int proc = hash % m_num_pe;
+      if (m_num_pe > m_num_batches) {
+        assert(m_pes_per_batch > 1);
+        proc = (m_pes_per_batch*key.batch()) + (hash % m_pes_per_batch);
+      } else {
+        proc = (key.batch() / m_batches_per_pe) + (hash % m_batches_per_pe);
+      }
+      return proc;
     }
 
     Level target_level() const {
@@ -95,6 +113,18 @@ namespace mra {
 
     int num_pe() const {
       return m_num_pe;
+    }
+
+    int num_batches() const {
+      return m_num_batches;
+    }
+
+    int batches_per_proc() const {
+      return m_batches_per_pe;
+    }
+
+    int procs_per_batch() const {
+      return m_pes_per_batch;
     }
   };
 
