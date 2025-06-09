@@ -63,7 +63,7 @@ namespace mra {
       compute_scaling(xmu, K, pv, phi_norms, nn1);
       for (size_type i = 0; i < K; ++i) phi(i, mu) = pv[i];
     }
-    T scale_phi = pow(2.0, 0.5*np);
+    T scale_phi = std::pow(2.0, 0.5*np);
     phi *= scale_phi;
   }
 
@@ -87,7 +87,7 @@ namespace mra {
     else if (child.level() == parent.level()) {
       // coeffs_to_values()
       transform(coeffs, phibar, result_values, workspace);
-      T scale = pow(2.0, 0.5*NDIM*parent.level())/sqrt(D.template get_volume<T>());
+      T scale = std::pow(2.0, 0.5*NDIM*parent.level())/std::sqrt(D.template get_volume<T>());
       result_values *= scale;
     }
     else {
@@ -116,8 +116,14 @@ namespace mra {
                        phi_views[d], p, nn1, phi_norms, quad_x, K);
       }
 
-      general_transform(coeffs, phi_views, result_values);
-      T scale = T(1)/sqrt(D.template get_volume<T>());
+      SHARED TensorView<T, NDIM> result_tmp;
+      if (is_team_lead()) {
+        result_tmp = TensorView<T, NDIM>(workspace, result_values.dims());
+      }
+      SYNCTHREADS();
+
+      general_transform(coeffs, phi_views, result_values, result_tmp);
+      T scale = T(1)/std::sqrt(D.template get_volume<T>());
       result_values *= scale;
 #ifndef HAVE_DEVICE_ARCH
       delete[] phi;

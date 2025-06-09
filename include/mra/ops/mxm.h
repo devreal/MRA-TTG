@@ -6,8 +6,28 @@
 
 #include "mra/ops/mxm_cublasdx.h"
 
+#if __has_include(<blas.hh>)
+#include <blas.hh>
+#define HAVE_BLASPP 1
+#endif // __has_include(<blas.hh>)
+
 namespace mra{
 
+#if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+  /**
+   * blaspp implementation of A^T * B
+   * c(i,j) += sum(k) a(k,i)*b(k,j)
+   */
+  template <typename aT, typename bT, typename cT, bool Q = false>
+  SCOPE void mTxm(size_type dimi, size_type dimj, size_type dimk,
+          cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
+    if (ldb == -1) ldb=dimj;
+    blas::gemm(blas::Layout::RowMajor, blas::Op::Trans, blas::Op::NoTrans,
+               dimi, dimj, dimk,
+               1.0, a, dimi, b, ldb,
+               Q ? 0.0 : 1.0, c, dimj);
+  }
+#else  // HAVE_BLASPP
   /**
    * reference implementation, adapted from madness
    * c(i,j) += sum(k) a(k,i)*b(k,j)
@@ -37,9 +57,21 @@ namespace mra{
     }
     SYNCTHREADS();
   }
-
+#endif // HAVE_BLASPP
 
 #ifndef MRA_HAVE_MTXMQ
+
+#if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+  /**
+   * blaspp implementation of A^T * B
+   * c(i,j) = sum(k) a(k,i)*b(k,j)
+   */
+  template <typename aT, typename bT, typename cT>
+  SCOPE void mTxmq(size_type dimi, size_type dimj, size_type dimk,
+          cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
+    mTxm<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b, ldb);
+  }
+#else  // HAVE_BLASPP
 
   // /**
   //  * reference implementation, adapted from madness
@@ -76,7 +108,7 @@ namespace mra{
     }
     SYNCTHREADS();
   }
-
+#endif // HAVE_BLASPP
 
   template<typename T>
   constexpr size_type mTxmq_shmem_size(size_type K) {

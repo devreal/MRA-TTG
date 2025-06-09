@@ -2,7 +2,7 @@
 # define a base target for the MRA
 add_library(libmra-base-parsec INTERFACE)
 target_include_directories(libmra-base-parsec INTERFACE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(libmra-base-parsec INTERFACE MADworld ttg-parsec)
+target_link_libraries(libmra-base-parsec INTERFACE MADworld ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
 #define a target for the host
@@ -29,12 +29,9 @@ add_executable(mra-unit-host-parsec
 target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
 
 # Holding this off until BLAS in MADNESS works for our use case
-add_executable(mra-mad-host-parsec
-               tests/mad_derivative_test.cc
-               gl.cc
-               twoscale.cc)
-target_compile_definitions(mra-mad-host-parsec PUBLIC MRA_ENABLE_HOST=1 TTG_USE_PARSEC=1)
-target_link_libraries(mra-mad-host-parsec PUBLIC MADworld MADtensor MADmra ttg-parsec)
+add_executable(mra-mad-deriv-host-parsec
+               tests/mad_derivative_test.cc)
+target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
 
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
 target_link_libraries(mra-cycledimtest PUBLIC libmra-host-parsec)
