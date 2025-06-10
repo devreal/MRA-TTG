@@ -10,10 +10,6 @@ add_library(libmra-host-parsec OBJECT gl.cc twoscale.cc kernels/compress.cc kern
 target_link_libraries(libmra-host-parsec PUBLIC libmra-base-parsec)
 target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
 
-add_executable(mra-pcr-host-parsec
-               examples/pcr/test_pcr.cc)
-target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
-
 add_executable(mad-pcr
                examples/pcr/test_pcr_madness.cc)
 target_link_libraries(mad-pcr PUBLIC MADchem)
