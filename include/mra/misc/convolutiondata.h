@@ -38,8 +38,10 @@ namespace mra {
         detail::autocorr_get(K, autocorr.data());
 
         auto c_view = c.current_view();
-        c_view(Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)) = autocorr(Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1));
-        c_view(Slice(0, K-1), Slice(0, K-1), Slice(2K, 4*K-1)) = autocorr(Slice(0, K-1), Slice(0, K-1), Slice(2*K, 4*K-1));
+        std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
+        c_view(slices) = autocorr(slices);
+        slices = {Slice(0, K-1), Slice(0, K-1), Slice(2K, 4*K-1)};
+        c_view(slices) = autocorr(slices);
       }
 
       Tensor& make_rnlij(const Level n, const Translation lx){
