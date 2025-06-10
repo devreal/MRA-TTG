@@ -89,7 +89,7 @@ namespace mra {
         m_idx[d] = 0;
         d--;
         if (d < 0) {
-          m_p0 = 0;
+          m_p0 = nullptr;
           return *this;
         }
       }
@@ -98,13 +98,13 @@ namespace mra {
       return *this;
     }
 
-    SCOPE TensorIterator& operator+=(size_type c) {
+    SCOPE TensorIterator& operator+=(ssize_type c) {
       ssize_type d = m_ndim-1;
       if (m_p0==0) {
         return *this;
       }
       while (c > 0) {
-        ssize_type inc = std::min(c, size_type(dim(d)-m_idx[d]));
+        ssize_type inc = std::min(c, ssize_type(dim(d)-m_idx[d])-1);
         m_p0 += inc*stride(d);
         m_idx[d] += inc;
         c -= inc;
@@ -113,7 +113,7 @@ namespace mra {
           m_idx[d] = 0;
           d--;
           if (d < 0) {
-            m_p0 = 0;
+            m_p0 = nullptr;
             return *this;
           }
         }
