@@ -14,6 +14,15 @@ add_executable(mra-pcr-host-parsec
                examples/pcr/test_pcr.cc)
 target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
 
+add_executable(mad-pcr
+               examples/pcr/test_pcr_madness.cc)
+target_link_libraries(mad-pcr PUBLIC MADchem)
+target_include_directories(mad-pcr PUBLIC ${CMAKE_SOURCE_DIR}/include)
+
+add_executable(mra-pcr-host-parsec
+               examples/pcr/test_pcr.cc)
+target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
+
 add_executable(mra-derivative-host-parsec
                examples/derivative/test_derivative.cc)
 target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)

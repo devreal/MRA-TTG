@@ -91,7 +91,8 @@ namespace mra::detail {
   do {                                                                                   \
     name<<<block, thread, shared, stream>>> args;                                        \
     if (hipPeekAtLastError() != hipSuccess) {                                            \
-      std::cout << "kernel submission failed with " << shared << "B smem at " << __FILE__ << ":" << __LINE__ << ": " \
+      std::cout << "kernel submission failed with " << shared << "B smem at "            \
+                << __FILE__ << ":" << __LINE__ << ": "                                   \
       << hipGetErrorString(hipPeekAtLastError()) << std::endl;                           \
       throw std::runtime_error("kernel submission failed");                              \
     }                                                                                    \

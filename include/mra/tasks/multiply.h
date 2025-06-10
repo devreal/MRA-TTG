@@ -115,6 +115,11 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::wait(norms.buffer());
 #endif // MRA_ENABLE_HOST
+
+        norms.compute();
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::wait(norms.buffer());
+#endif // MRA_ENABLE_HOST
         norms.verify();
 
 
