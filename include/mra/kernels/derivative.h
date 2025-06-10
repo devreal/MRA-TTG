@@ -183,7 +183,7 @@ namespace mra {
         transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_RPT), tmp_result, deriv, axis);
       }
 
-      T scale = std::sqrt(D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level())));
+      T scale = D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level()));
       T thresh = T(1e-12);
       deriv *= scale;
       deriv.reduce_rank(thresh);
