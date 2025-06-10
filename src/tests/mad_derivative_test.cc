@@ -104,7 +104,7 @@ void compare_dudx_exact_madness(auto& madfunc, auto& madfunc_exact, std::string 
 }
 
 template <typename T>
-auto compute_udx_madness(madness::World& world, size_type k, T thresh, int init_lev) {
+auto compute_udx_madness(madness::World& world, int axis, size_type k, T thresh, int init_lev) {
 
   functionT u = compute_u_madness<T>(world, k, thresh, init_lev);
   functionT xleft_d = factoryT(world).f(xbdy_dirichlet) ;
@@ -118,13 +118,13 @@ auto compute_udx_madness(madness::World& world, size_type k, T thresh, int init_
   bc(2,0) = madness::BCType::BC_FREE;
   bc(2,1) = madness::BCType::BC_FREE;
 
-  madness::Derivative<T, 3> dx1(world, 0, bc, xleft_d, xright_d, k);
+  madness::Derivative<T, 3> dx1(world, axis, bc, xleft_d, xright_d, k);
   functionT dudx1 = dx1(u);
-  dudx1.truncate();
+  //dudx1.truncate();
 
-  auto dudx_exact = compute_udx_exact_madness(world, k, thresh, init_lev);
-
-  compare_dudx_exact_madness<T>(dudx1, dudx_exact, "dudx_exact", thresh);
+  // TODO: how to compute the exact derivative along one axis?
+  //auto dudx_exact = compute_udx_exact_madness(world, k, thresh, init_lev);
+  //compare_dudx_exact_madness<T>(dudx1, dudx_exact, "dudx_exact", thresh);
 
   return dudx1;
 }
@@ -148,6 +148,9 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
       if (absdiff > precision) {
         std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
                   << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
+      } else {
+        //std::cout << name << ": " << it->first << " with norm " << mad_norm
+        //          << " matches MRA norm " << mra_norm << std::endl;
       }
     } else {
       std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
@@ -234,7 +237,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
     auto u_result = compute_u_madness<T>(world, K, precision, init_lev);
     compare_mra_madness<T, NDIM>(u_result, umap, "u_result", verification_precision);
 
-    auto deriv_result = compute_udx_madness<T>(world, K, precision, init_lev);
+    auto deriv_result = compute_udx_madness<T>(world, axis, K, precision, init_lev);
     compare_mra_madness<T, NDIM>(deriv_result, cmap, "deriv_result", verification_precision);
   }
   world.gop.fence();
@@ -248,10 +251,10 @@ int main(int argc, char **argv) {
   size_type K = opt.parse("-K", 10);
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int axis    = opt.parse("-a", 0);
-  int log_precision = opt.parse("-p", 4); // default: 1e-4
+  int log_precision = opt.parse("-p", 6); // default: 1e-4
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
-  int verification_log_precision = opt.parse("-v", 10); // default: 1e-4
+  int verification_log_precision = opt.parse("-v", 15); // default: 1e-15
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
@@ -263,7 +266,7 @@ int main(int argc, char **argv) {
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
 
   test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level,
-                             std::pow(10, verification_log_precision), argc, argv);
+                             std::pow(10, -verification_log_precision), argc, argv);
 
   madness::finalize();
   ttg::finalize();
