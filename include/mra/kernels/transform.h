@@ -96,6 +96,7 @@ namespace mra {
         detail::inner(node, op, result, axis, 0);
       }
       else {
+        tmp_result = 0.0; // reset tmp_result
         detail::inner(node, op, tmp_result, axis, 0);
         detail::cycledim(tmp_result, result, 1, axis, -1); // copy to make contiguous
       }
