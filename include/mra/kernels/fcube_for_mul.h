@@ -59,7 +59,7 @@ namespace mra {
 
     for(size_type mu = 0; mu < K; ++mu) {
       T xmu = scale * (quad_x(mu) + lc) - lp;
-      assert(xmu > 1e-15 && xmu < 1.0 + 1e-15);
+      assert(xmu > -1e-15 && xmu < 1.0 + 1e-15);
       compute_scaling(xmu, K, pv, phi_norms, nn1);
       for (size_type i = 0; i < K; ++i) phi(i, mu) = pv[i];
     }
