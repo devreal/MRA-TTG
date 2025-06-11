@@ -222,7 +222,15 @@ namespace mra {
         std::vector<function_metadata> m_metadata;
 
       public:
+        /* constructs an empty node without key information,
+         * needed for default construction during serialization
+         * but should otherwise not be used */
         FunctionsReconstructedNode() = default;
+
+        /* constructs an empty node with key information */
+        FunctionsReconstructedNode(const Key<NDIM>& key)
+        : base_type(key)
+        { }
 
         /* constructs a node with metadata for N functions and all coefficients zero */
         FunctionsReconstructedNode(const Key<NDIM>& key, size_type N)
@@ -329,7 +337,15 @@ namespace mra {
         std::vector<std::array<bool, Key<NDIM>::num_children()>> m_is_child_leafs; //< True if that child is leaf on tree
 
       public:
+        /* constructs an empty node without key information,
+        * needed for default construction during serialization
+        * but should otherwise not be used */
         FunctionsCompressedNode() = default; // needed for serialization
+
+        /* constructs a node for N functions with zero coefficients */
+        FunctionsCompressedNode(const Key<NDIM>& key)
+        : base_type(key)
+        { }
 
         /* constructs a node for N functions with zero coefficients */
         FunctionsCompressedNode(const Key<NDIM>& key, size_type N)

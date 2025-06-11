@@ -135,7 +135,7 @@ namespace mra{
           do_send.template operator()<RIGHT>(right_key, right);
         }
         /* send an empty node as the result since the output tree needs a node anyways */
-        do_send.template operator()<RESULT>(key, mra::FunctionsReconstructedNode<T, NDIM>());
+        do_send.template operator()<RESULT>(key, mra::FunctionsReconstructedNode<T, NDIM>(key));
       } else { // center is not empty
 
         /**
@@ -146,7 +146,7 @@ namespace mra{
 
         if (need_refinement) {
 
-          auto make_empty = []{ return mra::FunctionsReconstructedNode<T, NDIM>(); };
+          auto make_empty = [&]{ return mra::FunctionsReconstructedNode<T, NDIM>(key); };
 
           /**
            * Send center to all children.
@@ -211,7 +211,7 @@ namespace mra{
           }
 
           /* send an empty node as result because center would be refined and it would be internal node on output tree*/
-          do_send.template operator()<RESULT>(key, mra::FunctionsReconstructedNode<T, NDIM>());
+          do_send.template operator()<RESULT>(key, mra::FunctionsReconstructedNode<T, NDIM>(key));
         } else {
           /**
            * We can finally compute the derivative.
