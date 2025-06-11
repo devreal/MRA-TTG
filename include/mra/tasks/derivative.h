@@ -124,20 +124,21 @@ namespace mra{
          * If the right node is not empty, we need to refine it to the right child.
          * These children will eventually receive a non-empty center node.
          */
-          left_key = key.neighbor(axis, -1);
+        for (auto child : children(key)) {
           if (!left.empty()){
             if (child.is_left_child(axis)) { // skip right children
               //std::cout << "derivative " << key << " left not empty, sending to left child " << child << std::endl;
-              do_send.template operator()<LEFT>(left_key, left);
+              do_send.template operator()<LEFT>(child, left);
             }
           }
-          right_key = key.neighbor(axis, 1);
+
           if (!right.empty()){
             if (child.is_right_child(axis)) { // skip left children
               //std::cout << "derivative " << key << " right not empty, sending to right child " << child << std::endl;
-              do_send.template operator()<RIGHT>(right_key, right);
+              do_send.template operator()<RIGHT>(child, right);
             }
           }
+        }
         /* send an empty node as the result since the output tree needs a node anyways */
         do_send.template operator()<RESULT>(key, mra::FunctionsReconstructedNode<T, NDIM>(key));
       } else { // center is not empty
