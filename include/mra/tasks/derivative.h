@@ -124,12 +124,12 @@ namespace mra{
          * If the right node is not empty, we need to refine it to the right child.
          * These children will eventually receive a non-empty center node.
          */
-        auto left_key = key.neighbor(axis, -1);
+        left_key = key.neighbor(axis, -1);
         if (!left.empty()){
           //std::cout << "derivative " << key << " left not empty, sending to left child " << child << std::endl;
           do_send.template operator()<LEFT>(left_key, left);
         }
-        auto right_key = key.neighbor(axis, 1);
+        right_key = key.neighbor(axis, 1);
         if (!right.empty()){
           //std::cout << "derivative " << key << " right not empty, sending to right child " << child << std::endl;
           do_send.template operator()<RIGHT>(right_key, right);
