@@ -63,6 +63,14 @@ namespace mra{
         size_type dimj = left.dim(k0);
         auto iter1 = right.unary_iterator(IterLevel::Vector, false, k1);
         T* ptr = result.data();
+        auto iter0 = left.unary_iterator(IterLevel::Vector, false, k0);
+        //std::cout << "INNER " << " k0=" << k0 << " k1=" << k1
+        //          << " dimj=" << dimj
+        //          << " iter1.size()=" << iter1.size()
+        //          << " iter1.s0()=" << iter1.s0()
+        //          << " iter0.size()=" << iter0.size()
+        //          << " iter0.s0()=" << iter0.s0()
+        //          << " result.size()=" << result.size() << std::endl;
         for (auto iter0 = left.unary_iterator(IterLevel::Vector, false, k0);
              iter0.data() != nullptr;
              ++iter0, ptr += iter1.size()) {
@@ -77,10 +85,18 @@ namespace mra{
             const T* __restrict__ p1 = iter1.data();
             ssize_type s1 = iter1.s0();
             T sum = 0;
+            //std::cout << "INNER SUM p0 " << p0 - left.data()
+            //          << " s0 " << s0 <<  " p1 " << p1 - right.data()
+            //          << " s1 " << s1
+            //          << " result " << res - result.data() << std::endl;
             for (size_type j=0; j<dimj; ++j, p0+=s0, p1+=s1) {
+              //std::cout << "MAD-INNER SUM p0 " << p0 - left.data() << " p1 " << p1 - right.data() << std::endl;
               sum += (*p0) * (*p1);
             }
             res[thread_id()] += sum;
+            //std::cout << "INNER SUM " << sum
+            //          << " res " << res[thread_id()]
+            //          << " at " << res - result.data() << std::endl;
           }
         }
       }

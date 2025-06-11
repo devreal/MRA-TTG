@@ -98,7 +98,11 @@ namespace mra {
       else {
         tmp_result = 0.0; // reset tmp_result
         detail::inner(node, op, tmp_result, axis, 0);
-        detail::cycledim(tmp_result, result, 1, axis, -1); // copy to make contiguous
+        //std::cout << "transform_dir " << normf(node) << " axis " << axis
+        //          << " tmp_result " << normf(tmp_result) << std::endl;
+        detail::cycledim(tmp_result, result, 1, axis, -1);
+        //std::cout << "cycledim " << normf(tmp_result) << " axis " << axis
+        //          << " result " << normf(result) << std::endl;
       }
     }
 

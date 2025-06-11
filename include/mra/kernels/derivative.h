@@ -127,14 +127,19 @@ namespace mra {
       parent_to_child(D, right,  key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
       deriv = 0;
 
+      //std::cout << "INNER " << key << " axis " << axis << " deriv " << normf(deriv) << std::endl;
       transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RPT), tmp_result, deriv, axis);
+      //std::cout << "INNER " << key << " axis " << axis << " left_tmp " << normf(left_tmp) << " deriv " << normf(deriv) << std::endl;
       transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp_result, deriv, axis);
+      //std::cout << "INNER " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
       transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp_result, deriv, axis);
+      //std::cout << "INNER " << key << " axis " << axis << " right_tmp " << normf(right_tmp) << " deriv " << normf(deriv) << std::endl;
 
       T scale = D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level()));
       T thresh = T(1e-12);
       deriv *= scale;
       deriv.reduce_rank(thresh);
+      //std::cout << "INNER " << key << " axis " << axis << " scale " << scale << " RESULT "<< " deriv " << normf(deriv) << std::endl;
     }
 
     template <typename T, Dimension NDIM>
@@ -171,7 +176,9 @@ namespace mra {
 
         deriv = 0;
         transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp_result, deriv, axis);
+        //std::cout << "BOUNDARY " << key << " axis " << axis << " right_tmp " << normf(right_tmp) << " deriv " << normf(deriv) << std::endl;
         transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp_result, deriv, axis);
+        //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
       }
       else {
         tmp_result = T(0);
@@ -180,7 +187,9 @@ namespace mra {
 
         deriv = 0;
         transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_R0T), tmp_result, deriv, axis);
+        //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
         transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_RPT), tmp_result, deriv, axis);
+        //std::cout << "BOUNDARY " << key << " axis " << axis << " left_tmp " << normf(left_tmp) << " deriv " << normf(deriv) << std::endl;
       }
 
       T scale = D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level()));
