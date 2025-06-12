@@ -113,13 +113,24 @@ namespace mra {
   SCOPE void general_transform(
     const TensorView<T, NDIM>& t,
     const std::array<TensorView<T, 2>, ARRDIM>& c,
-    TensorView<T, NDIM>& result,
-    TensorView<T, NDIM>& result_tmp)
+    TensorView<T, NDIM>& result_in,
+    TensorView<T, NDIM>& result_tmp_in)
     {
+      /* create our own tensor views pointing to the input
+       * data so we don't have to modify the input views */
+      SHARED TensorView<T, NDIM> result, result_tmp;
+      if (is_team_lead()) {
+        result = TensorView<T, NDIM>(result_in.data(), result_in.dims());
+        result_tmp = TensorView<T, NDIM>(result_tmp_in.data(), result_tmp_in.dims());
+      }
+      SYNCTHREADS();
       if constexpr (NDIM % 2) {
         // make sure result and result_tmp
         // end up pointing to the same memory
-        std::swap(result, result_tmp);
+        if (is_team_lead()) {
+          std::swap(result, result_tmp);
+        }
+        SYNCTHREADS();
       }
       result = t; // prime result
       for (size_type i = 0; i < NDIM; ++i){
@@ -127,7 +138,11 @@ namespace mra {
         // TODO: make accumulation optional?
         result_tmp = 0;
         detail::inner(result, c[i], result_tmp, 0, 0);
-        std::swap(result, result_tmp);
+        std::cout << "general_transform: i=" << i << " result_tmp \n" << result_tmp << std::endl;
+        if (is_team_lead()) {
+          std::swap(result, result_tmp);
+        }
+        SYNCTHREADS();
       }
     }
 
