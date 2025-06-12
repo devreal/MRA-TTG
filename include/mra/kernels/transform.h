@@ -100,11 +100,7 @@ namespace mra {
         auto cycle_result = tmp(1);
         inner_result = 0.0; // reset result of inner
         detail::inner(node, op, inner_result, axis, 0);
-        std::cout << "transform_dir " << normf(node) << " axis " << axis
-                  << " inner_result " << normf(inner_result) << std::endl;
         detail::cycledim(inner_result, cycle_result, 1, axis, -1);
-        std::cout << "cycledim " << " axis " << axis
-                  << " result " << normf(cycle_result) << std::endl;
         result += cycle_result;
       }
     }
@@ -138,7 +134,6 @@ namespace mra {
         // TODO: make accumulation optional?
         result_tmp = 0;
         detail::inner(result, c[i], result_tmp, 0, 0);
-        std::cout << "general_transform: i=" << i << " result_tmp \n" << result_tmp << std::endl;
         if (is_team_lead()) {
           std::swap(result, result_tmp);
         }
