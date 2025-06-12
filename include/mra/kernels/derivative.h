@@ -34,12 +34,21 @@ namespace mra {
     const size_type K,
     T* tmp)
     {
-      if (parent == child || parent.is_invalid() || child.is_invalid()) result = coeffs;
-
-      fcube_for_mul(D, child, parent, coeffs, result_tmp, phibar, phi, quad_x, K, tmp);
-      T scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level())));
-      result_tmp *= scale;
-      transform(result_tmp, phibar, result, tmp);
+      if (parent == child || parent.is_invalid() || child.is_invalid()) {
+        result = coeffs;
+      } else {
+        fcube_for_mul(D, child, parent, coeffs, result_tmp, phibar, phi, quad_x, K, tmp);
+        //std::cout << "PARENT TO CHILD: parent " << parent << " child " << child
+        //          << " phibar " << normf(phibar)
+        //          << " fcube_for_mul result " << normf(result_tmp)
+        //          << " scale " << std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level()))) << std::endl;
+        T scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level())));
+        result_tmp *= scale;
+        //std::cout << "PARENT TO CHILD: result_tmp " << result_tmp << std::endl;
+        //std::cout << "PARENT TO CHILD: phibar " << phibar << std::endl;
+        transform(result_tmp, phibar, result, tmp);
+        //std::cout << "PARENT TO CHILD: result " << result << std::endl;
+      }
     }
   namespace detail {
 
