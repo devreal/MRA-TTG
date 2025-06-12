@@ -148,12 +148,14 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
       if (absdiff > precision) {
         std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
                   << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
+        throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
       } else {
         //std::cout << name << ": " << it->first << " with norm " << mad_norm
         //          << " matches MRA norm " << mra_norm << std::endl;
       }
     } else {
       std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
+      throw std::runtime_error(name + ": mismatch in tree nodes between MADNESS and MRA");
     }
   }
   // check if all MRA keys are in the madness map
@@ -248,13 +250,13 @@ int main(int argc, char **argv) {
   /* options */
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
-  size_type K = opt.parse("-K", 10);
+  size_type K = opt.parse("-K", 8);
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int axis    = opt.parse("-a", 0);
-  int log_precision = opt.parse("-p", 6); // default: 1e-4
+  int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
-  int verification_log_precision = opt.parse("-v", 15); // default: 1e-15
+  int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
