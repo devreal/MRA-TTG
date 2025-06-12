@@ -12,17 +12,6 @@
 namespace mra {
 
     namespace detail {
-
-      template<Dimension NDIM, std::size_t... Is>
-      std::array<size_type, NDIM> make_dims_helper(size_type N, size_type K, std::index_sequence<Is...>) {
-        return std::array<size_type, NDIM>{N, ((void)Is, K)...};
-      }
-      /* helper to create {N, K, K, K, ...} dims array */
-      template<Dimension NDIM>
-      std::array<size_type, NDIM> make_dims(size_type N, size_type K) {
-        return make_dims_helper<NDIM>(N, K, std::make_index_sequence<NDIM-1>{});
-      }
-
       template<typename T, Dimension NDIM>
       class FunctionNodeBase {
       public: // temporarily make everything public while we figure out what we are doing
@@ -86,9 +75,9 @@ namespace mra {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
 #ifndef MRA_ENABLE_HOST
-          m_coeffs = tensor_type(detail::make_dims<ndim()+1>(m_num_func, K), scope);
+          m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), scope);
 #else
-          m_coeffs = tensor_type(detail::make_dims<ndim()+1>(m_num_func, K), ttg::scope::SyncIn); // make sure we allocate on host
+          m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), ttg::scope::SyncIn); // make sure we allocate on host
 #endif
         }
 
