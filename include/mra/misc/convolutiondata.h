@@ -23,12 +23,13 @@ namespace mra {
       size_type K;
       Level n;
       int npt;                  // number of quadrature points
+      T expnt;
+      T coeff;
       Translation lx;
       Tensor<T, 1> quad_x;      // quadrature points
       Tensor<T, 1> quad_w;      // quadrature weights
       Tensor<T, 3> autocorr;    // autocorrelation coefficients
       Tensor<T, 3> c;           // autocorrelation coefficients
-      Tensor<T, 1> coeff;       // coefficients for the convolution
       Tensor<T, 1> rnlp;        // rnlp coefficients
       std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
       std::mutex mapmutex; // mutex for thread safety
@@ -38,16 +39,18 @@ namespace mra {
         detail::autocorr_get(K, autocorr.data());
 
         auto c_view = c.current_view();
+        auto autocorr_view = autocorr.current_view();
+        c_view = 0.0;
         std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
-        c_view(slices) = autocorr(slices);
-        slices = {Slice(0, K-1), Slice(0, K-1), Slice(2K, 4*K-1)};
-        c_view(slices) = autocorr(slices);
+        c_view(slices) = autocorr_view(slices);
+        slices = {Slice(0, K-1), Slice(0, K-1), Slice(2*K, 4*K-1)};
+        c_view(slices) = autocorr_view(slices);
       }
 
-      Tensor& make_rnlij(const Level n, const Translation lx){
+      Tensor<T, 2>& make_rnlij(const Level n, const Translation lx){
         Tensor<T, 1> R(4*K);
         Tensor<T, 2> rnlij(2*K, 2*K);
-        R_view = R.current_view();
+        auto R_view = R.current_view();
         make_rnlp(n, lx-1);
         R_view(Slice(0, 2*K-1)) = rnlp;
         make_rnlp(n, lx);
@@ -63,7 +66,7 @@ namespace mra {
 
 
       // projection of a Gaussian onto double order polynomials
-      void make_rnlp(const Level n, const Translation lx) {
+      void make_rnlp(const Level n, Translation lx) {
 
         if (lx < 0) lx = -lx-1;
         rnlp.fill(0.0);
@@ -104,34 +107,32 @@ namespace mra {
         std::map<rnl_key, Tensor<T, 2>> rnl0map;
 
         for (size_type l0 = -lx-MRA_MAX_LX; l0<=lx+MRA_MAX_LX; ++l0) {
-          Tensor<T, 2> rnlij(2*K, 2*K) = make_rnlij(n, l0);
+          Tensor<T, 2> rnlij = make_rnlij(n, l0);
           auto rnl0_key = std::make_tuple(n, l0);
           mapmutex.lock();
           if (rnl0map.find(rnl0_key) == rnl0map.end()) {
             assert(rnl0map.find(rnl0_key) == rnl0map.end());
-            rnl0_map[rnl0_key] = rnlij;
+            rnl0map[rnl0_key] = rnlij;
             mapmutex.unlock();
           }
         }
         mapmutex.lock();
         assert(matrixmap.find(key) == matrixmap.end());
-        matrixmap[key] = rnl0_map;
+        matrixmap[key] = rnl0map;
         mapmutex.unlock();
       }
 
     public:
 
-      ConvolutionData(size_type K, Level n, int npt, Translation lx)
+      ConvolutionData(size_type K, Level n, int npt, Translation lx, T coeff)
         : K(K), n(n), npt(npt), lx(lx),
           quad_x(K), quad_w(K),
           autocorr(K, K, 4*K),
-          c(K, K, 4*K), rnlij(K, K),
-          coeff(K), rnlp(K)
+          c(K, K, 4*K), coeff(coeff), rnlp(K)
       {
         autoc();
       }
       const auto& get_rnlp() const { return rnlp;}
-      const auto& get_rnlij() const { return rnlij;}
       const auto& construct_matrices(const Level n){ return matrixmap;}
   };
 
