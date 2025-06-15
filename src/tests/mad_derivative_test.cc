@@ -32,6 +32,18 @@ static T du_dx_exact(const coordT &pt) {
 }
 
 template <typename T>
+static T du_dy_exact(const coordT &pt) {
+  auto fac = std::pow(T(2.0*10/std::numbers::pi),T(0.25*3)); // normalization factor
+  return -20*fac*pt[1]*(std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+}
+
+template <typename T>
+static T du_dz_exact(const coordT &pt) {
+  auto fac = std::pow(T(2.0*10/std::numbers::pi),T(0.25*3)); // normalization factor
+  return -20*fac*pt[2]*(std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+}
+
+template <typename T>
 static T xbdy_dirichlet(const coordT &pt) {
   return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
 }
@@ -53,7 +65,7 @@ auto compute_u_madness(madness::World& world, size_type k, T thresh, int init_le
 }
 
 template <typename T>
-auto compute_udx_exact_madness(madness::World& world, size_type k, T thresh, int init_lev) {
+auto compute_udx_exact_madness(madness::World& world, int axis, size_type k, T thresh, int init_lev) {
 
   madness::FunctionDefaults<3>::set_cubic_cell( -6, 6 );
   madness::FunctionDefaults<3>::set_k(k);
@@ -61,11 +73,28 @@ auto compute_udx_exact_madness(madness::World& world, size_type k, T thresh, int
   madness::FunctionDefaults<3>::set_autorefine(true);
   madness::FunctionDefaults<3>::set_thresh(thresh);
   madness::FunctionDefaults<3>::set_initial_level(init_lev);
+  functionT dudxyz;
 
-  functionT dudx = factoryT(world).f(du_dx_exact);
-  //dudx.truncate();
+  switch (axis) {
+    case 0:
+      // derivative in x direction
+      dudxyz = factoryT(world).f(du_dx_exact);
+      break;
+    case 1:
+      // derivative in y direction
+      dudxyz = factoryT(world).f(du_dy_exact);
+      break;
+    case 2:
+      // derivative in z direction
+      dudxyz = factoryT(world).f(du_dz_exact);
+      break;
+    default:
+      throw std::runtime_error("Invalid axis for derivative");
+  }
 
-  return dudx;
+  //dudxyz.truncate();
+
+  return dudxyz;
 
 }
 
@@ -122,8 +151,7 @@ auto compute_udx_madness(madness::World& world, int axis, size_type k, T thresh,
   functionT dudx1 = dx1(u);
   //dudx1.truncate();
 
-  // TODO: how to compute the exact derivative along one axis?
-  //auto dudx_exact = compute_udx_exact_madness(world, k, thresh, init_lev);
+  //auto dudx_exact = compute_udx_exact_madness(world, axis, k, thresh, init_lev);
   //compare_dudx_exact_madness<T>(dudx1, dudx_exact, "dudx_exact", thresh);
 
   return dudx1;
@@ -171,13 +199,16 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
 }
 
 template<typename T, mra::Dimension NDIM>
-void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, int max_level,
+void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, int max_level,
                      T verification_precision, int argc, char** argv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6,6);
   T g1 = 0;
   T g2 = 0;
+
+
+  std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
