@@ -11337,15 +11337,16 @@ namespace mra{
       template <typename T>
       void autocorr_get(size_type K, mra::TensorView<T, 3>& cread){
 
-        int i, j, k, it=0, twoK = 2*K;
-        double val;
-
+        int it=0;
         while(1){
-          if(it >= K) break;
+          int i, j, k, twoK = 2*K;
+          double val;
+
+          if(autocorr[it][0] >= K) break;
           i   = (int)autocorr[it][0];
           j   = (int)autocorr[it][1];
           k   = (int)autocorr[it][2];
-          val = autocorr[it][3];
+          val = (double)autocorr[it][3];
 
           double ij  = parity(i+j);
           double ijk = parity(i+j+k);
@@ -11354,10 +11355,11 @@ namespace mra{
           cread(i, j, k+twoK) = val; // c+
           cread(j, i, k+twoK) = val * ij;
 
-          ++it;
-        }
+          it++;
 
-        std::cout << "called" << std::endl;
+          std::cout << "it: " << it << " i: " << i << " j: " << j << " k: " << k
+                    << " val: " << val << std::endl;
+        }
       }
 
       template void autocorr_get<double>(size_type K, TensorView<double, 3>& cread);
