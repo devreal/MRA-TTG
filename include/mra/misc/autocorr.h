@@ -2,14 +2,14 @@
 #define MRA_AUTOCORR_H
 
 #include "mra/misc/types.h"
+#include "mra/tensor/tensorview.h"
 
 
 namespace mra{
   namespace detail {
-
-    /// Copies the multiwavelet autocorrelation coefficients into p which should be [2k][2k] and either double or float
+    /// \brief Get autocorrelation coefficients for a given K
     template <typename T>
-    void autocorr_get(size_type K, T* p);
+    void autocorr_get(size_type K, TensorView<T, 3>& cread);
 
   } // namespace detail
 

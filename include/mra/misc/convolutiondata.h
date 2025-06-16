@@ -28,7 +28,7 @@ namespace mra {
       Translation lx;
       Tensor<T, 1> quad_x;      // quadrature points
       Tensor<T, 1> quad_w;      // quadrature weights
-      Tensor<T, 3> autocorr;    // autocorrelation coefficients
+      Tensor<T, 3> autocorrcoef;    // autocorrelation coefficients
       Tensor<T, 3> c;           // autocorrelation coefficients
       Tensor<T, 1> rnlp;        // rnlp coefficients
       std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
@@ -36,10 +36,9 @@ namespace mra {
 
 
       void autoc(){
-        detail::autocorr_get(K, autocorr.data());
-
         auto c_view = c.current_view();
-        auto autocorr_view = autocorr.current_view();
+        auto autocorr_view = autocorrcoef.current_view();
+        detail::autocorr_get<T>(K, autocorr_view);
         c_view = 0.0;
         std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
         c_view(slices) = autocorr_view(slices);
@@ -127,14 +126,23 @@ namespace mra {
       ConvolutionData(size_type K, Level n, int npt, Translation lx, T coeff)
         : K(K), n(n), npt(npt), lx(lx),
           quad_x(K), quad_w(K),
-          autocorr(K, K, 4*K),
+          autocorrcoef(K, K, 4*K),
           c(K, K, 4*K), coeff(coeff), rnlp(K)
       {
         autoc();
       }
+
+      ConvolutionData(ConvolutionData&&) = default;
+      ConvolutionData(const ConvolutionData&) = delete;
+      ConvolutionData& operator=(ConvolutionData&&) = default;
+      ConvolutionData& operator=(const ConvolutionData&) = delete;
+
       const auto& get_rnlp() const { return rnlp;}
       const auto& construct_matrices(const Level n){ return matrixmap;}
-  };
+      const auto& get_c(){ return c;}
+      const auto& get_autocorrcoef(){ return autocorrcoef;}
+
+    };
 
 
 } // namespace mra

@@ -47,8 +47,8 @@ add_executable(mra-matrixtest tests/matrix_test.cc)
 target_link_libraries(mra-matrixtest PUBLIC libmra-host-parsec)
 
 #test to verify transition matrices
-add_executable(mra-trmatrixtest tests/trmat_test.cc)
-target_link_libraries(mra-trmatrixtest PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
+add_executable(mra-trmatrixtest autocorr.cc tests/trmat_test.cc)
+target_link_libraries(mra-trmatrixtest PUBLIC MADworld MADmra MADtensor libmra-host-parsec)
 
 # test to verify that inner() works
 # FIXME: this test breaks because of BLAS in MADNESS, the baine of our existence

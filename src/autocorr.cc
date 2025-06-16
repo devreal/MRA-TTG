@@ -11356,9 +11356,6 @@ namespace mra{
           cread(j, i, k+twoK) = val * ij;
 
           it++;
-
-          std::cout << "it: " << it << " i: " << i << " j: " << j << " k: " << k
-                    << " val: " << val << std::endl;
         }
       }
 
