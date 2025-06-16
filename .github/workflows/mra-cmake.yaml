@@ -116,4 +116,14 @@ jobs:
       shell: bash
       # Execute the build.  You can specify a specific target with "--target <NAME>"
       run: ccache -p && ccache -z && cmake --build . && ccache -s
+    - name: Test Derivative [host]
+      if: ${{ matrix.device == 'host' }}
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: ./src/mra-mad-deriv-host-parsec
+    - name: Test PCR [host]
+      if: ${{ matrix.device == 'host' }}
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: ./src/mra-pcr-host-parsec
 

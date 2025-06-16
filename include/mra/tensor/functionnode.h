@@ -12,17 +12,6 @@
 namespace mra {
 
     namespace detail {
-
-      template<Dimension NDIM, std::size_t... Is>
-      std::array<size_type, NDIM> make_dims_helper(size_type N, size_type K, std::index_sequence<Is...>) {
-        return std::array<size_type, NDIM>{N, ((void)Is, K)...};
-      }
-      /* helper to create {N, K, K, K, ...} dims array */
-      template<Dimension NDIM>
-      std::array<size_type, NDIM> make_dims(size_type N, size_type K) {
-        return make_dims_helper<NDIM>(N, K, std::make_index_sequence<NDIM-1>{});
-      }
-
       template<typename T, Dimension NDIM>
       class FunctionNodeBase {
       public: // temporarily make everything public while we figure out what we are doing
@@ -86,9 +75,9 @@ namespace mra {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
 #ifndef MRA_ENABLE_HOST
-          m_coeffs = tensor_type(detail::make_dims<ndim()+1>(m_num_func, K), scope);
+          m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), scope);
 #else
-          m_coeffs = tensor_type(detail::make_dims<ndim()+1>(m_num_func, K), ttg::scope::SyncIn); // make sure we allocate on host
+          m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), ttg::scope::SyncIn); // make sure we allocate on host
 #endif
         }
 
@@ -222,7 +211,15 @@ namespace mra {
         std::vector<function_metadata> m_metadata;
 
       public:
+        /* constructs an empty node without key information,
+         * needed for default construction during serialization
+         * but should otherwise not be used */
         FunctionsReconstructedNode() = default;
+
+        /* constructs an empty node with key information */
+        FunctionsReconstructedNode(const Key<NDIM>& key)
+        : base_type(key)
+        { }
 
         /* constructs a node with metadata for N functions and all coefficients zero */
         FunctionsReconstructedNode(const Key<NDIM>& key, size_type N)
@@ -329,7 +326,15 @@ namespace mra {
         std::vector<std::array<bool, Key<NDIM>::num_children()>> m_is_child_leafs; //< True if that child is leaf on tree
 
       public:
+        /* constructs an empty node without key information,
+        * needed for default construction during serialization
+        * but should otherwise not be used */
         FunctionsCompressedNode() = default; // needed for serialization
+
+        /* constructs a node for N functions with zero coefficients */
+        FunctionsCompressedNode(const Key<NDIM>& key)
+        : base_type(key)
+        { }
 
         /* constructs a node for N functions with zero coefficients */
         FunctionsCompressedNode(const Key<NDIM>& key, size_type N)

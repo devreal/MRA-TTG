@@ -26,7 +26,11 @@ namespace mra{
       std::lock_guard<std::mutex> lock(m);
       map[key] = std::move(node);
     };
-    return ttg::make_tt(func, ttg::edges(in), ttg::edges(), "extract", {"input"});
+    auto tt = ttg::make_tt(func, ttg::edges(in), ttg::edges(), "extract", {"input"});
+    // allow TTG to defer this task until all readers have completed
+    // we can do this here because no other task depends on the output of this task
+    tt->set_defer_writer(true);
+    return tt;
   }
 }
 

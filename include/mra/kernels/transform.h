@@ -86,7 +86,7 @@ namespace mra {
   SCOPE void transform_dir(
     const TensorView<T, NDIM>& node,
     const TensorView<T, 2>& op,
-    TensorView<T, NDIM>& tmp_result,
+    TensorView<T, NDIM+1>& tmp,
     TensorView<T, NDIM>& result,
     size_type axis) {
       if (axis == 0){
@@ -96,8 +96,12 @@ namespace mra {
         detail::inner(node, op, result, axis, 0);
       }
       else {
-        detail::inner(node, op, tmp_result, axis, 0);
-        detail::cycledim(tmp_result, result, 1, axis, -1); // copy to make contiguous
+        auto inner_result = tmp(0);
+        auto cycle_result = tmp(1);
+        inner_result = 0.0; // reset result of inner
+        detail::inner(node, op, inner_result, axis, 0);
+        detail::cycledim(inner_result, cycle_result, 1, axis, -1);
+        result += cycle_result;
       }
     }
 
@@ -105,13 +109,24 @@ namespace mra {
   SCOPE void general_transform(
     const TensorView<T, NDIM>& t,
     const std::array<TensorView<T, 2>, ARRDIM>& c,
-    TensorView<T, NDIM>& result,
-    TensorView<T, NDIM>& result_tmp)
+    TensorView<T, NDIM>& result_in,
+    TensorView<T, NDIM>& result_tmp_in)
     {
+      /* create our own tensor views pointing to the input
+       * data so we don't have to modify the input views */
+      SHARED TensorView<T, NDIM> result, result_tmp;
+      if (is_team_lead()) {
+        result = TensorView<T, NDIM>(result_in.data(), result_in.dims());
+        result_tmp = TensorView<T, NDIM>(result_tmp_in.data(), result_tmp_in.dims());
+      }
+      SYNCTHREADS();
       if constexpr (NDIM % 2) {
         // make sure result and result_tmp
         // end up pointing to the same memory
-        std::swap(result, result_tmp);
+        if (is_team_lead()) {
+          std::swap(result, result_tmp);
+        }
+        SYNCTHREADS();
       }
       result = t; // prime result
       for (size_type i = 0; i < NDIM; ++i){
@@ -119,7 +134,10 @@ namespace mra {
         // TODO: make accumulation optional?
         result_tmp = 0;
         detail::inner(result, c[i], result_tmp, 0, 0);
-        std::swap(result, result_tmp);
+        if (is_team_lead()) {
+          std::swap(result, result_tmp);
+        }
+        SYNCTHREADS();
       }
     }
 
