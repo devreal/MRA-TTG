@@ -35,11 +35,9 @@ void test_coeffs(int argc, char** argv) {
     }
   }
 
-  // for (int i= 0; i < rnlp.size(); ++i) {
-    std::cout << "MRA rnlp = " << rnlp << std::endl;
-    std::cout << "MAD rnlp "<< rnlp_mad << std::endl;
-    // assert(std::abs(rnlp_mad(i) - rnlp(i)) < 1e-10);
-  // }
+  for (int i= 0; i < rnlp.size(); ++i) {
+    assert(std::abs(rnlp_mad(i) - rnlp(i)) < 1e-10);
+  }
   world.gop.fence();
 }
 
