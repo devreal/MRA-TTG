@@ -1,6 +1,6 @@
 #include <ttg.h>
 
-
+#include "mra/mra.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/types.h"
 #include "mra/misc/convolutiondata.h"
@@ -10,12 +10,15 @@
 #include <madness/mra/twoscale.h>
 
 void test_coeffs(int argc, char** argv) {
-  mra::ConvolutionData<double, 3> conv_data(4, 3, 10, 2, 10.0);
+  mra::ConvolutionData<double, 3> conv_data(4, 2, 10, 1, 10.0, 10.0);
   const mra::Tensor<double, 3>& mat = conv_data.get_autocorrcoef();
+  const mra::Tensor<double, 1>& rnlp = conv_data.get_rnlp();
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
 
+  madness::GaussianConvolution1D<double> conv1d(4, 10, 10, 0, 0);
+  madness::Tensor<double> rnlp_mad = conv1d.get_rnlp(2, 1);
   // Example usage of madness::autoc
   madness::Tensor<double> c;
   bool success = madness::autoc(4, &c);
@@ -31,12 +34,19 @@ void test_coeffs(int argc, char** argv) {
       }
     }
   }
+
+  // for (int i= 0; i < rnlp.size(); ++i) {
+    std::cout << "MRA rnlp = " << rnlp << std::endl;
+    std::cout << "MAD rnlp "<< rnlp_mad << std::endl;
+    // assert(std::abs(rnlp_mad(i) - rnlp(i)) < 1e-10);
+  // }
   world.gop.fence();
 }
 
 int main(int argc, char **argv){
 
   ttg::initialize(argc, argv, 4);
+  mra::GLinitialize();
 
   #if defined(TTG_PARSEC_IMPORTED)
   madness::ParsecRuntime::initialize_with_existing_context(ttg::default_execution_context().impl().context());

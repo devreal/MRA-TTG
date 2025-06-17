@@ -5,6 +5,8 @@
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/types.h"
+#include "mra/misc/gl.h"
+#include "mra/misc/twoscale.h"
 #include "mra/misc/adquad.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/autocorr.h"
@@ -26,8 +28,8 @@ namespace mra {
       T expnt;
       T coeff;
       Translation lx;
-      Tensor<T, 1> quad_x;      // quadrature points
-      Tensor<T, 1> quad_w;      // quadrature weights
+      const T* quad_x;      // quadrature points
+      const T* quad_w;      // quadrature weights
       Tensor<T, 3> autocorrcoef;    // autocorrelation coefficients
       Tensor<T, 3> c;           // autocorrelation coefficients
       Tensor<T, 1> rnlp;        // rnlp coefficients
@@ -87,12 +89,14 @@ namespace mra {
 
           for (size_type i=0; i<npt; ++i){
             T* phix = new T[2*K];
-            T xx = xlo + h*quad_x(i);
-            T ee = scaledcoeff*std::exp(-beta*xx*xx)*quad_w(i)*h;
+            T xx = xlo + h*quad_x[i];
+            T ee = scaledcoeff*std::exp(-beta*xx*xx)*quad_w[i]*h;
 
             legendre_scaling_functions(xx-lx, 2*K, &phix[0]);
 
-            for (size_type p=0; p<2*K; ++p) rnlp_view(p) += ee*phix[p];
+            for (size_type p=0; p<2*K; ++p) {
+              rnlp_view(p) += ee*phix[p];
+            }
           }
         }
       }
@@ -123,13 +127,14 @@ namespace mra {
 
     public:
 
-      ConvolutionData(size_type K, Level n, int npt, Translation lx, T coeff)
+      ConvolutionData(size_type K, Level n, int npt, Translation lx, T coeff, T expnt)
         : K(K), n(n), npt(npt), lx(lx),
-          quad_x(K), quad_w(K),
           autocorrcoef(K, K, 4*K),
-          c(K, K, 4*K), coeff(coeff), rnlp(K)
+          c(K, K, 4*K), coeff(coeff), expnt(expnt), rnlp(2*K)
       {
+        GLget(&quad_x, &quad_w, npt);
         autoc();
+        make_rnlp(n, lx);
       }
 
       ConvolutionData(ConvolutionData&&) = default;
