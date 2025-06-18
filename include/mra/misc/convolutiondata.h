@@ -131,17 +131,17 @@ namespace mra {
         auto R_view = R.current_view();
         make_rnlp(n, lx-1);
         auto rnlp_view = rnlp.current_view();
-        std::array<Slice,1> slices = {Slice(0, 2*K-1)};
-        R_view(slices) = rnlp_view(slices);
-        slices = {Slice(2*K, 4*K-1)};
+        std::array<Slice,1> slice1 = {Slice(0, 2*K)};
+        R_view(slice1) = rnlp_view(slice1);
+        std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
         make_rnlp(n, lx);
-        R_view(slices) = rnlp_view(slices);
+        R_view(slice2) = rnlp_view(slice1);
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         detail::inner(c.current_view(), R_view, rnlij_view);
-
+        std::cout << rnlij << std::endl; // debug printing
         return rnlij;
       }
 
