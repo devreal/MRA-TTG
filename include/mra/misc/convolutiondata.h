@@ -48,24 +48,6 @@ namespace mra {
         c_view(slices) = autocorr_view(slices);
       }
 
-      Tensor<T, 2>& make_rnlij(const Level n, const Translation lx){
-        Tensor<T, 1> R(4*K);
-        Tensor<T, 2> rnlij(2*K, 2*K);
-        auto R_view = R.current_view();
-        make_rnlp(n, lx-1);
-        R_view(Slice(0, 2*K-1)) = rnlp;
-        make_rnlp(n, lx);
-        R_view(Slice(2*K, 4*K-1)) = rnlp;
-
-        T scale = std::pow(T(0.5), T(0.5*n));
-        R_view *= scale;
-
-        inner(c, R, rnlij);
-
-        return rnlij;
-      }
-
-
       // projection of a Gaussian onto double order polynomials
       void make_rnlp(const Level n, Translation lx) {
 
@@ -141,6 +123,29 @@ namespace mra {
       ConvolutionData(const ConvolutionData&) = delete;
       ConvolutionData& operator=(ConvolutionData&&) = default;
       ConvolutionData& operator=(const ConvolutionData&) = delete;
+
+
+      Tensor<T, 2>& make_rnlij(const Level n, const Translation lx){
+        Tensor<T, 1> R(4*K);
+        Tensor<T, 2> rnlij(2*K, 2*K);
+        auto R_view = R.current_view();
+        make_rnlp(n, lx-1);
+        Slice slice(0, 2*K-1);
+        // Slice slice(0, 2*K-1);
+        R_view(slice) = rnlp;
+        // Slice slice1(2*K, 4*K-1);
+        slice = Slice(2*K, 4*K-1);
+        make_rnlp(n, lx);
+        R_view(slice) = rnlp;
+
+        T scale = std::pow(T(0.5), T(0.5*n));
+        R_view *= scale;
+        auto rnlij_view = rnlij.current_view();
+        detail::inner(c.current_view(), R_view, rnlij_view);
+
+        return rnlij;
+      }
+
 
       const auto& get_rnlp() const { return rnlp;}
       const auto& construct_matrices(const Level n){ return matrixmap;}

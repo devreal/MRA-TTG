@@ -13,12 +13,14 @@ void test_coeffs(int argc, char** argv) {
   mra::ConvolutionData<double, 3> conv_data(4, 2, 10, 1, 10.0, 10.0);
   const mra::Tensor<double, 3>& mat = conv_data.get_autocorrcoef();
   const mra::Tensor<double, 1>& rnlp = conv_data.get_rnlp();
+  const mra::Tensor<double, 2>& rnlij = conv_data.make_rnlij(2, 1);
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
 
   madness::GaussianConvolution1D<double> conv1d(4, 10, 10, 0, 0);
   madness::Tensor<double> rnlp_mad = conv1d.get_rnlp(2, 1);
+  madness::Tensor<double> rnlij_mad = conv1d.make_rnlij(2, 1);
   // Example usage of madness::autoc
   madness::Tensor<double> c;
   bool success = madness::autoc(4, &c);
