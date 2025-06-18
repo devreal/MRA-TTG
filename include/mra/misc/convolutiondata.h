@@ -130,13 +130,12 @@ namespace mra {
         Tensor<T, 2> rnlij(2*K, 2*K);
         auto R_view = R.current_view();
         make_rnlp(n, lx-1);
-        Slice slice(0, 2*K-1);
-        // Slice slice(0, 2*K-1);
-        R_view(slice) = rnlp;
-        // Slice slice1(2*K, 4*K-1);
-        slice = Slice(2*K, 4*K-1);
+        auto rnlp_view = rnlp.current_view();
+        std::array<Slice,1> slices = {Slice(0, 2*K-1)};
+        R_view(slices) = rnlp_view(slices);
+        slices = {Slice(2*K, 4*K-1)};
         make_rnlp(n, lx);
-        R_view(slice) = rnlp;
+        R_view(slices) = rnlp_view(slices);
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;

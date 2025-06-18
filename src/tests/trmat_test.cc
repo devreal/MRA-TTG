@@ -20,7 +20,7 @@ void test_coeffs(int argc, char** argv) {
 
   madness::GaussianConvolution1D<double> conv1d(4, 10, 10, 0, 0);
   madness::Tensor<double> rnlp_mad = conv1d.get_rnlp(2, 1);
-  madness::Tensor<double> rnlij_mad = conv1d.make_rnlij(2, 1);
+  madness::Tensor<double> rnlij_mad = conv1d.rnlij(2, 1);
   // Example usage of madness::autoc
   madness::Tensor<double> c;
   bool success = madness::autoc(4, &c);
@@ -40,6 +40,10 @@ void test_coeffs(int argc, char** argv) {
   for (int i= 0; i < rnlp.size(); ++i) {
     assert(std::abs(rnlp_mad(i) - rnlp(i)) < 1e-10);
   }
+
+  // std::cout << rnlij << std::endl;
+
+  std::cout << rnlij_mad << std::endl;
   world.gop.fence();
 }
 
