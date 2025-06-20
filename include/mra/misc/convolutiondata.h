@@ -42,9 +42,9 @@ namespace mra {
         auto autocorr_view = autocorrcoef.current_view();
         detail::autocorr_get<T>(K, autocorr_view);
         c_view = 0.0;
-        std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
+        std::array<Slice,NDIM> slices = {Slice(0, K), Slice(0, K), Slice(0, 2*K)};
         c_view(slices) = autocorr_view(slices);
-        slices = {Slice(0, K-1), Slice(0, K-1), Slice(2*K, 4*K-1)};
+        slices = {Slice(0, K), Slice(0, K), Slice(2*K, 4*K)};
         c_view(slices) = autocorr_view(slices);
       }
 
@@ -125,9 +125,9 @@ namespace mra {
       ConvolutionData& operator=(const ConvolutionData&) = delete;
 
 
-      Tensor<T, 2>& make_rnlij(const Level n, const Translation lx){
+      Tensor<T, 2> make_rnlij(const Level n, const Translation lx){
         Tensor<T, 1> R(4*K);
-        Tensor<T, 2> rnlij(2*K, 2*K);
+        Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
         make_rnlp(n, lx-1);
         auto rnlp_view = rnlp.current_view();
@@ -141,6 +141,7 @@ namespace mra {
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         detail::inner(c.current_view(), R_view, rnlij_view);
+        std::cout << "MRA rnlij\n" << std::endl;
         std::cout << rnlij << std::endl; // debug printing
         return rnlij;
       }
