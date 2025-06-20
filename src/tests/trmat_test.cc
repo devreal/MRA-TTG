@@ -29,6 +29,7 @@ void test_coeffs(int argc, char** argv) {
     return;
   }
 
+  // automatically check
   for (int i = 0; i < c.size(); ++i) {
     for (int j = 0; j < c.size(); ++j) {
       for (int k = 0; k < c.size(); ++k) {
@@ -37,13 +38,18 @@ void test_coeffs(int argc, char** argv) {
     }
   }
 
+  // Check rnlij
+  for (int i = 0; i < rnlij_mad.size(); ++i) {
+    for (int j = 0; j < rnlij_mad.size(); ++j) {
+        assert(std::abs(rnlij(i, j) - rnlij_mad(i, j)) < 1e-10);
+    }
+  }
+
+  // Check rnlp
   for (int i= 0; i < rnlp.size(); ++i) {
     assert(std::abs(rnlp_mad(i) - rnlp(i)) < 1e-10);
   }
 
-  // std::cout << rnlij << std::endl;
-
-  std::cout << rnlij_mad << std::endl;
   world.gop.fence();
 }
 

@@ -141,8 +141,6 @@ namespace mra {
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         detail::inner(c.current_view(), R_view, rnlij_view);
-        std::cout << "MRA rnlij\n" << std::endl;
-        std::cout << rnlij << std::endl; // debug printing
         return rnlij;
       }
 
