@@ -32,7 +32,6 @@ namespace mra {
       const T* quad_w;      // quadrature weights
       Tensor<T, 3> autocorrcoef;    // autocorrelation coefficients
       Tensor<T, 3> c;           // autocorrelation coefficients
-      Tensor<T, 1> rnlp;        // rnlp coefficients
       std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
       std::mutex mapmutex; // mutex for thread safety
 
@@ -49,11 +48,13 @@ namespace mra {
       }
 
       // projection of a Gaussian onto double order polynomials
-      void make_rnlp(const Level n, Translation lx) {
+      Tensor<T, 1> make_rnlp(const Level n, Translation lx) {
+
+        Tensor<T, 1> rnlp(2*K);
+        auto rnlp_view = rnlp.current_view();
+        rnlp_view = 0.0;
 
         if (lx < 0) lx = -lx-1;
-        rnlp.fill(0.0);
-        auto rnlp_view = rnlp.current_view();
         T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
         T beta = expnt * std::pow(T(0.25), T(n));
         T h = 1.0/std::sqrt(beta);
@@ -81,6 +82,7 @@ namespace mra {
             }
           }
         }
+        return rnlp;
       }
 
       void construct_matrices(const Level n, const Translation lx) {
@@ -112,11 +114,10 @@ namespace mra {
       ConvolutionData(size_type K, Level n, int npt, Translation lx, T coeff, T expnt)
         : K(K), n(n), npt(npt), lx(lx),
           autocorrcoef(K, K, 4*K),
-          c(K, K, 4*K), coeff(coeff), expnt(expnt), rnlp(2*K)
+          c(K, K, 4*K), coeff(coeff), expnt(expnt)
       {
         GLget(&quad_x, &quad_w, npt);
         autoc();
-        make_rnlp(n, lx);
       }
 
       ConvolutionData(ConvolutionData&&) = default;
@@ -129,26 +130,27 @@ namespace mra {
         Tensor<T, 1> R(4*K);
         Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
-        make_rnlp(n, lx-1);
-        auto rnlp_view = rnlp.current_view();
+
+        auto rnlp1 = make_rnlp(n, lx-1);
+        auto rnlp2 = make_rnlp(n, lx);
+        auto rnlp1_view = rnlp1.current_view();
+        auto rnlp2_view = rnlp2.current_view();
+
         std::array<Slice,1> slice1 = {Slice(0, 2*K)};
-        R_view(slice1) = rnlp_view(slice1);
+        R_view(slice1) = rnlp1_view(slice1);
         std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
-        make_rnlp(n, lx);
-        R_view(slice2) = rnlp_view(slice1);
+        R_view(slice2) = rnlp2_view(slice1);
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         detail::inner(c.current_view(), R_view, rnlij_view);
+
         return rnlij;
       }
 
 
-      const auto& get_rnlp() const { return rnlp;}
       const auto& construct_matrices(const Level n){ return matrixmap;}
-      const auto& get_c(){ return c;}
-      const auto& get_autocorrcoef(){ return autocorrcoef;}
 
     };
 
