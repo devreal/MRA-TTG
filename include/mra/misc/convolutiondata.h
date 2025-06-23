@@ -100,8 +100,9 @@ namespace mra {
           if (rnl0map.find(rnl0_key) == rnl0map.end()) {
             assert(rnl0map.find(rnl0_key) == rnl0map.end());
             rnl0map[rnl0_key] = rnlij;
-            mapmutex.unlock();
           }
+          mapmutex.unlock();
+
         }
         mapmutex.lock();
         assert(matrixmap.find(key) == matrixmap.end());
