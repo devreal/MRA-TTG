@@ -16,7 +16,7 @@
 namespace mra {
 
   template <typename T, Dimension NDIM>
-  class ConvolutionData {
+  class Convolution {
 
     public:
       using rnl_key = std::tuple<Level, Translation>;
@@ -112,7 +112,7 @@ namespace mra {
 
     public:
 
-      ConvolutionData(size_type K, int npt, T coeff, T expnt)
+      Convolution(size_type K, int npt, T coeff, T expnt)
         : K(K), npt(npt),
           autocorrcoef(K, K, 4*K),
           c(K, K, 4*K), coeff(coeff), expnt(expnt)
@@ -121,10 +121,10 @@ namespace mra {
         autoc();
       }
 
-      ConvolutionData(ConvolutionData&&) = default;
-      ConvolutionData(const ConvolutionData&) = delete;
-      ConvolutionData& operator=(ConvolutionData&&) = default;
-      ConvolutionData& operator=(const ConvolutionData&) = delete;
+      Convolution(Convolution&&) = default;
+      Convolution(const Convolution&) = delete;
+      Convolution& operator=(Convolution&&) = default;
+      Convolution& operator=(const Convolution&) = delete;
 
 
       Tensor<T, 2> make_rnlij(const Level n, const Translation lx){
