@@ -10,7 +10,7 @@
 #include <madness/mra/twoscale.h>
 
 void test_coeffs(int argc, char** argv) {
-  mra::ConvolutionData<double, 3> conv_data(4, 2, 10, 1, 10.0, 10.0);
+  mra::ConvolutionData<double, 3> conv_data(4, 10, 10.0, 10.0);
   const mra::Tensor<double, 2>& rnlij = conv_data.make_rnlij(2, 1);
 
   madness::World world(SafeMPI::COMM_WORLD);

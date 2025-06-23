@@ -112,8 +112,8 @@ namespace mra {
 
     public:
 
-      ConvolutionData(size_type K, Level n, int npt, Translation lx, T coeff, T expnt)
-        : K(K), n(n), npt(npt), lx(lx),
+      ConvolutionData(size_type K, int npt, T coeff, T expnt)
+        : K(K), npt(npt),
           autocorrcoef(K, K, 4*K),
           c(K, K, 4*K), coeff(coeff), expnt(expnt)
       {
