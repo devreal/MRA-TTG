@@ -2,12 +2,13 @@
 #define MRA_CONVOLUTIONDATA_H
 
 #include "mra/ops/inner.h"
+#include "mra/misc/gl.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/types.h"
-#include "mra/misc/gl.h"
-#include "mra/misc/twoscale.h"
+#include "mra/misc/cache.h"
 #include "mra/misc/adquad.h"
+#include "mra/misc/twoscale.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/autocorr.h"
 #include "mra/tensor/tensorview.h"
@@ -15,12 +16,19 @@
 #define MRA_MAX_LX 7
 namespace mra {
 
+  // template <typename T>
+  // struct ConvolutionData {
+  //   Tensor<T, 2> R, T;
+
+  // }
+
   template <typename T, Dimension NDIM>
   class Convolution {
 
     public:
-      using rnl_key = std::tuple<Level, Translation>;
-
+      // using rnl_key = std::tuple<Level, Translation>;
+      // using keyT = Key<NDIM>;
+      Cache<Tensor<T, 2> , 1> rnlijcache; // cache for storing rnlp vectors
     private:
       size_type K;
       Level n;
@@ -32,8 +40,8 @@ namespace mra {
       const T* quad_w;      // quadrature weights
       Tensor<T, 3> autocorrcoef;    // autocorrelation coefficients
       Tensor<T, 3> c;           // autocorrelation coefficients
-      std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
-      std::mutex mapmutex; // mutex for thread safety
+      // std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
+      // std::mutex mapmutex; // mutex for thread safety
 
 
       void autoc(){
@@ -85,30 +93,30 @@ namespace mra {
         return rnlp;
       }
 
-      void construct_matrices(const Level n, const Translation lx) {
-        auto key = std::make_tuple(n, lx);
-        if (matrixmap.find(key) != matrixmap.end()) {
-          return; // already constructed
-        }
+      // void construct_matrices(const Level n, const Translation lx) {
+      //   auto key = std::make_tuple(n, lx);
+      //   if (matrixmap.find(key) != matrixmap.end()) {
+      //     return; // already constructed
+      //   }
 
-        std::map<rnl_key, Tensor<T, 2>> rnl0map;
+      //   std::map<rnl_key, Tensor<T, 2>> rnl0map;
 
-        for (size_type l0 = -lx-MRA_MAX_LX; l0<=lx+MRA_MAX_LX; ++l0) {
-          Tensor<T, 2> rnlij = make_rnlij(n, l0);
-          auto rnl0_key = std::make_tuple(n, l0);
-          mapmutex.lock();
-          if (rnl0map.find(rnl0_key) == rnl0map.end()) {
-            assert(rnl0map.find(rnl0_key) == rnl0map.end());
-            rnl0map[rnl0_key] = rnlij;
-          }
-          mapmutex.unlock();
+      //   for (size_type l0 = -lx-MRA_MAX_LX; l0<=lx+MRA_MAX_LX; ++l0) {
+      //     Tensor<T, 2> rnlij = make_rnlij(n, l0);
+      //     auto rnl0_key = std::make_tuple(n, l0);
+      //     mapmutex.lock();
+      //     if (rnl0map.find(rnl0_key) == rnl0map.end()) {
+      //       assert(rnl0map.find(rnl0_key) == rnl0map.end());
+      //       rnl0map[rnl0_key] = rnlij;
+      //     }
+      //     mapmutex.unlock();
 
-        }
-        mapmutex.lock();
-        assert(matrixmap.find(key) == matrixmap.end());
-        matrixmap[key] = rnl0map;
-        mapmutex.unlock();
-      }
+      //   }
+      //   mapmutex.lock();
+      //   assert(matrixmap.find(key) == matrixmap.end());
+      //   matrixmap[key] = rnl0map;
+      //   mapmutex.unlock();
+      // }
 
     public:
 
@@ -128,6 +136,12 @@ namespace mra {
 
 
       Tensor<T, 2> make_rnlij(const Level n, const Translation lx){
+        const Tensor<T, 2>* rnlij_ptr = rnlijcache.getptr(n, lx);
+        if (rnlij_ptr) {
+          std::cout << "Cache hit for rnlij(" << n << "," << lx << ")\n";
+          return *rnlij_ptr;
+        }
+        std::cout << "Cache miss for rnlij(" << n << "," << lx << ")\n";
         Tensor<T, 1> R(4*K);
         Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
@@ -151,7 +165,7 @@ namespace mra {
       }
 
 
-      const auto& construct_matrices(const Level n){ return matrixmap;}
+      // const auto& construct_matrices(const Level n){ return matrixmap;}
 
     };
 
