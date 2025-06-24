@@ -5,12 +5,21 @@
 
 namespace mra{
 
-  template<typename ValueT, Dimension NDIM>
+  template<typename valueT, Dimension NDIM>
   class Cache {
     private:
-      typedef ConcurrentHashMap<Key<NDIM>> mapT;
-      typedef std::pair<Key<NDIM>, ValueT> pairT;
+      using keyT = Key<NDIM>;
+      using mapT = std::map<keyT, valueT>;
+      using pairT = std::pair<keyT, valueT>;
       mapT cache;
+      std::mutex cachemutex;
+
+      auto insert(const pairT& p) {
+        cachemutex.lock();
+        auto result = cache.insert(p);
+        cachemutex.unlock();
+        return result;
+      }
 
     public:
       Cache() : cache() {};
@@ -25,7 +34,7 @@ namespace mra{
         return *this;
       }
 
-      inline const ValueT* getptr(const Key<NDIM>& key) const {
+      inline const valueT* getptr(const Key<NDIM>& key) const {
         auto it = cache.find(key);
         if(it != cache.end()) {
           return &(it->second);
@@ -34,26 +43,26 @@ namespace mra{
         }
       }
 
-      inline const ValueT* getptr(Level n, Translation l) const {
-        Key<NDIM> key(n, std::array<Translation, NDIM>(l));
+      inline const valueT* getptr(Level n, Translation l) const {
+        Key<NDIM> key(n, std::array<Translation, NDIM>({l}));
         return getptr(key);
       }
 
-      inline const ValueT* getptr(Level n, const Key<NDIM>& disp) const {
+      inline const valueT* getptr(Level n, const Key<NDIM>& disp) const {
         Key<NDIM> key(n, disp.translation);
         return getptr(key);
       }
 
-      inline void set(const Key<NDIM>& key, const ValueT& val) {
+      inline void set(const Key<NDIM>& key, const valueT& val) {
         auto && [it, inserted] = cache.insert(pairT(key, val));
       }
 
-      inline void set(Level n, Translation l, const ValueT& val) {
-        Key<NDIM> key(n, std::array<Translation, NDIM>(l));
+      inline void set(Level n, Translation l, const valueT& val) {
+        Key<NDIM> key(n, std::array<Translation, NDIM>({l}));
         set(key, val);
       }
 
-      inline void set(Level n, const Key<NDIM>& disp, const ValueT& val) {
+      inline void set(Level n, const Key<NDIM>& disp, const valueT& val) {
         Key<NDIM> key(n, disp.translation());
         set(key, val);
       }
