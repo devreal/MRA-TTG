@@ -1,6 +1,6 @@
 #ifndef MRA_CONVOLUTIONDATA_H
 #define MRA_CONVOLUTIONDATA_H
-
+#include <shared_mutex>
 #include "mra/ops/inner.h"
 #include "mra/misc/gl.h"
 #include "mra/misc/hash.h"
@@ -25,23 +25,20 @@ namespace mra {
   template <typename T, Dimension NDIM>
   class Convolution {
 
-    public:
-      // using rnl_key = std::tuple<Level, Translation>;
-      // using keyT = Key<NDIM>;
-      Cache<Tensor<T, 2> , 1> rnlijcache; // cache for storing rnlp vectors
     private:
       size_type K;
       Level n;
-      int npt;                  // number of quadrature points
+      int npt;                                      // number of quadrature points
       T expnt;
       T coeff;
       Translation lx;
-      const T* quad_x;      // quadrature points
-      const T* quad_w;      // quadrature weights
-      Tensor<T, 3> autocorrcoef;    // autocorrelation coefficients
-      Tensor<T, 3> c;           // autocorrelation coefficients
-      // std::map<rnl_key, std::map<rnl_key, Tensor<T, 2>>> matrixmap; // map for storing rnlp matrices
-      // std::mutex mapmutex; // mutex for thread safety
+      const T* quad_x;                              // quadrature points
+      const T* quad_w;                              // quadrature weights
+      Tensor<T, 3> autocorrcoef;                    // autocorrelation coefficients
+      Tensor<T, 3> c;                               // autocorrelation coefficients
+      std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache; // map for storing rnlij matrices
+      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache; // map for storing rnlp matrices
+      std::mutex cachemutex;                        // mutex for thread safety
 
 
       void autoc(){
@@ -57,7 +54,11 @@ namespace mra {
 
       // projection of a Gaussian onto double order polynomials
       Tensor<T, 1> make_rnlp(const Level n, Translation lx) {
-
+        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        auto it = rnlpcache.find(key);
+        if (it != rnlpcache.end()) {
+          return std::move(it->second);
+        }
         Tensor<T, 1> rnlp(2*K);
         auto rnlp_view = rnlp.current_view();
         rnlp_view = 0.0;
@@ -90,41 +91,21 @@ namespace mra {
             }
           }
         }
-        return rnlp;
+        cachemutex.lock();
+        if (rnlpcache.find(key) == rnlpcache.end()) {
+          assert(rnlpcache.find(key) == rnlpcache.end());
+          rnlpcache.emplace(std::move(key), std::move(rnlp));
+        }
+        cachemutex.unlock();
+        it = rnlpcache.find(key);
+        return std::move(it->second);
       }
-
-      // void construct_matrices(const Level n, const Translation lx) {
-      //   auto key = std::make_tuple(n, lx);
-      //   if (matrixmap.find(key) != matrixmap.end()) {
-      //     return; // already constructed
-      //   }
-
-      //   std::map<rnl_key, Tensor<T, 2>> rnl0map;
-
-      //   for (size_type l0 = -lx-MRA_MAX_LX; l0<=lx+MRA_MAX_LX; ++l0) {
-      //     Tensor<T, 2> rnlij = make_rnlij(n, l0);
-      //     auto rnl0_key = std::make_tuple(n, l0);
-      //     mapmutex.lock();
-      //     if (rnl0map.find(rnl0_key) == rnl0map.end()) {
-      //       assert(rnl0map.find(rnl0_key) == rnl0map.end());
-      //       rnl0map[rnl0_key] = rnlij;
-      //     }
-      //     mapmutex.unlock();
-
-      //   }
-      //   mapmutex.lock();
-      //   assert(matrixmap.find(key) == matrixmap.end());
-      //   matrixmap[key] = rnl0map;
-      //   mapmutex.unlock();
-      // }
 
     public:
 
       Convolution(size_type K, int npt, T coeff, T expnt)
-        : K(K), npt(npt),
-          autocorrcoef(K, K, 4*K),
-          c(K, K, 4*K), coeff(coeff), expnt(expnt)
-      {
+        : K(K), npt(npt), autocorrcoef(K, K, 4*K),
+          c(K, K, 4*K), coeff(coeff), expnt(expnt) {
         GLget(&quad_x, &quad_w, npt);
         autoc();
       }
@@ -134,14 +115,13 @@ namespace mra {
       Convolution& operator=(Convolution&&) = default;
       Convolution& operator=(const Convolution&) = delete;
 
-
-      Tensor<T, 2> make_rnlij(const Level n, const Translation lx){
-        const Tensor<T, 2>* rnlij_ptr = rnlijcache.getptr(n, lx);
-        if (rnlij_ptr) {
-          std::cout << "Cache hit for rnlij(" << n << "," << lx << ")\n";
-          return *rnlij_ptr;
+      const Tensor<T, 2> make_rnlij (const Level n, const Translation lx) {
+        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        auto it = rnlijcache.find(key);
+        if (it != rnlijcache.end()) {
+          return std::move(it->second);
         }
-        std::cout << "Cache miss for rnlij(" << n << "," << lx << ")\n";
+
         Tensor<T, 1> R(4*K);
         Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
@@ -161,14 +141,16 @@ namespace mra {
         auto rnlij_view = rnlij.current_view();
         detail::inner(c.current_view(), R_view, rnlij_view);
 
-        return rnlij;
+        cachemutex.lock();
+          if (rnlijcache.find(key) == rnlijcache.end()) {
+            assert(rnlijcache.find(key) == rnlijcache.end());
+            rnlijcache.emplace(std::move(key), std::move(rnlij));
+          }
+          cachemutex.unlock();
+        it = rnlijcache.find(key);
+        return std::move(it->second);
       }
-
-
-      // const auto& construct_matrices(const Level n){ return matrixmap;}
-
     };
-
 
 } // namespace mra
 
