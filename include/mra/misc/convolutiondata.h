@@ -15,11 +15,10 @@
 #define MRA_MAX_LX 7
 namespace mra {
 
-  // template <typename T>
-  // struct ConvolutionData {
-  //   Tensor<T, 2> R, T;
-
-  // }
+  template <typename T>
+  struct ConvolutionData {
+    Tensor<T, 2> R, S;
+  };
 
   template <typename T, Dimension NDIM>
   class Convolution {
@@ -36,7 +35,8 @@ namespace mra {
       Tensor<T, 3> autocorrcoef;                    // autocorrelation coefficients
       Tensor<T, 3> c;                               // autocorrelation coefficients
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache; // map for storing rnlij matrices
-      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache; // map for storing rnlp matrices
+      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;  // map for storing rnlp matrices
+
       std::mutex cachemutex;                        // mutex for thread safety
 
 
@@ -52,12 +52,14 @@ namespace mra {
       }
 
       // projection of a Gaussian onto double order polynomials
-      Tensor<T, 1> make_rnlp(const Level n, Translation lx) {
+      const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         auto it = rnlpcache.find(key);
         if (it != rnlpcache.end()) {
-          return std::move(it->second);
+          const auto& r = it->second;
+          return r;
         }
+
         Tensor<T, 1> rnlp(2*K);
         auto rnlp_view = rnlp.current_view();
         rnlp_view = 0.0;
@@ -69,9 +71,7 @@ namespace mra {
         T nbox = 1.0/h;
         if (nbox < 1) nbox = 1;
         h = 1.0/nbox;
-
         T sch = std::abs(scaledcoeff*h);
-
         T argmax = std::abs(std::log(1e-22/sch));
 
         for (size_type box=0; box<nbox; ++box){
@@ -82,9 +82,7 @@ namespace mra {
             T* phix = new T[2*K];
             T xx = xlo + h*quad_x[i];
             T ee = scaledcoeff*std::exp(-beta*xx*xx)*quad_w[i]*h;
-
             legendre_scaling_functions(xx-lx, 2*K, &phix[0]);
-
             for (size_type p=0; p<2*K; ++p) {
               rnlp_view(p) += ee*phix[p];
             }
@@ -95,9 +93,10 @@ namespace mra {
           assert(rnlpcache.find(key) == rnlpcache.end());
           rnlpcache.emplace(std::move(key), std::move(rnlp));
         }
-        cachemutex.unlock();
         it = rnlpcache.find(key);
-        return std::move(it->second);
+        cachemutex.unlock();
+        const auto& r = it->second;
+        return r;
       }
 
     public:
@@ -114,19 +113,21 @@ namespace mra {
       Convolution& operator=(Convolution&&) = default;
       Convolution& operator=(const Convolution&) = delete;
 
-      const Tensor<T, 2> make_rnlij (const Level n, const Translation lx) {
+      const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
         auto it = rnlijcache.find(key);
+        cachemutex.unlock();
         if (it != rnlijcache.end()) {
-          return std::move(it->second);
+          const auto& r = it->second;
+          return r;
         }
-
         Tensor<T, 1> R(4*K);
         Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
 
-        auto rnlp1 = make_rnlp(n, lx-1);
-        auto rnlp2 = make_rnlp(n, lx);
+        const auto& rnlp1 = make_rnlp(n, lx-1);
+        const auto& rnlp2 = make_rnlp(n, lx);
         auto rnlp1_view = rnlp1.current_view();
         auto rnlp2_view = rnlp2.current_view();
 
@@ -141,13 +142,16 @@ namespace mra {
         detail::inner(c.current_view(), R_view, rnlij_view);
 
         cachemutex.lock();
-          if (rnlijcache.find(key) == rnlijcache.end()) {
-            assert(rnlijcache.find(key) == rnlijcache.end());
-            rnlijcache.emplace(std::move(key), std::move(rnlij));
-          }
-          cachemutex.unlock();
+        if (rnlijcache.find(key) == rnlijcache.end()) {
+          assert(rnlijcache.find(key) == rnlijcache.end());
+          rnlijcache.emplace(std::move(key), std::move(rnlij));
+        }
+
         it = rnlijcache.find(key);
-        return std::move(it->second);
+        cachemutex.unlock();
+        std::cout << "returning after computation" << std::endl;
+        const auto& r = it->second;
+        return r;
       }
     };
 
