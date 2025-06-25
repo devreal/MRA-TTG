@@ -1,12 +1,11 @@
 #ifndef MRA_CONVOLUTIONDATA_H
 #define MRA_CONVOLUTIONDATA_H
-#include <shared_mutex>
+
 #include "mra/ops/inner.h"
 #include "mra/misc/gl.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/types.h"
-#include "mra/misc/cache.h"
 #include "mra/misc/adquad.h"
 #include "mra/misc/twoscale.h"
 #include "mra/misc/platform.h"
