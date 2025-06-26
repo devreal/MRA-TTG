@@ -8,22 +8,35 @@
 #include "mra/tensor/tensor.h"
 #include <madness/world/world.h>
 #include <madness/mra/twoscale.h>
+#include <madness/mra/convolution1d.h>
 
 void test_coeffs(int argc, char** argv) {
   mra::Convolution<double, 3> conv(4, 10, 10.0, 10.0);
   const mra::Tensor<double, 2>& rnlij = conv.make_rnlij(2, 1);
-  const mra::Tensor<double, 2>& rnlij1 = conv.make_rnlij(2, 1);
+  const mra::ConvolutionData<double>& cd = conv.make_nonstandard(2, 1);
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
 
   madness::GaussianConvolution1D<double> conv1d(4, 10, 10, 0, 0);
   madness::Tensor<double> rnlij_mad = conv1d.rnlij(2, 1);
+  const madness::ConvolutionData1D<double>* cd_mad = conv1d.nonstandard(2, 1);
 
   // Check rnlij
   for (int i = 0; i < rnlij_mad.size(); ++i) {
     for (int j = 0; j < rnlij_mad.size(); ++j) {
         assert(std::abs(rnlij(i, j) - rnlij_mad(i, j)) < 1e-10);
+    }
+  }
+  // Check ConvolutionData1D
+  for (int i = 0; i < cd.R.size(); ++i) {
+    for (int j = 0; j < cd.R.size(); ++j) {
+        assert(std::abs(cd.R(i, j) - cd_mad->R(i, j)) < 1e-10);
+    }
+  }
+  for (int i = 0; i < cd.S.size(); ++i) {
+    for (int j = 0; j < cd.S.size(); ++j) {
+        assert(std::abs(cd.S(i, j) - cd_mad->S(i, j)) < 1e-10);
     }
   }
 

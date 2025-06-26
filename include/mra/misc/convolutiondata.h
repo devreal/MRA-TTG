@@ -34,9 +34,11 @@ namespace mra {
       const T* quad_w;                              // quadrature weights
       Tensor<T, 3> autocorrcoef;                    // autocorrelation coefficients
       Tensor<T, 3> c;                               // autocorrelation coefficients
+      FunctionData<T, NDIM> functiondata;           // function data
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache; // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;  // map for storing rnlp matrices
-
+      std::map<Key<NDIM>, ConvolutionData<T>> nscache;    // map for storing ns matrices
+      std::map<Key<NDIM>, ConvolutionData<T>> modnscache; // map for storing rnlp matrices
       std::mutex cachemutex;                        // mutex for thread safety
 
 
@@ -86,6 +88,7 @@ namespace mra {
             for (size_type p=0; p<2*K; ++p) {
               rnlp_view(p) += ee*phix[p];
             }
+            delete[] phix;
           }
         }
         cachemutex.lock();
@@ -103,7 +106,7 @@ namespace mra {
 
       Convolution(size_type K, int npt, T coeff, T expnt)
         : K(K), npt(npt), autocorrcoef(K, K, 4*K),
-          c(K, K, 4*K), coeff(coeff), expnt(expnt) {
+          c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(K){
         GLget(&quad_x, &quad_w, npt);
         autoc();
       }
@@ -149,7 +152,57 @@ namespace mra {
 
         it = rnlijcache.find(key);
         cachemutex.unlock();
-        std::cout << "returning after computation" << std::endl;
+        const auto& r = it->second;
+        return r;
+      }
+
+      const ConvolutionData<T>& make_nonstandard (const Level n, const Translation lx) {
+        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        auto it = nscache.find(key);
+        if (it != nscache.end()) {
+          return std::move(it->second);
+        }
+
+        Tensor<T, 2> tmp(2*K, 2*K);
+        const Tensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
+        const Tensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
+        const Tensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
+
+        auto tmp_view = tmp.current_view();
+        auto rm_view = rm.current_view();
+        auto r0_view = r0.current_view();
+        auto rp_view = rp.current_view();
+
+        std::array<Slice,2> slice = {Slice(0, K), Slice(0, K)};
+        tmp_view(slice) = r0_view;
+        slice = {Slice(0, K), Slice(K, 2*K)};
+        tmp_view(slice) = rm_view;
+        slice = {Slice(K, 2*K), Slice(0, K)};
+        tmp_view(slice) = rp_view;
+        slice = {Slice(K, 2*K), Slice(K, 2*K)};
+        tmp_view(slice) = r0_view;
+
+        const auto& hgT = functiondata.get_hgT();
+        auto hgT_view = hgT.current_view();
+        Tensor<T, 2> R(2*K, 2*K), work(2*K, 2*K);
+        auto R_view = R.current_view();
+        transform(tmp_view, hgT_view, R_view, work.data());
+        Tensor<T, 2> S(K, K);
+        auto S_view = S.current_view();
+        slice = {Slice(0, K), Slice(0, K)};
+        S_view(slice) = R_view(slice);
+
+        auto obj = ConvolutionData<T>();
+        obj.R = std::move(R);
+        obj.S = std::move(S);
+
+        cachemutex.lock();
+        if (nscache.find(key) == nscache.end()) {
+          assert(nscache.find(key) == nscache.end());
+          nscache.emplace(std::move(key), std::move(obj));
+        }
+        it = nscache.find(key);
+        cachemutex.unlock();
         const auto& r = it->second;
         return r;
       }
