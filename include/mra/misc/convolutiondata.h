@@ -25,22 +25,20 @@ namespace mra {
 
     private:
       size_type K;
-      int npt;                                      // number of quadrature points
-      T expnt;
-      T coeff;
-      const T* quad_x;                              // quadrature points
-      const T* quad_w;                              // quadrature weights
-      // Tensor<T, 3> autocorrcoef;                    // autocorrelation coefficients
-      Tensor<T, 3> c;                               // autocorrelation coefficients
-      FunctionData<T, NDIM>& functiondata;           // function data
-      std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache; // map for storing rnlij matrices
-      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;  // map for storing rnlp matrices
-      std::map<Key<NDIM>, ConvolutionData<T>> nscache;    // map for storing ns matrices
-      std::mutex cachemutex;                        // mutex for thread safety
+      int npt;                                         // number of quadrature points
+      T expnt;                                         // exponent for the Gaussian
+      T coeff;                                         // coefficient for the Gaussian
+      const T* quad_x;                                 // quadrature points
+      const T* quad_w;                                 // quadrature weights
+      Tensor<T, 3> c;                                  // autocorrelation coefficients
+      FunctionData<T, NDIM>& functiondata;             // function data
+      std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
+      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
+      std::map<Key<NDIM>, ConvolutionData<T>> nscache; // map for storing ns matrices
+      std::mutex cachemutex;                           // mutex for thread safety
 
 
       void autoc(){
-
         Tensor<T, 3> autocorrcoef(K, K, 4*K);
         auto autocorr_view = autocorrcoef.current_view();
         detail::autocorr_get<T>(K, autocorr_view);
