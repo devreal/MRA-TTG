@@ -36,7 +36,7 @@ void test_coeffs(int argc, char** argv) {
   }
   for (int i = 0; i < cd.S.size(); ++i) {
     for (int j = 0; j < cd.S.size(); ++j) {
-        assert(std::abs(cd.S(i, j) - cd_mad->S(i, j)) < 1e-10);
+        assert(std::abs(cd.S(i, j) - cd_mad->T(i, j)) < 1e-10);
     }
   }
 
