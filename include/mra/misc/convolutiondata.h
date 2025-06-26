@@ -36,7 +36,6 @@ namespace mra {
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache; // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;  // map for storing rnlp matrices
       std::map<Key<NDIM>, ConvolutionData<T>> nscache;    // map for storing ns matrices
-      std::map<Key<NDIM>, ConvolutionData<T>> modnscache; // map for storing rnlp matrices
       std::mutex cachemutex;                        // mutex for thread safety
 
 
