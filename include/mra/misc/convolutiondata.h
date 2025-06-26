@@ -25,16 +25,14 @@ namespace mra {
 
     private:
       size_type K;
-      Level n;
       int npt;                                      // number of quadrature points
       T expnt;
       T coeff;
-      Translation lx;
       const T* quad_x;                              // quadrature points
       const T* quad_w;                              // quadrature weights
-      Tensor<T, 3> autocorrcoef;                    // autocorrelation coefficients
+      // Tensor<T, 3> autocorrcoef;                    // autocorrelation coefficients
       Tensor<T, 3> c;                               // autocorrelation coefficients
-      FunctionData<T, NDIM> functiondata;           // function data
+      FunctionData<T, NDIM>& functiondata;           // function data
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache; // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;  // map for storing rnlp matrices
       std::map<Key<NDIM>, ConvolutionData<T>> nscache;    // map for storing ns matrices
@@ -43,9 +41,11 @@ namespace mra {
 
 
       void autoc(){
-        auto c_view = c.current_view();
+
+        Tensor<T, 3> autocorrcoef(K, K, 4*K);
         auto autocorr_view = autocorrcoef.current_view();
         detail::autocorr_get<T>(K, autocorr_view);
+        auto c_view = c.current_view();
         c_view = 0.0;
         std::array<Slice,NDIM> slices = {Slice(0, K), Slice(0, K), Slice(0, 2*K)};
         c_view(slices) = autocorr_view(slices);
@@ -94,7 +94,7 @@ namespace mra {
         cachemutex.lock();
         if (rnlpcache.find(key) == rnlpcache.end()) {
           assert(rnlpcache.find(key) == rnlpcache.end());
-          rnlpcache.emplace(std::move(key), std::move(rnlp));
+          rnlpcache.emplace(key, std::move(rnlp));
         }
         it = rnlpcache.find(key);
         cachemutex.unlock();
@@ -104,9 +104,8 @@ namespace mra {
 
     public:
 
-      Convolution(size_type K, int npt, T coeff, T expnt)
-        : K(K), npt(npt), autocorrcoef(K, K, 4*K),
-          c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(K){
+      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
+        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
         GLget(&quad_x, &quad_w, npt);
         autoc();
       }
@@ -147,7 +146,7 @@ namespace mra {
         cachemutex.lock();
         if (rnlijcache.find(key) == rnlijcache.end()) {
           assert(rnlijcache.find(key) == rnlijcache.end());
-          rnlijcache.emplace(std::move(key), std::move(rnlij));
+          rnlijcache.emplace(key, std::move(rnlij));
         }
 
         it = rnlijcache.find(key);
@@ -199,7 +198,7 @@ namespace mra {
         cachemutex.lock();
         if (nscache.find(key) == nscache.end()) {
           assert(nscache.find(key) == nscache.end());
-          nscache.emplace(std::move(key), std::move(obj));
+          nscache.emplace(key, std::move(obj));
         }
         it = nscache.find(key);
         cachemutex.unlock();
