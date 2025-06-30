@@ -21,6 +21,28 @@ namespace mra {
   };
 
   template <typename T, Dimension NDIM>
+  struct OperatorData {
+    std::array<ConvolutionData<T>>* ops[NDIM];
+    double norm;
+
+    OperatorData() : ops{}, norm(0.0) {
+      for (int i = 0; i < NDIM; ++i) {
+        ops[i] = nullptr;
+      }
+    }
+    OperatorData(const OperatorData& op) {
+      norm = op.norm;
+      for (int i = 0; i < NDIM; ++i) {
+        if (op.ops[i]) {
+          ops[i] = new std::array<ConvolutionData<T>>(*op.ops[i]);
+        } else {
+          ops[i] = nullptr;
+        }
+      }
+    }
+  };
+
+  template <typename T, Dimension NDIM>
   class Convolution {
 
     private:
