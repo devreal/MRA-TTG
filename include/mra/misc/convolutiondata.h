@@ -23,15 +23,17 @@ namespace mra {
   template <typename T, Dimension NDIM>
   struct OperatorData {
     std::array<ConvolutionData<T>, NDIM>* ops;
-    double norm;
+    T norm;
+    T fac;
 
-    OperatorData() : ops{}, norm(0.0) {
+    OperatorData() : ops{}, norm(0.0), fac(1.0) {
       for (int i = 0; i < NDIM; ++i) {
         ops[i] = nullptr;
       }
     }
     OperatorData(const OperatorData& op) {
       norm = op.norm;
+      fac = op.fac;
       for (int i = 0; i < NDIM; ++i) {
         if (op.ops[i]) {
           ops[i] = op.ops[i];
@@ -258,6 +260,7 @@ namespace mra {
     }
 
   public:
+
     const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
       auto it = opdata.find(key);
       if (it != opdata.end()) {
