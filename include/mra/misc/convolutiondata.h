@@ -226,6 +226,27 @@ namespace mra {
       }
     };
 
+  template <typename T, Dimension NDIM>
+  class Operator{
+
+  private:
+    std::map<Key<NDIM>, OperatorData<>T, NDIM> opdata;     // map for storing operator data
+
+  public:
+    const OpearatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
+      auto it = opdata.find(key);
+      if (it != opdata.end()) {
+        return it->second;
+      } else {
+        OperatorData<T, NDIM> data;
+        for (int i = 0; i < NDIM; ++i) {
+          data.ops[i] = make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
+        }
+
+      }
+    }
+  }
+
 } // namespace mra
 
 #endif // MRA_CONVOLUTIONDATA_H
