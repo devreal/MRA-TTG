@@ -230,7 +230,8 @@ namespace mra {
   class Operator{
 
   private:
-    std::map<Key<NDIM>, OperatorData<>T, NDIM> opdata;     // map for storing operator data
+    std::map<Key<NDIM>, OperatorData<T, NDIM> opdata;     // map for storing operator data
+    std::mutex cachemutex;                                 // mutex for thread safety
 
     T norm_ns(Level n, const ConvolutionData<T>& ns[]) const {
       T norm = 0.0, sum = 0.0;
@@ -260,13 +261,22 @@ namespace mra {
       auto it = opdata.find(key);
       if (it != opdata.end()) {
         return it->second;
-      } else {
-        OperatorData<T, NDIM> data;
-        for (int i = 0; i < NDIM; ++i) {
-          data.ops[i] = make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
-        }
-
       }
+
+      OperatorData<T, NDIM> data;
+      for (int i = 0; i < NDIM; ++i) {
+        data.ops[i] = make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
+      }
+      data.norm = norm_ns(key.level(), data.ops);
+      cachemutex.lock();
+      if (opdata.find(key) == opdata.end()) {
+        assert(opdata.find(key) == opdata.end());
+        opdata.emplace(key, std::move(data));
+      }
+      it = opdata.find(key);
+      cachemutex.unlock();
+      const auto& r = it->second;
+      return r;
     }
   }
 
