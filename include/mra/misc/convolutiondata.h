@@ -22,7 +22,7 @@ namespace mra {
 
   template <typename T, Dimension NDIM>
   struct OperatorData {
-    std::array<ConvolutionData<T>>* ops[NDIM];
+    std::array<ConvolutionData<T>, NDIM>* ops;
     double norm;
 
     OperatorData() : ops{}, norm(0.0) {
@@ -34,7 +34,7 @@ namespace mra {
       norm = op.norm;
       for (int i = 0; i < NDIM; ++i) {
         if (op.ops[i]) {
-          ops[i] = new std::array<ConvolutionData<T>>(*op.ops[i]);
+          ops[i] = op.ops[i];
         } else {
           ops[i] = nullptr;
         }
@@ -227,21 +227,22 @@ namespace mra {
     };
 
   template <typename T, Dimension NDIM>
-  class Operator{
+  class Operator {
 
   private:
-    std::map<Key<NDIM>, OperatorData<T, NDIM> opdata;     // map for storing operator data
+    size_type K;
+    std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;     // map for storing operator data
     std::mutex cachemutex;                                 // mutex for thread safety
 
-    T norm_ns(Level n, const ConvolutionData<T>& ns[]) const {
+    T norm_ns(Level n, const ConvolutionData<T>* ns[]) const {
       T norm = 0.0, sum = 0.0;
 
-      for (size_type i = 0; i < NDIM; ++i) {}
-        TensorView<T, 2> ns_rview(ns[d].R);
-        auto ns_sview = ns[d].S.current_view();
+      for (size_type d = 0; d < NDIM; ++d) {
+        TensorView<T, 2> ns_rview(ns[d]->R);
+        auto ns_sview = ns[d]->S.current_view();
         for (size_type i = 0; i < K; ++i) {
           for (size_type j = 0; j < K; ++j) {
-            ns_view(i, j) = 0.0;
+            ns_rview(i, j) = 0.0;
           }
         }
         T rnorm = normf(ns_rview);
@@ -257,7 +258,7 @@ namespace mra {
     }
 
   public:
-    const OpearatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
+    const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
       auto it = opdata.find(key);
       if (it != opdata.end()) {
         return it->second;
@@ -278,7 +279,7 @@ namespace mra {
       const auto& r = it->second;
       return r;
     }
-  }
+  };
 
 } // namespace mra
 
