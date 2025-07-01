@@ -232,6 +232,29 @@ namespace mra {
   private:
     std::map<Key<NDIM>, OperatorData<>T, NDIM> opdata;     // map for storing operator data
 
+    T norm_ns(Level n, const ConvolutionData<T>& ns[]) const {
+      T norm = 0.0, sum = 0.0;
+
+      for (size_type i = 0; i < NDIM; ++i) {}
+        TensorView<T, 2> ns_rview(ns[d].R);
+        auto ns_sview = ns[d].S.current_view();
+        for (size_type i = 0; i < K; ++i) {
+          for (size_type j = 0; j < K; ++j) {
+            ns_view(i, j) = 0.0;
+          }
+        }
+        T rnorm = normf(ns_rview);
+        T snorm = normf(ns_sview);
+        T aa = std::min(rnorm, snorm);
+        T bb = std::max(rnorm, snorm);
+        norm *= aa;
+        if (bb > 0.0) sum += aa/bb;
+      }
+      if (n) norm *= sum;
+
+      return norm;
+    }
+
   public:
     const OpearatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
       auto it = opdata.find(key);
