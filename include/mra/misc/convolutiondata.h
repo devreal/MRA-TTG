@@ -28,7 +28,7 @@ namespace mra {
 
     OperatorData() : ops{}, norm(0.0), fac(1.0) {
       for (int i = 0; i < NDIM; ++i) {
-        ops[i] = nullptr;
+        *ops[i] = nullptr;
       }
     }
     OperatorData(const OperatorData& op) {
@@ -36,9 +36,9 @@ namespace mra {
       fac = op.fac;
       for (int i = 0; i < NDIM; ++i) {
         if (op.ops[i]) {
-          ops[i] = op.ops[i];
+          *ops[i] = op.ops[i];
         } else {
-          ops[i] = nullptr;
+          *ops[i] = nullptr;
         }
       }
     }
@@ -237,7 +237,7 @@ namespace mra {
     std::mutex cachemutex;                                 // mutex for thread safety
 
     T norm_ns(Level n, const ConvolutionData<T>* ns[]) const {
-      T norm = 0.0, sum = 0.0;
+      T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
         TensorView<T, 2> ns_rview(ns[d]->R);
