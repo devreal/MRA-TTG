@@ -275,12 +275,11 @@ namespace mra {
       cachemutex.lock();
       if (opdata.find(key) == opdata.end()) {
         assert(opdata.find(key) == opdata.end());
-        opdata.emplace(key, std::move(data));
+        opdata.emplace(key, data);
       }
       it = opdata.find(key);
       cachemutex.unlock();
-      const auto& r = it->second;
-      return r;
+      return it->second;
     }
   };
 
