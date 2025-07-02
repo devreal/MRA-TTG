@@ -42,6 +42,7 @@ namespace mra {
         }
       }
     }
+    ~OperatorData() = default;
   };
 
   template <typename T, Dimension NDIM>
@@ -236,7 +237,7 @@ namespace mra {
     std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;     // map for storing operator data
     std::mutex cachemutex;                                 // mutex for thread safety
 
-    T norm_ns(Level n, const ConvolutionData<T>* ns[]) const {
+    T norm_ns(Level n, ConvolutionData<T>* const ns[]) const {
       T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
@@ -260,6 +261,15 @@ namespace mra {
     }
 
   public:
+
+    Operator(size_type K) : K(K) {}
+
+    Operator(Operator&&) = default;
+    Operator(const Operator&) = delete;
+    Operator& operator=(Operator&&) = default;
+    Operator& operator=(const Operator&) = delete;
+
+    ~
 
     const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
       auto it = opdata.find(key);
