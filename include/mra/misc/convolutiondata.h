@@ -22,13 +22,13 @@ namespace mra {
 
   template <typename T, Dimension NDIM>
   struct OperatorData {
-    std::array<ConvolutionData<T>, NDIM>* ops;
+    std::array<const ConvolutionData<T>*, NDIM> ops;
     T norm;
     T fac;
 
     OperatorData() : ops{}, norm(0.0), fac(1.0) {
       for (int i = 0; i < NDIM; ++i) {
-        *ops[i] = nullptr;
+        ops[i] = nullptr;
       }
     }
     OperatorData(const OperatorData& op) {
@@ -36,9 +36,9 @@ namespace mra {
       fac = op.fac;
       for (int i = 0; i < NDIM; ++i) {
         if (op.ops[i]) {
-          *ops[i] = op.ops[i];
+          ops[i] = op.ops[i];
         } else {
-          *ops[i] = nullptr;
+          ops[i] = nullptr;
         }
       }
     }
@@ -269,7 +269,7 @@ namespace mra {
 
       OperatorData<T, NDIM> data;
       for (int i = 0; i < NDIM; ++i) {
-        data.ops[i] = make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
+        data.ops[i] = &make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
       }
       data.norm = norm_ns(key.level(), data.ops);
       cachemutex.lock();
