@@ -230,10 +230,12 @@ namespace mra {
     };
 
   template <typename T, Dimension NDIM>
-  class Operator {
+  class ConvolutionOperator {
 
   private:
     size_type K;
+    size_type seprank;
+    // std::array<>
     std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;     // map for storing operator data
     std::mutex cachemutex;                                 // mutex for thread safety
 
@@ -241,7 +243,8 @@ namespace mra {
       T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
-        TensorView<T, 2> ns_rview(ns[d]->R);
+        Tensor<T, 2> ns_r(ns[d]->R);
+        TensorView<T, 2> ns_rview = ns_r.current_view();
         auto ns_sview = ns[d]->S.current_view();
         for (size_type i = 0; i < K; ++i) {
           for (size_type j = 0; j < K; ++j) {
@@ -262,24 +265,22 @@ namespace mra {
 
   public:
 
-    Operator(size_type K) : K(K) {}
+    ConvolutionOperator(size_type K) : K(K) {}
 
-    Operator(Operator&&) = default;
-    Operator(const Operator&) = delete;
-    Operator& operator=(Operator&&) = default;
-    Operator& operator=(const Operator&) = delete;
-
-    ~
+    ConvolutionOperator(ConvolutionOperator&&) = default;
+    ConvolutionOperator(const ConvolutionOperator&) = delete;
+    ConvolutionOperator& operator=(ConvolutionOperator&&) = default;
+    ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
 
     const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
       auto it = opdata.find(key);
       if (it != opdata.end()) {
         return it->second;
       }
-
+      ConvolutionData<T> ns;
       OperatorData<T, NDIM> data;
       for (int i = 0; i < NDIM; ++i) {
-        data.ops[i] = &make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
+        data.ops[i] = &ns.template make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
       }
       data.norm = norm_ns(key.level(), data.ops);
       cachemutex.lock();
