@@ -17,12 +17,17 @@ void test_coeffs(int argc, char** argv) {
   constexpr double expnt = 10.0; // exponent for the Gaussian
   mra::FunctionData<double, 3> functiondata(K);
 
+
+
   mra::Convolution<double, 3> conv(K, npt, coeff, expnt, functiondata);
   const mra::Tensor<double, 2>& rnlij = conv.make_rnlij(2, 1);
   auto rnlij_view = rnlij.current_view();
   const mra::ConvolutionData<double>& cd = conv.make_nonstandard(2, 1);
   auto cdR_view = cd.R.current_view();
   auto cdS_view = cd.S.current_view();
+
+  mra::ConvolutionOperator<double, 3> op(K, npt, coeff, expnt, functiondata);
+  const mra::OperatorData<double, 3>& op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
