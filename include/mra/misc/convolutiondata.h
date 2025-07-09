@@ -60,7 +60,7 @@ namespace mra {
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
       std::map<Key<NDIM>, ConvolutionData<T>> nscache; // map for storing ns matrices
-      std::mutex cachemutex;                           // mutex for thread safety
+      mutable std::mutex cachemutex;                           // mutex for thread safety
 
 
       void autoc(){
@@ -181,7 +181,8 @@ namespace mra {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         auto it = nscache.find(key);
         if (it != nscache.end()) {
-          return std::move(it->second);
+          const auto& r = it->second;
+          return r;
         }
 
         Tensor<T, 2> tmp(2*K, 2*K);
@@ -235,20 +236,23 @@ namespace mra {
   private:
     size_type K;
     size_type seprank;
-    // std::array<>
+    Convolution<T, NDIM> conv;                       // convolution object
     std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;     // map for storing operator data
-    std::mutex cachemutex;                                 // mutex for thread safety
+    mutable std::mutex cachemutex;                                 // mutex for thread safety
 
-    T norm_ns(Level n, ConvolutionData<T>* const ns[]) const {
+    T norm_ns(Level n, std::array<const ConvolutionData<T>*, NDIM>& ns) const {
+      // ConvolutionData<T>* const ns[]
       T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
-        Tensor<T, 2> ns_r(ns[d]->R);
-        TensorView<T, 2> ns_rview = ns_r.current_view();
-        auto ns_sview = ns[d]->S.current_view();
-        for (size_type i = 0; i < K; ++i) {
-          for (size_type j = 0; j < K; ++j) {
-            ns_rview(i, j) = 0.0;
+        Tensor<T, 2> ns_r(2*K, 2*K);
+        const auto& ref_view = ns[d]->R.current_view();
+        const auto& ns_sview = ns[d]->S.current_view();
+        auto ns_rview = ns_r.current_view();
+        for (size_type i = 0; i < 2*K; ++i) {
+          for (size_type j = 0; j < 2*K; ++j) {
+            if(i<K && j<K) ns_rview(i, j) = 0.0;
+            else ns_rview(i, j) = ref_view(i, j);
           }
         }
         T rnorm = normf(ns_rview);
@@ -259,28 +263,28 @@ namespace mra {
         if (bb > 0.0) sum += aa/bb;
       }
       if (n) norm *= sum;
-
       return norm;
     }
 
   public:
 
-    ConvolutionOperator(size_type K) : K(K) {}
+    ConvolutionOperator(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
+     : K(K), conv(K, npt, coeff, expnt, functiondata) {}
 
     ConvolutionOperator(ConvolutionOperator&&) = default;
     ConvolutionOperator(const ConvolutionOperator&) = delete;
     ConvolutionOperator& operator=(ConvolutionOperator&&) = default;
     ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
 
-    const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) const {
+    const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) {
       auto it = opdata.find(key);
       if (it != opdata.end()) {
         return it->second;
       }
-      ConvolutionData<T> ns;
       OperatorData<T, NDIM> data;
       for (int i = 0; i < NDIM; ++i) {
-        data.ops[i] = &ns.template make_nonstandard<T, NDIM>(key.level(), key.translation()[i]);
+        auto& cd = conv.make_nonstandard(key.level(), key.translation()[i]);
+        data.ops[i] = &cd;
       }
       data.norm = norm_ns(key.level(), data.ops);
       cachemutex.lock();
@@ -290,7 +294,8 @@ namespace mra {
       }
       it = opdata.find(key);
       cachemutex.unlock();
-      return it->second;
+      auto& r = it->second;
+      return r;
     }
   };
 
