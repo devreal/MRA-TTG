@@ -10,6 +10,17 @@
 namespace mra {
   namespace detail {
     template <typename T, Dimension NDIM>
+    DEVSCOPE void axpy_kernel_impl(
+      const TensorView<T, NDIM>& nodeA,
+      TensorView<T, NDIM>& nodeR,
+      const T scalarA)
+    {
+      foreach_idx(nodeR, [&](size_type i) {
+        nodeR[i] = scalarA*nodeA[i] + nodeR[i];
+      });
+    }
+
+    template <typename T, Dimension NDIM>
     DEVSCOPE void gaxpy_kernel_impl(
       const TensorView<T, NDIM>& nodeA,
       const TensorView<T, NDIM>& nodeB,
