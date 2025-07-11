@@ -87,6 +87,10 @@ namespace mra{
         //std::cout << "derivative dispatch " << key << " has no left, sending to left input " << key << std::endl;
         do_send.template operator()<LEFT>(key, mra::FunctionsReconstructedNode<T, NDIM>());
       }
+#ifndef MRA_ENABLE_HOST
+      co_await std::move(sends);
+#endif
+
     };
 
     auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn),
@@ -256,10 +260,11 @@ namespace mra{
             do_send.template operator()<RESULT>(key, std::move(result));
           }
         }
+      }
 #ifndef MRA_ENABLE_HOST
         co_await std::move(sends);
 #endif
-      }
+
     };
 
     auto deriv_tt = ttg::make_tt<Space>(std::move(derivative_fn),
