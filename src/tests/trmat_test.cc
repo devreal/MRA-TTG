@@ -36,6 +36,9 @@ void test_coeffs(int argc, char** argv) {
   madness::Tensor<double> rnlij_mad = conv1d.rnlij(2, 1);
   const madness::ConvolutionData1D<double>* cd_mad = conv1d.nonstandard(2, 1);
 
+  std::cout << "rnlij_mad: " << rnlij_mad << std::endl;
+  std::cout << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << std::endl;
+  std::cout << "rnlij MRA: " << rnlij << std::endl;
   // Check rnlij
   for (int i = 0; i < rnlij_mad.size(); ++i) {
     for (int j = 0; j < rnlij_mad.size(); ++j) {
