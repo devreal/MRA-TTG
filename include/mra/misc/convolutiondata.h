@@ -163,6 +163,7 @@ namespace mra {
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
+        rnlij_view = 0.0;
         detail::inner(c.current_view(), R_view, rnlij_view);
 
         cachemutex.lock();
