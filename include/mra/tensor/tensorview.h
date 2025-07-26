@@ -429,7 +429,7 @@ namespace mra {
     SCOPE value_type& operator()(Dims... idxs) {
       std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
       for (size_type i = 0; i < indices.size(); ++i) {
-        assert(indices[i] >= dim(i));
+        assert(indices[i] < dim(i));
       }
       if (m_ptr == nullptr) THROW("TensorView: non-const call with nullptr");
       return m_ptr[offset(std::forward<Dims>(idxs)...)];
@@ -442,7 +442,7 @@ namespace mra {
       // let's hope the compiler will hoist this out of loops
       std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
       for (size_type i = 0; i < indices.size(); ++i) {
-        assert(indices[i] >= dim(i));
+        assert(indices[i] < dim(i));
       }
       if (m_ptr == nullptr) {
         return T(0);
@@ -459,7 +459,7 @@ namespace mra {
     SCOPE TensorView<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) const {
       std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
       for (size_type i = 0; i < indices.size(); ++i) {
-        assert(indices[i] >= dim(i));
+        assert(indices[i] < dim(i));
       }
       constexpr const Dimension noffs = sizeof...(Dims);
       constexpr const Dimension ndim = NDIM-noffs;
