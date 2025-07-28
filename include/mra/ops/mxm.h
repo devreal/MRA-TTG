@@ -11,7 +11,10 @@
 #define HAVE_BLASPP 1
 #endif // __has_include(<blas.hh>)
 
-namespace mra{
+namespace mra {
+
+
+#ifndef MRA_HAVE_MTXM
 
 #if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
   /**
@@ -19,12 +22,11 @@ namespace mra{
    * c(i,j) += sum(k) a(k,i)*b(k,j)
    */
   template <typename aT, typename bT, typename cT, bool Q = false>
-  SCOPE void mTxm(size_type dimi, size_type dimj, size_type dimk,
-          cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    if (ldb == -1) ldb=dimj;
+  void mTxm(size_type dimi, size_type dimj, size_type dimk,
+          cT* __restrict__ c, const aT* a, const bT* b) {
     blas::gemm(blas::Layout::RowMajor, blas::Op::Trans, blas::Op::NoTrans,
                dimi, dimj, dimk,
-               1.0, a, dimi, b, ldb,
+               1.0, a, dimi, b, dimj,
                Q ? 0.0 : 1.0, c, dimj);
   }
 #else  // HAVE_BLASPP
@@ -34,8 +36,7 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT, bool Q = false>
   SCOPE void mTxm(size_type dimi, size_type dimj, size_type dimk,
-          cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    if (ldb == -1) ldb=dimj;
+          cT* __restrict__ c, const aT* a, const bT* b) {
     /* trivial 2D implementation for devices */
     if (threadIdx.z == 0) {
       for (size_type i = threadIdx.y; i < dimi; i += blockDim.y) {
@@ -50,7 +51,7 @@ namespace mra{
         for (long k=0; k<dimk; ++k,aik_ptr+=dimi) { /* not parallelized */
           aT aki = *aik_ptr;
           for (size_type j = threadIdx.x; j < dimj; j += blockDim.x) {
-            ci[j] += aki*b[k*ldb+j];
+            ci[j] += aki*b[k*dimj+j];
           }
         }
       }
@@ -59,56 +60,24 @@ namespace mra{
   }
 #endif // HAVE_BLASPP
 
+  template<typename T>
+  constexpr size_type mTxm_shmem_size(size_type K) {
+    return 0;
+  }
+
+#endif // MRA_HAVE_MTXM
+
 #ifndef MRA_HAVE_MTXMQ
 
-#if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
   /**
    * blaspp implementation of A^T * B
    * c(i,j) = sum(k) a(k,i)*b(k,j)
    */
   template <typename aT, typename bT, typename cT>
   SCOPE void mTxmq(size_type dimi, size_type dimj, size_type dimk,
-          cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    mTxm<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b, ldb);
+          cT* __restrict__ c, const aT* a, const bT* b) {
+    mTxm<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b);
   }
-#else  // HAVE_BLASPP
-
-  // /**
-  //  * reference implementation, adapted from madness
-  //  * c(i,j) = sum(k) a(k,i)*b(k,j)
-  //  */
-  // template <typename aT, typename bT, typename cT>
-  // SCOPE void mTxmq(size_type dimi, size_type dimj, size_type dimk,
-  //         cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-  //   mTxm<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b, ldb);
-  // }
-  template <typename aT, typename bT, typename cT>
-  SCOPE
-  void mTxmq(size_type dimi, size_type dimj, size_type dimk,
-            cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    if (ldb == -1) ldb=dimj;
-    /* 3D implementation utilizing the tall-and-skinny shape of a(i,k) and c(i,j) (see transform() below).
-    * We distribute work along the i-dimension across the Y and Z dimensions of the thread-block.
-    * The X dimension of the thread-block computes along the j dimension. The k dimension is not parallelized
-    * as it would require reductions (could be added later for square matrices). */
-    for (size_type i = threadIdx.z*blockDim.y+threadIdx.y; i < dimi; i += blockDim.z*blockDim.y) {
-      cT* ci = c + i*dimj; // the row of C all threads in dim x work on
-      const aT *aik_ptr = a + i;
-      // beta = 0
-      for (size_type j = threadIdx.x; j < dimj; j += blockDim.x) {
-        ci[j] = 0.0;
-      }
-
-      for (long k=0; k<dimk; ++k,aik_ptr+=dimi) { /* not parallelized */
-        aT aki = *aik_ptr;
-        for (size_type j = threadIdx.x; j < dimj; j += blockDim.x) {
-          ci[j] += aki*b[k*ldb+j];
-        }
-      }
-    }
-    SYNCTHREADS();
-  }
-#endif // HAVE_BLASPP
 
   template<typename T>
   constexpr size_type mTxmq_shmem_size(size_type K) {
@@ -117,6 +86,24 @@ namespace mra{
 
 #endif // MRA_HAVE_MTXMQ
 
+
+#ifndef MRA_HAVE_MXM
+
+#if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+
+  /**
+   * blaspp implementation of A * B
+   * c(i,j) += sum(k) a(i,k)*b(k,j)
+   */
+  template <typename aT, typename bT, typename cT, bool Q = false>
+  void mxm(size_type dimi, size_type dimj, size_type dimk,
+          cT* __restrict__ c, const aT* a, const bT* b) {
+    blas::gemm(blas::Layout::RowMajor, blas::Op::NoTrans, blas::Op::NoTrans,
+               dimi, dimj, dimk,
+               1.0, a, dimk, b, dimj,
+               Q ? 0.0 : 1.0, c, dimj);
+  }
+#else // defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
   /**
    * reference implementation, adapted from madness
    *
@@ -124,8 +111,7 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT, bool Q = false>
   SCOPE void mxm(size_type dimi, size_type dimj, size_type dimk,
-                 cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    if (ldb == -1) ldb=dimj;
+                 cT* __restrict__ c, const aT* a, const bT* b) {
     /* trivial 2D implementation for devices */
     if (threadIdx.z == 0) {
       for (size_type i = threadIdx.y; i < dimi; i += blockDim.y) {
@@ -138,13 +124,23 @@ namespace mra{
         }
         for (size_type j = threadIdx.x; j < dimj; j += blockDim.x) {
           for (long k=0; k<dimk; ++k) { /* not parallelized */
-            ci[j] += ai_ptr[k]*b[k*ldb+j];
+            ci[j] += ai_ptr[k]*b[k*dimj+j];
           }
         }
       }
     }
     SYNCTHREADS();
   }
+#endif // defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+
+  template<typename T>
+  constexpr size_type mxm_shmem_size(size_type K) {
+    return 0;
+  }
+#endif // MRA_HAVE_MXM
+
+
+#ifndef MRA_HAVE_MXMQ
 
   /**
    * reference implementation, adapted from madness
@@ -153,9 +149,35 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT, bool Q = false>
   SCOPE void mxmq(size_type dimi, size_type dimj, size_type dimk,
-                  cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    mxm<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b, ldb);
+                  cT* __restrict__ c, const aT* a, const bT* b) {
+    mxm<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b);
   }
+
+  template<typename T>
+  constexpr size_type mxmq_shmem_size(size_type K) {
+    return 0;
+  }
+#endif // MRA_HAVE_MXMQ
+
+
+#ifndef MRA_HAVE_MXMT
+
+#if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+
+  /**
+   * blaspp implementation of A * B^T
+   * c(i,j) += sum(k) a(i,k)*b(j,k)
+   */
+  template <typename aT, typename bT, typename cT, bool Q = false>
+  void mxmT(size_type dimi, size_type dimj, size_type dimk,
+          cT* __restrict__ c, const aT* a, const bT* b) {
+    blas::gemm(blas::Layout::RowMajor, blas::Op::NoTrans, blas::Op::Trans,
+               dimi, dimj, dimk,
+               1.0, a, dimk, b, dimk,
+               Q ? 0.0 : 1.0, c, dimj);
+  }
+
+#else // defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
 
   /**
    * reference implementation, adapted from madness
@@ -164,8 +186,7 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT, bool Q = false>
   SCOPE void mxmT(size_type dimi, size_type dimj, size_type dimk,
-                 cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    if (ldb == -1) ldb=dimj;
+                 cT* __restrict__ c, const aT* a, const bT* b) {
     /* trivial 2D implementation for devices */
     if (threadIdx.z == 0) {
       for (size_type i = threadIdx.y; i < dimi; i += blockDim.y) {
@@ -191,6 +212,17 @@ namespace mra{
     SYNCTHREADS();
   }
 
+#endif // defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+
+  template<typename T>
+  constexpr size_type mxmT_shmem_size(size_type K) {
+    return 0;
+  }
+#endif // MRA_HAVE_MXMT
+
+
+#ifndef MRA_HAVE_MXMTQ
+
   /**
    * reference implementation, adapted from madness
    *
@@ -198,9 +230,37 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT>
   SCOPE void mxmTq(size_type dimi, size_type dimj, size_type dimk,
-                 cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    mxmT<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b, ldb);
+                 cT* __restrict__ c, const aT* a, const bT* b) {
+    mxmT<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b);
   }
+
+  template<typename T>
+  constexpr size_type mxmTq_shmem_size(size_type K) {
+    return 0;
+  }
+
+#endif // MRA_HAVE_MXMTQ
+
+
+
+#ifndef MRA_HAVE_MTXMT
+
+#if defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+
+  /**
+   * blaspp implementation of A^T * B^T
+   * c(i,j) += sum(k) a(k,i)*b(j,k)
+   */
+  template <typename aT, typename bT, typename cT, bool Q = false>
+  void mTxmT(size_type dimi, size_type dimj, size_type dimk,
+          cT* __restrict__ c, const aT* a, const bT* b) {
+    blas::gemm(blas::Layout::RowMajor, blas::Op::Trans, blas::Op::Trans,
+               dimi, dimj, dimk,
+               1.0, a, dimi, b, dimj,
+               Q ? 0.0 : 1.0, c, dimj);
+  }
+
+#else
 
   /**
    * reference implementation, adapted from madness
@@ -209,8 +269,7 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT, bool Q = false>
   SCOPE void mTxmT(size_type dimi, size_type dimj, size_type dimk,
-                   cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    if (ldb == -1) ldb=dimj;
+                   cT* __restrict__ c, const aT* a, const bT* b) {
     /* trivial 2D implementation for devices */
     if (threadIdx.z == 0) {
       for (size_type i = threadIdx.y; i < dimi; i += blockDim.y) {
@@ -226,13 +285,26 @@ namespace mra{
             /**
              * TODO: this is not optimal, we should transpose a and b first into shared memory
              */
-            ci[j] += *aik_ptr * b[j*ldb+k];
+            ci[j] += *aik_ptr * b[j*dimk+k];
           }
         }
       }
     }
     SYNCTHREADS();
   }
+
+#endif // defined(HAVE_BLASPP) && !defined(HAVE_DEVICE_ARCH)
+
+  template<typename T>
+  constexpr size_type mTxmT_shmem_size(size_type K) {
+    return 0;
+  }
+
+#endif // MRA_HAVE_MTXMT
+
+
+
+#ifndef MRA_HAVE_MTXMTQ
 
   /**
    * reference implementation, adapted from madness
@@ -241,9 +313,17 @@ namespace mra{
    */
   template <typename aT, typename bT, typename cT>
   SCOPE void mTxmTq(size_type dimi, size_type dimj, size_type dimk,
-                   cT* __restrict__ c, const aT* a, const bT* b, std::ptrdiff_t ldb=-1) {
-    mTxmT<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b, ldb);
+                   cT* __restrict__ c, const aT* a, const bT* b) {
+    mTxmT<aT, bT, cT, true>(dimi, dimj, dimk, c, a, b);
   }
-}
+
+  template<typename T>
+  constexpr size_type mTxmTq_shmem_size(size_type K) {
+    return 0;
+  }
+
+#endif // MRA_HAVE_MTXMTQ
+
+} // namespace mra
 
 #endif // MRA_MXM_H
