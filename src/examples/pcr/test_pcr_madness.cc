@@ -90,7 +90,7 @@ real_functor_3d random_gaussian(int seed) {
   double lo = log(expntmin);
   double hi = log(expntmax);
   double expnt = exp(RandomValue<double>() * (hi - lo) + lo);
-  print("expnt", expnt, origin);
+  if (seed != 0) print("expnt", expnt, origin);
   double coeff = pow(2.0 * expnt / constants::pi, 0.75);
   return real_functor_3d(new Gaussian(origin, expnt, coeff));
 }
@@ -114,7 +114,6 @@ real_functor_3d fixed_gaussian() {
   for (int i = 0; i < 3; i++) {
     origin[i] = 0.0;
   }
-  print("expnt", expnt, origin);
   double coeff = pow(2.0 * expnt / constants::pi, 0.75);
   return real_functor_3d(new Gaussian(origin, expnt, coeff));
 }
@@ -129,7 +128,7 @@ std::vector<real_function_3d> fixed_gaussians(size_t n, World &world) {
   return result;
 }
 
-void test(World &world, int N, int K, int nrep, int seed) {
+void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
 
@@ -137,6 +136,7 @@ void test(World &world, int N, int K, int nrep, int seed) {
   FunctionDefaults<3>::set_thresh(thresh);
   FunctionDefaults<3>::set_truncate_mode(1);
   FunctionDefaults<3>::set_cubic_cell(-L / 2, L / 2);
+  FunctionDefaults<3>::set_initial_level(initial_level);
 
   default_random_generator.setstate(
       99); // Ensure all processes have the same state
@@ -156,9 +156,15 @@ void test(World &world, int N, int K, int nrep, int seed) {
     reconstruct(world, b, true);
     compress(world, b, true);
 
+    // compute the norm of the difference of the functions
     auto diff = sub(world, a, b, true);
+    auto norms = norm2s(world, diff, true);
     // compute the norm of the errors for each component
     for (size_t i = 0; i < N; i++) {
+      auto norm = diff[i].norm2();
+      if (world.rank() == 0 && std::abs(norms[i]) > 1e-12) {
+        std::cout << "MADNESS Error Norm for function " << i << ": " << norm << std::endl;
+      }
       //print("error", i, diff[i].norm2());
     }
     end = std::chrono::high_resolution_clock::now();
@@ -178,7 +184,8 @@ int main(int argc, char **argv) {
   int N = opt.parse("-N", 1);
   int K = opt.parse("-K", 10);
   int nrep = opt.parse("-n", 3);
-  int seed = opt.exists("-s");
+  int seed = opt.parse("-s", 5551212);
+  int seed = opt.parse("-i", 2); // initial level for the Gaussian functions
 
 
   startup(world, argc, argv);
@@ -186,7 +193,7 @@ int main(int argc, char **argv) {
   if (world.rank() == 0)
     FunctionDefaults<3>::print();
 
-  test(world, N, K, nrep, seed);
+  test(world, N, K, nrep, seed, initial_level);
 
   finalize();
   return 0;

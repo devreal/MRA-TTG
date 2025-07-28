@@ -170,7 +170,9 @@ namespace mra
 #endif
         } else {
           for (std::size_t i = 0; i < N; ++i) {
-            std::cout << "At root of compressed tree fn " << i << ": total normsq is " << p.sum(i) << std::endl;
+            if (std::abs(p.sum(i) - 1.0) > 1e-12) {
+              std::cout << "At root of compressed tree fn " << i << ": total normsq is " << p.sum(i) << std::endl;
+            }
           }
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::forward(
