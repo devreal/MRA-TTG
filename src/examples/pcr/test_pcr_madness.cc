@@ -158,7 +158,7 @@ void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
 
     // compute the norm of the difference of the functions
     auto diff = sub(world, a, b, true);
-    auto norms = norm2s(world, diff, true);
+    auto norms = norm2s(world, diff);
     // compute the norm of the errors for each component
     for (size_t i = 0; i < N; i++) {
       auto norm = diff[i].norm2();
@@ -185,7 +185,8 @@ int main(int argc, char **argv) {
   int K = opt.parse("-K", 10);
   int nrep = opt.parse("-n", 3);
   int seed = opt.parse("-s", 5551212);
-  int seed = opt.parse("-i", 2); // initial level for the Gaussian functions
+  int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
+
 
 
   startup(world, argc, argv);
