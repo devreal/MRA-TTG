@@ -67,10 +67,10 @@ namespace mra{
         result.set_all_leaf(false);
       } else {
         bool all_negligible = true;
+        auto trunc = mra::truncate_tol(key,thresh);
         for (std::size_t i = 0; i < N; ++i) {
           all_negligible &= mra::is_negligible<FnT,T,NDIM>(
-                                      fn_arr[i], db.host_ptr()->template bounding_box<T>(key),
-                                      mra::truncate_tol(key,thresh));
+                                      fn_arr[i], db.host_ptr()->template bounding_box<T>(key), trunc);
         }
         //std::cout << "project " << key << " all negligible " << all_negligible << std::endl;
         if (all_negligible) {
@@ -135,16 +135,7 @@ namespace mra{
            */
         }
 
-        if (max_level > 0){
-          if (!all_initial_level && result.key().level() < max_level) { // && pass in max_level
-            std::vector<mra::Key<NDIM>> bcast_keys;
-            for (auto child : children(key)) bcast_keys.push_back(child);
-#ifndef MRA_ENABLE_HOST
-            outputs.push_back(ttg::device::broadcastk<0>(std::move(bcast_keys)));
-#else
-            ttg::broadcastk<0>(bcast_keys);
-#endif
-          }
+        if (max_level > 0) {
           if (key.level() == max_level) {
             result.set_all_leaf(true);
           }
@@ -152,16 +143,15 @@ namespace mra{
             result.set_all_leaf(false);
           }
         }
-        else {
-          if (!result.is_all_leaf()) {
-            std::vector<mra::Key<NDIM>> bcast_keys;
-            for (auto child : children(key)) bcast_keys.push_back(child);
+
+        if (!result.is_all_leaf()) {
+          std::vector<mra::Key<NDIM>> bcast_keys;
+          for (auto child : children(key)) bcast_keys.push_back(child);
 #ifndef MRA_ENABLE_HOST
-            outputs.push_back(ttg::device::broadcastk<0>(std::move(bcast_keys)));
+          outputs.push_back(ttg::device::broadcastk<0>(std::move(bcast_keys)));
 #else
-            ttg::broadcastk<0>(bcast_keys);
+          ttg::broadcastk<0>(bcast_keys);
 #endif
-          }
         }
       }
 #ifndef MRA_ENABLE_HOST
