@@ -246,7 +246,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
       r[d] = 0.0;
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
+    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
   // put it into a buffer

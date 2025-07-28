@@ -27,11 +27,12 @@ namespace mra {
         /* default construction required for ttg::Buffer */
         Gaussian() = default;
 
-        Gaussian(const Domain<NDIM>& domain, T expnt, const Coordinate<T,NDIM>& origin)
+        Gaussian(const Domain<NDIM>& domain, T expnt, const Coordinate<T,NDIM>& origin, int initial_level = 0)
         : expnt(expnt)
         , origin(origin)
         , fac(std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*NDIM)))
         , maxr(std::sqrt(std::log(fac/1e-12)/expnt))
+        , initlev(initial_level)
         {
             // Pick initial level such that average gap between quadrature points
             // will find a significant value
@@ -43,7 +44,9 @@ namespace mra {
             const T a = expnt*L*L;
             double n = std::log(a/(4*K*K*(N*log10+std::log(fac))))/(2*log2);
             //std::cout << expnt << " " << a << " " << n << std::endl;
-            initlev = Level(n<2 ? 2.0 : std::ceil(n));
+            if (initial_level == 0) {
+                initlev = Level(n<2 ? 2.0 : std::ceil(n));
+            }
         }
 
         /* default copy ctor and operator */
