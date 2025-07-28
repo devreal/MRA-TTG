@@ -67,7 +67,7 @@ namespace mra {
         }
       } else {
 
-        /* compute one child */
+        /* compute all children */
         for (int bid = 0; bid < key.num_children(); bid++) {
           Key<NDIM> child = key.child_at(bid);
           child_values = 0.0; // TODO: needed?

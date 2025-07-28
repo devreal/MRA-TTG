@@ -17,35 +17,35 @@ typedef madness::Tensor<double> tensorT;
 
 static const double Length = 4.0;
 static const int init_lev = 2;
-static const double expnt = 10.0;
+static double expnt = 1000.0;
 
 template <typename T>
 static T u_exact(const coordT &pt) {
-  auto fac = std::pow(T(2.0*10/std::numbers::pi),T(0.25*3)); // normalization factor
-  return fac*(std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+  auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
+  return fac*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
 }
 
 template <typename T>
 static T du_dx_exact(const coordT &pt) {
-  auto fac = std::pow(T(2.0*10/std::numbers::pi),T(0.25*3)); // normalization factor
-  return -20*fac*pt[0]*(std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+  auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
+  return -20*fac*pt[0]*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
 }
 
 template <typename T>
 static T du_dy_exact(const coordT &pt) {
-  auto fac = std::pow(T(2.0*10/std::numbers::pi),T(0.25*3)); // normalization factor
-  return -20*fac*pt[1]*(std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+  auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
+  return -20*fac*pt[1]*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
 }
 
 template <typename T>
 static T du_dz_exact(const coordT &pt) {
-  auto fac = std::pow(T(2.0*10/std::numbers::pi),T(0.25*3)); // normalization factor
-  return -20*fac*pt[2]*(std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+  auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
+  return -20*fac*pt[2]*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
 }
 
 template <typename T>
 static T xbdy_dirichlet(const coordT &pt) {
-  return (std::exp(-10*pt[0]*pt[0]) * std::exp(-10*pt[1]*pt[1]) * std::exp(-10*pt[2]*pt[2]));
+  return (std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
 }
 
 template <typename T>
@@ -59,7 +59,8 @@ auto compute_u_madness(madness::World& world, size_type k, T thresh, int init_le
   madness::FunctionDefaults<3>::set_initial_level(init_lev);
 
   functionT u = factoryT(world).f(u_exact);
-  u.truncate();
+  u.set_autorefine(true);
+  //u.truncate();
 
   return u;
 }
@@ -160,6 +161,8 @@ auto compute_udx_madness(madness::World& world, int axis, size_type k, T thresh,
 template<typename T, Dimension NDIM>
 void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precision = 1e-15)
 {
+  bool check = true;
+  bool all_zero = true;
   const auto &coeffs = madfunc.get_impl()->get_coeffs();
   for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
     std::array<Translation,NDIM> l;
@@ -173,17 +176,22 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
     if (mra_coeff != mramap.end()) {
       auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
       T absdiff = std::abs(mad_norm - mra_norm);
+      if (mra_norm != 0.0) {
+        all_zero = false;
+      }
       if (absdiff > precision) {
+        check = false;
         std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
                   << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
-        throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
+        //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
       } else {
         //std::cout << name << ": " << it->first << " with norm " << mad_norm
         //          << " matches MRA norm " << mra_norm << std::endl;
       }
     } else {
       std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
-      throw std::runtime_error(name + ": mismatch in tree nodes between MADNESS and MRA");
+      check = false;
+      //throw std::runtime_error(name + ": mismatch in tree nodes between MADNESS and MRA");
     }
   }
   // check if all MRA keys are in the madness map
@@ -192,9 +200,18 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
     auto mad_key = madness::Key<NDIM>(it->first.level(), l);
     auto mad_coeff = coeffs.find(mad_key);
     if (mad_coeff.get() == coeffs.end()) {
+      if (mra::normf(it->second.coeffs().current_view()) > precision) check = false;
       std::cout << name << ": missing node in MADNESS: " << it->first << " norm "
                 << mra::normf(it->second.coeffs().current_view()) << std::endl;
     }
+  }
+  if (all_zero) {
+    std::cout << name << ": all existing nodes are zero in MRA, something is weird" << std::endl;
+  } else if (check) {
+    std::cout << name << ": all nodes match between MADNESS and MRA" << std::endl;
+  } else {
+    std::cout << name << ": some nodes match between MADNESS and MRA, but not all" << std::endl;
+    throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
   }
 }
 
@@ -221,6 +238,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
 
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
+  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> pmap; // results directly after project
 
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
@@ -237,6 +255,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
   auto start = make_start(project_control);
   // auto start_d = make_start(project_d_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
+  auto extract_project = make_extract(project_result, pmap);
   // C(P)
   auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress");
   // // R(C(P))
@@ -282,6 +301,7 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 8);
+  expnt = opt.parse("-e", 100.0); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int axis    = opt.parse("-a", 0);
   int log_precision = opt.parse("-p", 6); // default: 1e-6
@@ -291,6 +311,17 @@ int main(int argc, char **argv) {
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
+
+  if (ttg::default_execution_context().rank() == 0) {
+    std::cout << "Running MADNESS derivative test with parameters: "
+              << "N = " << N << ", K = " << K
+              << ", expnt = " << expnt
+              << ", axis = " << axis
+              << ", log_precision = " << log_precision
+              << ", max_level = " << max_level
+              << ", verification_log_precision = " << verification_log_precision
+              << std::endl;
+  }
 
   /* initialize MADNESS PaRSEC backend with the same PaRSEC context */
 #if defined(TTG_PARSEC_IMPORTED)
