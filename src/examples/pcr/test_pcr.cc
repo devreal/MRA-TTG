@@ -9,7 +9,7 @@ using namespace mra;
 
 
 template<typename T, mra::Dimension NDIM>
-void test_pcr(std::size_t N, std::size_t K, int max_level, int seed) {
+void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
@@ -36,8 +36,14 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed) {
     for (size_t d=0; d<NDIM; d++) {
       r[d] = (seed > 0) ? (T(-6.0) + T(12.0)*drand48()) : 0.0;
     }
-    std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
+    if (seed > 0) {
+      std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
+    }
+    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
+  }
+
+  if (seed == 0) {
+    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500 << std::endl;
   }
 
   // put it into a buffer
@@ -61,7 +67,10 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed) {
     // TODO: check for the norm within machine precision
     auto norms_arr = norms.buffer().current_device_ptr();
     for (size_type i = 0; i < N; ++i) {
-      std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
+      if (std::abs(norms_arr[i]) > 1e12) {
+        std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
+      }
+
     }
   }, ttg::edges(norm_result), ttg::edges(), "norm-check");
 
@@ -100,7 +109,8 @@ int main(int argc, char **argv) {
   bool norand = opt.exists("-norand");
   int max_level = opt.parse("-l", -1);
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int seed    = opt.parse("-s", 5551212); // seed for random number generator, 0 for deterministic
+  int initial_level = opt.parse("-i", 2);
+  int seed    = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
@@ -111,7 +121,7 @@ int main(int argc, char **argv) {
    * with the first key it receives. We need to find a way to do that automatically outside of make_project.
    */
   for (int i = 0; i < nrep; ++i) {
-    test_pcr<double, 3>(N, K, max_level, seed);
+    test_pcr<double, 3>(N, K, max_level, seed, initial_level);
   }
 
   allocator_fini();

@@ -87,6 +87,10 @@ namespace mra{
         //std::cout << "derivative dispatch " << key << " has no left, sending to left input " << key << std::endl;
         do_send.template operator()<LEFT>(key, mra::FunctionsReconstructedNode<T, NDIM>());
       }
+#ifndef MRA_ENABLE_HOST
+      co_await std::move(sends);
+#endif
+
     };
 
     auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn),
@@ -222,9 +226,9 @@ namespace mra{
            * We can finally compute the derivative.
            */
           if ((!left.empty() || key.is_left_boundary(axis)) && (!right.empty() || key.is_right_boundary(axis))){
-            mra::FunctionsReconstructedNode<T, NDIM> result(key, N, K);
+            mra::FunctionsReconstructedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
             result.set_all_leaf(true);
-            ttg::Buffer<T> tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*N);
+            auto tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*N, TempScope);
             const Tensor<T, 2+1>& operators = functiondata.get_operators();
             const Tensor<T, 2>& phibar= functiondata.get_phibar();
             const Tensor<T, 2>& phi= functiondata.get_phi();
@@ -233,9 +237,22 @@ namespace mra{
             FunctionNorms<T, NDIM> norms(name, left, center, right);
 
 #ifndef MRA_ENABLE_HOST
-            co_await ttg::device::select(db, left.coeffs().buffer(), center.coeffs().buffer(), norms.buffer(),
-                                        right.coeffs().buffer(), result.coeffs().buffer(), operators.buffer(),
-                                        phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp);
+
+            auto input = ttg::device::Input(db, result.coeffs().buffer(), operators.buffer(),
+                                            phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp);
+            if (!left.empty()) {
+              input.add(left.coeffs().buffer());
+            }
+            if (!center.empty()) {
+              input.add(center.coeffs().buffer());
+            }
+            if (!right.empty()) {
+              input.add(right.coeffs().buffer());
+            }
+            if (!norms.buffer().empty()) {
+              input.add(norms.buffer());
+            }
+            co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
             auto& D = *db.current_device_ptr();
@@ -256,10 +273,11 @@ namespace mra{
             do_send.template operator()<RESULT>(key, std::move(result));
           }
         }
+      }
 #ifndef MRA_ENABLE_HOST
         co_await std::move(sends);
 #endif
-      }
+
     };
 
     auto deriv_tt = ttg::make_tt<Space>(std::move(derivative_fn),

@@ -439,14 +439,14 @@ namespace mra {
     template<typename... Dims>
     requires(sizeof...(Dims) == NDIM && (std::is_integral_v<Dims>&&...))
     SCOPE const_value_type operator()(Dims... idxs) const {
-      // let's hope the compiler will hoist this out of loops
-      std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
-      for (size_type i = 0; i < indices.size(); ++i) {
-        assert(indices[i] < dim(i));
-      }
       if (m_ptr == nullptr) {
         return T(0);
       } else {
+        // let's hope the compiler will hoist this out of loops
+        std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
+        for (size_type i = 0; i < indices.size(); ++i) {
+          assert(indices[i] < dim(i));
+        }
         return m_ptr[offset(std::forward<Dims>(idxs)...)];
       }
     }
@@ -457,13 +457,16 @@ namespace mra {
     template<typename... Dims>
     requires(sizeof...(Dims) < NDIM && (std::is_integral_v<Dims>&&...))
     SCOPE TensorView<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) const {
-      std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
-      for (size_type i = 0; i < indices.size(); ++i) {
-        assert(indices[i] < dim(i));
+      size_type offset = 0;
+      if (m_ptr != nullptr) {
+        std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
+        for (size_type i = 0; i < indices.size(); ++i) {
+          assert(indices[i] < dim(i));
+        }
+        offset = offset_impl<0>(std::forward<Dims>(idxs)...);
       }
       constexpr const Dimension noffs = sizeof...(Dims);
       constexpr const Dimension ndim = NDIM-noffs;
-      size_type offset = offset_impl<0>(std::forward<Dims>(idxs)...);
       std::array<size_type, ndim> dims;
       for (Dimension i = 0; i < ndim; ++i) {
         dims[i] = m_dims[noffs+i];
