@@ -40,19 +40,19 @@ void test_coeffs(int argc, char** argv) {
   std::cout << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << std::endl;
   std::cout << "rnlij MRA: " << rnlij << std::endl;
   // Check rnlij
-  for (int i = 0; i < rnlij_mad.size(); ++i) {
-    for (int j = 0; j < rnlij_mad.size(); ++j) {
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
         assert(std::abs(rnlij_view(i, j) - rnlij_mad(i, j)) < 1e-10);
     }
   }
   // Check ConvolutionData1D
-  for (int i = 0; i < cd.R.size(); ++i) {
-    for (int j = 0; j < cd.R.size(); ++j) {
+  for (int i = 0; i < 8; ++i) {
+    for (int j = 0; j < 8; ++j) {
         assert(std::abs(cdR_view(i, j) - cd_mad->R(i, j)) < 1e-10);
     }
   }
-  for (int i = 0; i < cd.S.size(); ++i) {
-    for (int j = 0; j < cd.S.size(); ++j) {
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
         assert(std::abs(cdS_view(i, j) - cd_mad->T(i, j)) < 1e-10);
     }
   }

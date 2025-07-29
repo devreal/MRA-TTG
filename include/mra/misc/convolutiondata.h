@@ -215,6 +215,18 @@ namespace mra {
         slice = {Slice(0, K), Slice(0, K)};
         S_view(slice) = R_view(slice);
 
+        // transpose
+        for (size_type i = 0; i < 2*K; ++i) {
+          for (size_type j = i+1; j < 2*K; ++j) {
+            std::swap(R_view(i, j), R_view(j, i));
+          }
+        }
+
+        for (size_type i = 0; i < K; ++i) {
+          for (size_type j = i+1; j < K; ++j) {
+            std::swap(S_view(i, j), S_view(j, i));
+          }
+        }
         auto obj = ConvolutionData<T>();
         obj.R = std::move(R);
         obj.S = std::move(S);
