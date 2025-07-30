@@ -60,7 +60,7 @@ namespace mra {
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
       std::map<Key<NDIM>, ConvolutionData<T>> nscache; // map for storing ns matrices
-      mutable std::mutex cachemutex;                           // mutex for thread safety
+      mutable std::mutex cachemutex;                   // mutex for thread safety
 
 
       void autoc(){
@@ -180,7 +180,9 @@ namespace mra {
 
       const ConvolutionData<T>& make_nonstandard (const Level n, const Translation lx) {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
         auto it = nscache.find(key);
+        cachemutex.unlock();
         if (it != nscache.end()) {
           const auto& r = it->second;
           return r;
@@ -249,12 +251,11 @@ namespace mra {
   private:
     size_type K;
     size_type seprank;
-    Convolution<T, NDIM> conv;                       // convolution object
-    std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;     // map for storing operator data
-    mutable std::mutex cachemutex;                                 // mutex for thread safety
+    Convolution<T, NDIM>& conv;                             // convolution object
+    std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;      // map for storing operator data
+    mutable std::mutex cachemutex;                          // mutex for thread safety
 
     T norm_ns(Level n, std::array<const ConvolutionData<T>*, NDIM>& ns) const {
-      // ConvolutionData<T>* const ns[]
       T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
@@ -290,7 +291,9 @@ namespace mra {
     ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
 
     const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) {
+      cachemutex.lock();
       auto it = opdata.find(key);
+      cachemutex.unlock();
       if (it != opdata.end()) {
         return it->second;
       }
@@ -298,6 +301,7 @@ namespace mra {
       for (int i = 0; i < NDIM; ++i) {
         auto& cd = conv.make_nonstandard(key.level(), key.translation()[i]);
         data.ops[i] = &cd;
+
       }
       data.norm = norm_ns(key.level(), data.ops);
       cachemutex.lock();
