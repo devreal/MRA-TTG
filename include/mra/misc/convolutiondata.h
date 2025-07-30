@@ -115,7 +115,6 @@ namespace mra {
         }
         cachemutex.lock();
         if (rnlpcache.find(key) == rnlpcache.end()) {
-          assert(rnlpcache.find(key) == rnlpcache.end());
           rnlpcache.emplace(key, std::move(rnlp));
         }
         it = rnlpcache.find(key);
@@ -168,7 +167,6 @@ namespace mra {
 
         cachemutex.lock();
         if (rnlijcache.find(key) == rnlijcache.end()) {
-          assert(rnlijcache.find(key) == rnlijcache.end());
           rnlijcache.emplace(key, std::move(rnlij));
         }
 
@@ -235,7 +233,6 @@ namespace mra {
 
         cachemutex.lock();
         if (nscache.find(key) == nscache.end()) {
-          assert(nscache.find(key) == nscache.end());
           nscache.emplace(key, std::move(obj));
         }
         it = nscache.find(key);
@@ -306,7 +303,6 @@ namespace mra {
       data.norm = norm_ns(key.level(), data.ops);
       cachemutex.lock();
       if (opdata.find(key) == opdata.end()) {
-        assert(opdata.find(key) == opdata.end());
         opdata.emplace(key, std::move(data));
       }
       it = opdata.find(key);
