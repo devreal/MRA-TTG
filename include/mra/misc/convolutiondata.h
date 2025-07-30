@@ -282,8 +282,8 @@ namespace mra {
 
   public:
 
-    ConvolutionOperator(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
-     : K(K), conv(K, npt, coeff, expnt, functiondata) {}
+    ConvolutionOperator(size_type K, size_type npt, Convolution<T, NDIM>& conv)
+    : K(K), seprank(npt)/*TODO*/, conv(conv) {}
 
     ConvolutionOperator(ConvolutionOperator&&) = default;
     ConvolutionOperator(const ConvolutionOperator&) = delete;
