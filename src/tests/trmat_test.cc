@@ -25,7 +25,8 @@ void test_coeffs(int argc, char** argv) {
 
   // mra::ConvolutionOperator<double, 3> op(K, npt, coeff, expnt, functiondata);
   mra::ConvolutionOperator<double, 3> op(K, npt, conv);
-  const mra::OperatorData<double, 3>& op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
+  // const mra::OperatorData<double, 3>& op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
+  std::shared_ptr<const mra::OperatorData<double, 3>> op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
@@ -34,11 +35,11 @@ void test_coeffs(int argc, char** argv) {
   madness::Tensor<double> rnlij_mad = conv1d.rnlij(2, 1);
   const madness::ConvolutionData1D<double>* cd_mad = conv1d.nonstandard(2, 1);
 
-  std::cout << "opdata norm: " << op_data.norm << std::endl;
+  std::cout << "opdata norm: " << op_data->norm << std::endl;
 
-  for (int i = 0; i < op_data.ops.size(); ++i) {
-    std::cout << "op[" << i << "].R " << op_data.ops[i]->R.current_view() << std::endl;
-    std::cout << "op[" << i << "].S: " << op_data.ops[i]->S.current_view() << std::endl;
+  for (int i = 0; i < op_data->ops.size(); ++i) {
+    std::cout << "op[" << i << "].R " << op_data->ops[i]->R.current_view() << std::endl;
+    std::cout << "op[" << i << "].S: " << op_data->ops[i]->S.current_view() << std::endl;
   }
 
   std::cout << "rnlij_mad: " << rnlij_mad << std::endl;
