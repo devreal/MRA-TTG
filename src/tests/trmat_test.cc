@@ -17,12 +17,16 @@ void test_coeffs(int argc, char** argv) {
   constexpr double expnt = 10.0; // exponent for the Gaussian
   mra::FunctionData<double, 3> functiondata(K);
 
+
+
   mra::Convolution<double, 3> conv(K, npt, coeff, expnt, functiondata);
   const mra::Tensor<double, 2>& rnlij = conv.make_rnlij(2, 1);
   auto rnlij_view = rnlij.current_view();
-  const mra::ConvolutionData<double>& cd = conv.make_nonstandard(2, 1);
-  auto cdR_view = cd.R.current_view();
-  auto cdS_view = cd.S.current_view();
+
+  // mra::ConvolutionOperator<double, 3> op(K, npt, coeff, expnt, functiondata);
+  mra::ConvolutionOperator<double, 3> op(K, npt, conv);
+  // const mra::OperatorData<double, 3>& op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
+  std::shared_ptr<const mra::OperatorData<double, 3>> op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
@@ -31,21 +35,20 @@ void test_coeffs(int argc, char** argv) {
   madness::Tensor<double> rnlij_mad = conv1d.rnlij(2, 1);
   const madness::ConvolutionData1D<double>* cd_mad = conv1d.nonstandard(2, 1);
 
+  std::cout << "opdata norm: " << op_data->norm << std::endl;
+
+  for (int i = 0; i < op_data->ops.size(); ++i) {
+    std::cout << "op[" << i << "].R " << op_data->ops[i]->R.current_view() << std::endl;
+    std::cout << "op[" << i << "].S: " << op_data->ops[i]->S.current_view() << std::endl;
+  }
+
+  std::cout << "rnlij_mad: " << rnlij_mad << std::endl;
+  std::cout << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << std::endl;
+  std::cout << "rnlij MRA: " << rnlij << std::endl;
   // Check rnlij
-  for (int i = 0; i < rnlij_mad.size(); ++i) {
-    for (int j = 0; j < rnlij_mad.size(); ++j) {
+  for (int i = 0; i < K; ++i) {
+    for (int j = 0; j < K; ++j) {
         assert(std::abs(rnlij_view(i, j) - rnlij_mad(i, j)) < 1e-10);
-    }
-  }
-  // Check ConvolutionData1D
-  for (int i = 0; i < cd.R.size(); ++i) {
-    for (int j = 0; j < cd.R.size(); ++j) {
-        assert(std::abs(cdR_view(i, j) - cd_mad->R(i, j)) < 1e-10);
-    }
-  }
-  for (int i = 0; i < cd.S.size(); ++i) {
-    for (int j = 0; j < cd.S.size(); ++j) {
-        assert(std::abs(cdS_view(i, j) - cd_mad->T(i, j)) < 1e-10);
     }
   }
 

@@ -20,10 +20,26 @@ namespace mra {
     Tensor<T, 2> R, S;
   };
 
+  /// Nonstandard form of the operator
+  template <typename T, Dimension NDIM>
+  struct OperatorData {
+    std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM> ops;
+    T norm;
+    T fac;
+
+    OperatorData() : ops{}, norm(0.0), fac(1.0) {}
+
+    OperatorData(const OperatorData&) = default;
+
+    ~OperatorData() = default;
+
+  };
+
   template <typename T, Dimension NDIM>
   class Convolution {
 
     private:
+      using ns_type = const ConvolutionData<T>;
       size_type K;
       int npt;                                         // number of quadrature points
       T expnt;                                         // exponent for the Gaussian
@@ -34,9 +50,8 @@ namespace mra {
       FunctionData<T, NDIM>& functiondata;             // function data
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
-      std::map<Key<NDIM>, ConvolutionData<T>> nscache; // map for storing ns matrices
-      std::mutex cachemutex;                           // mutex for thread safety
-
+      std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
+      mutable std::mutex cachemutex;                   // mutex for thread safety
 
       void autoc(){
         Tensor<T, 3> autocorrcoef(K, K, 4*K);
@@ -90,7 +105,6 @@ namespace mra {
         }
         cachemutex.lock();
         if (rnlpcache.find(key) == rnlpcache.end()) {
-          assert(rnlpcache.find(key) == rnlpcache.end());
           rnlpcache.emplace(key, std::move(rnlp));
         }
         it = rnlpcache.find(key);
@@ -138,11 +152,11 @@ namespace mra {
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
+        rnlij_view = 0.0;
         detail::inner(c.current_view(), R_view, rnlij_view);
 
         cachemutex.lock();
         if (rnlijcache.find(key) == rnlijcache.end()) {
-          assert(rnlijcache.find(key) == rnlijcache.end());
           rnlijcache.emplace(key, std::move(rnlij));
         }
 
@@ -152,11 +166,14 @@ namespace mra {
         return r;
       }
 
-      const ConvolutionData<T>& make_nonstandard (const Level n, const Translation lx) {
+      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
         auto it = nscache.find(key);
+        cachemutex.unlock();
         if (it != nscache.end()) {
-          return std::move(it->second);
+          const auto& r = it->second;
+          return r;
         }
 
         Tensor<T, 2> tmp(2*K, 2*K);
@@ -188,14 +205,26 @@ namespace mra {
         slice = {Slice(0, K), Slice(0, K)};
         S_view(slice) = R_view(slice);
 
+        // transpose
+        for (size_type i = 0; i < 2*K; ++i) {
+          for (size_type j = i+1; j < 2*K; ++j) {
+            std::swap(R_view(i, j), R_view(j, i));
+          }
+        }
+
+        for (size_type i = 0; i < K; ++i) {
+          for (size_type j = i+1; j < K; ++j) {
+            std::swap(S_view(i, j), S_view(j, i));
+          }
+        }
         auto obj = ConvolutionData<T>();
         obj.R = std::move(R);
         obj.S = std::move(S);
 
         cachemutex.lock();
         if (nscache.find(key) == nscache.end()) {
-          assert(nscache.find(key) == nscache.end());
-          nscache.emplace(key, std::move(obj));
+          auto obj_ptr = std::make_shared<const ConvolutionData<T>>(std::move(obj));
+          nscache.emplace(key, std::move(obj_ptr));
         }
         it = nscache.find(key);
         cachemutex.unlock();
@@ -203,6 +232,76 @@ namespace mra {
         return r;
       }
     };
+
+  template <typename T, Dimension NDIM>
+  class ConvolutionOperator {
+
+  private:
+    using op_type = const OperatorData<T, NDIM>;
+    size_type K;
+    // size_type seprank;
+    Convolution<T, NDIM>& conv;                             // convolution object
+    std::map<Key<NDIM>, std::shared_ptr<op_type>> opdata;   // map for storing operator data
+    mutable std::mutex cachemutex;                          // mutex for thread safety
+
+    T norm_ns(Level n, std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM>& ns) const {
+      T norm = 1.0, sum = 0.0;
+
+      for (size_type d = 0; d < NDIM; ++d) {
+        Tensor<T, 2> ns_r(2*K, 2*K);
+        const auto& ref_view = ns[d]->R.current_view();
+        const auto& ns_sview = ns[d]->S.current_view();
+        auto ns_rview = ns_r.current_view();
+        for (size_type i = 0; i < 2*K; ++i) {
+          for (size_type j = 0; j < 2*K; ++j) {
+            if (i<K && j<K) ns_rview(i, j) = 0.0;
+            else ns_rview(i, j) = ref_view(i, j);
+          }
+        }
+        T rnorm = normf(ns_rview);
+        T snorm = normf(ns_sview);
+        T aa = std::min(rnorm, snorm);
+        T bb = std::max(rnorm, snorm);
+        norm *= aa;
+        if (bb > 0.0) sum += aa/bb;
+      }
+      if (n) norm *= sum;
+      return norm;
+    }
+
+  public:
+
+    ConvolutionOperator(size_type K, size_type npt, Convolution<T, NDIM>& conv)
+    : K(K), /* seprank(npt): TODO ,*/ conv(conv) {}
+
+    ConvolutionOperator(ConvolutionOperator&&) = default;
+    ConvolutionOperator(const ConvolutionOperator&) = delete;
+    ConvolutionOperator& operator=(ConvolutionOperator&&) = default;
+    ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
+
+    std::shared_ptr<const OperatorData<T, NDIM>> get_op(const Key<NDIM>& key) {
+      cachemutex.lock();
+      auto it = opdata.find(key);
+      cachemutex.unlock();
+      if (it != opdata.end()) {
+        return it->second;
+      }
+
+      OperatorData<T, NDIM> data;
+      for (int i = 0; i < NDIM; ++i) data.ops[i] = conv.make_nonstandard(key.level(), key.translation()[i]);
+      data.norm = norm_ns(key.level(), data.ops);
+
+      cachemutex.lock();
+      if (opdata.find(key) == opdata.end()) {
+        auto data_ptr = std::make_shared<const OperatorData<T, NDIM>>(std::move(data));
+        opdata.emplace(key, std::move(data_ptr));
+      }
+      it = opdata.find(key);
+      cachemutex.unlock();
+      auto& r = it->second;
+      return r;
+    }
+  };
 
 } // namespace mra
 
