@@ -241,10 +241,11 @@ namespace mra {
   class ConvolutionOperator {
 
   private:
+    using op_type = const OperatorData<T, NDIM>;
     size_type K;
-    size_type seprank;
+    // size_type seprank;
     Convolution<T, NDIM>& conv;                             // convolution object
-    std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;      // map for storing operator data
+    std::map<Key<NDIM>, std::shared_ptr<op_type>> opdata;   // map for storing operator data
     mutable std::mutex cachemutex;                          // mutex for thread safety
 
     T norm_ns(Level n, std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM>& ns) const {
@@ -275,14 +276,14 @@ namespace mra {
   public:
 
     ConvolutionOperator(size_type K, size_type npt, Convolution<T, NDIM>& conv)
-    : K(K), seprank(npt)/*TODO*/, conv(conv) {}
+    : K(K), /* seprank(npt): TODO ,*/ conv(conv) {}
 
     ConvolutionOperator(ConvolutionOperator&&) = default;
     ConvolutionOperator(const ConvolutionOperator&) = delete;
     ConvolutionOperator& operator=(ConvolutionOperator&&) = default;
     ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
 
-    const OperatorData<T, NDIM>& get_op(const Key<NDIM>& key) {
+    std::shared_ptr<const OperatorData<T, NDIM>> get_op(const Key<NDIM>& key) {
       cachemutex.lock();
       auto it = opdata.find(key);
       cachemutex.unlock();
@@ -293,9 +294,11 @@ namespace mra {
       OperatorData<T, NDIM> data;
       for (int i = 0; i < NDIM; ++i) data.ops[i] = conv.make_nonstandard(key.level(), key.translation()[i]);
       data.norm = norm_ns(key.level(), data.ops);
+
       cachemutex.lock();
       if (opdata.find(key) == opdata.end()) {
-        opdata.emplace(key, std::move(data));
+        auto data_ptr = std::make_shared<const OperatorData<T, NDIM>>(std::move(data));
+        opdata.emplace(key, std::move(data_ptr));
       }
       it = opdata.find(key);
       cachemutex.unlock();
