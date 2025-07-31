@@ -20,6 +20,7 @@ namespace mra {
     Tensor<T, 2> R, S;
   };
 
+  /// Nonstandard form of the operator
   template <typename T, Dimension NDIM>
   struct OperatorData {
     std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM> ops;
