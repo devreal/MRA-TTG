@@ -257,7 +257,7 @@ namespace mra {
         auto ns_rview = ns_r.current_view();
         for (size_type i = 0; i < 2*K; ++i) {
           for (size_type j = 0; j < 2*K; ++j) {
-            if(i<K && j<K) ns_rview(i, j) = 0.0;
+            if (i<K && j<K) ns_rview(i, j) = 0.0;
             else ns_rview(i, j) = ref_view(i, j);
           }
         }
