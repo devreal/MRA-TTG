@@ -36,7 +36,6 @@ void test_coeffs(int argc, char** argv) {
 
   std::cout << "opdata norm: " << op_data.norm << std::endl;
 
-  std::cout << "no. of operators = " << op_data.ops << std::endl;
   for (int i = 0; i < op_data.ops.size(); ++i) {
     std::cout << "op[" << i << "].R " << op_data.ops[i]->R.current_view() << std::endl;
     std::cout << "op[" << i << "].S: " << op_data.ops[i]->S.current_view() << std::endl;
