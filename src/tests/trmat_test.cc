@@ -22,9 +22,6 @@ void test_coeffs(int argc, char** argv) {
   mra::Convolution<double, 3> conv(K, npt, coeff, expnt, functiondata);
   const mra::Tensor<double, 2>& rnlij = conv.make_rnlij(2, 1);
   auto rnlij_view = rnlij.current_view();
-  const mra::ConvolutionData<double>& cd = conv.make_nonstandard(2, 1);
-  auto cdR_view = cd.R.current_view();
-  auto cdS_view = cd.S.current_view();
 
   // mra::ConvolutionOperator<double, 3> op(K, npt, coeff, expnt, functiondata);
   mra::ConvolutionOperator<double, 3> op(K, npt, conv);
@@ -45,26 +42,15 @@ void test_coeffs(int argc, char** argv) {
     std::cout << "op[" << i << "].S: " << op_data.ops[i]->S.current_view() << std::endl;
   }
 
-  // std::cout << "rnlij_mad: " << rnlij_mad << std::endl;
-  // std::cout << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << std::endl;
-  // std::cout << "rnlij MRA: " << rnlij << std::endl;
-  // // Check rnlij
-  // for (int i = 0; i < K; ++i) {
-  //   for (int j = 0; j < K; ++j) {
-  //       assert(std::abs(rnlij_view(i, j) - rnlij_mad(i, j)) < 1e-10);
-  //   }
-  // }
-  // // Check ConvolutionData1D
-  // for (int i = 0; i < 2*K; ++i) {
-  //   for (int j = 0; j < 2*K; ++j) {
-  //       assert(std::abs(cdR_view(i, j) - cd_mad->R(i, j)) < 1e-10);
-  //   }
-  // }
-  // for (int i = 0; i < K; ++i) {
-  //   for (int j = 0; j < K; ++j) {
-  //       assert(std::abs(cdS_view(i, j) - cd_mad->T(i, j)) < 1e-10);
-  //   }
-  // }
+  std::cout << "rnlij_mad: " << rnlij_mad << std::endl;
+  std::cout << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << std::endl;
+  std::cout << "rnlij MRA: " << rnlij << std::endl;
+  // Check rnlij
+  for (int i = 0; i < K; ++i) {
+    for (int j = 0; j < K; ++j) {
+        assert(std::abs(rnlij_view(i, j) - rnlij_mad(i, j)) < 1e-10);
+    }
+  }
 
   world.gop.fence();
 }

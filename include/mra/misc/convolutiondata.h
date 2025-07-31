@@ -22,7 +22,7 @@ namespace mra {
 
   template <typename T, Dimension NDIM>
   struct OperatorData {
-    std::array<const ConvolutionData<T>*, NDIM> ops;
+    std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM> ops;
     T norm;
     T fac;
 
@@ -31,6 +31,7 @@ namespace mra {
         ops[i] = nullptr;
       }
     }
+
     OperatorData(const OperatorData& op) {
       norm = op.norm;
       fac = op.fac;
@@ -42,13 +43,16 @@ namespace mra {
         }
       }
     }
+
     ~OperatorData() = default;
+
   };
 
   template <typename T, Dimension NDIM>
   class Convolution {
 
     private:
+      using ns_type = const ConvolutionData<T>;
       size_type K;
       int npt;                                         // number of quadrature points
       T expnt;                                         // exponent for the Gaussian
@@ -59,9 +63,8 @@ namespace mra {
       FunctionData<T, NDIM>& functiondata;             // function data
       std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
       std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
-      std::map<Key<NDIM>, ConvolutionData<T>> nscache; // map for storing ns matrices
+      std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
       mutable std::mutex cachemutex;                   // mutex for thread safety
-
 
       void autoc(){
         Tensor<T, 3> autocorrcoef(K, K, 4*K);
@@ -176,7 +179,7 @@ namespace mra {
         return r;
       }
 
-      const ConvolutionData<T>& make_nonstandard (const Level n, const Translation lx) {
+      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) { // return a shared pointer
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = nscache.find(key);
@@ -233,7 +236,8 @@ namespace mra {
 
         cachemutex.lock();
         if (nscache.find(key) == nscache.end()) {
-          nscache.emplace(key, std::move(obj));
+          auto obj_ptr = std::make_shared<const ConvolutionData<T>>(std::move(obj));
+          nscache.emplace(key, std::move(obj_ptr));
         }
         it = nscache.find(key);
         cachemutex.unlock();
@@ -252,7 +256,7 @@ namespace mra {
     std::map<Key<NDIM>, OperatorData<T, NDIM>> opdata;      // map for storing operator data
     mutable std::mutex cachemutex;                          // mutex for thread safety
 
-    T norm_ns(Level n, std::array<const ConvolutionData<T>*, NDIM>& ns) const {
+    T norm_ns(Level n, std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM>& ns) const {
       T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
@@ -294,12 +298,9 @@ namespace mra {
       if (it != opdata.end()) {
         return it->second;
       }
-      OperatorData<T, NDIM> data;
-      for (int i = 0; i < NDIM; ++i) {
-        auto& cd = conv.make_nonstandard(key.level(), key.translation()[i]);
-        data.ops[i] = &cd;
 
-      }
+      OperatorData<T, NDIM> data;
+      for (int i = 0; i < NDIM; ++i) data.ops[i] = conv.make_nonstandard(key.level(), key.translation()[i]);
       data.norm = norm_ns(key.level(), data.ops);
       cachemutex.lock();
       if (opdata.find(key) == opdata.end()) {
