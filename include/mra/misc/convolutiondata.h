@@ -27,11 +27,7 @@ namespace mra {
     T norm;
     T fac;
 
-    OperatorData() : ops{}, norm(0.0), fac(1.0) {
-      for (int i = 0; i < NDIM; ++i) {
-        ops[i] = nullptr;
-      }
-    }
+    OperatorData() : ops{}, norm(0.0), fac(1.0) {}
 
     OperatorData(const OperatorData&) = default;
 
