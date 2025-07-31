@@ -33,17 +33,7 @@ namespace mra {
       }
     }
 
-    OperatorData(const OperatorData& op) {
-      norm = op.norm;
-      fac = op.fac;
-      for (int i = 0; i < NDIM; ++i) {
-        if (op.ops[i]) {
-          ops[i] = op.ops[i];
-        } else {
-          ops[i] = nullptr;
-        }
-      }
-    }
+    OperatorData(const OperatorData&) = default;
 
     ~OperatorData() = default;
 
