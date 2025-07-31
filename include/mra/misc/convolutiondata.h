@@ -166,7 +166,7 @@ namespace mra {
         return r;
       }
 
-      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) { // return a shared pointer
+      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = nscache.find(key);
