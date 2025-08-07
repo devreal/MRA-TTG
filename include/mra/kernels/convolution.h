@@ -31,7 +31,7 @@ namespace mra{
     // This function is a placeholder for the actual convolution transform logic.
     // It should be implemented to perform the convolution operation on tensors.
     // Analogue to madness apply_transformation()
-    size_type rank = 2*K; // doing computation assuming full rank
+    size_type rank = trans.dim(0); // doing computation assuming full rank
     size_type size = 1;
     for (size_type i = 0; i < NDIM; ++i) size *= dimk;
     size_type dimi = size/dimk;
@@ -56,8 +56,19 @@ namespace mra{
     template <typename T, Dimension NDIM>
     DEVSCOPE void convolution_kernel_impl()
     {
-      // Implement the convolution kernel logic here
-      // This is a placeholder for the actual implementation
+      T normthresh = 1e-20; // Can potentially be a parameter
+      size_type TWOK = 2*K;
+      T normr = 1.0;
+      for (size_type i = 0; i < NDIM; ++i) normr *= op[i]->normR;
+      if (normr > normthresh) {
+        // assemble trans and call conv_transform
+      }
+
+      T norms = 1.0;
+      for (size_type i = 0; i < NDIM; ++i) norms *= op[i]->normS;
+      if (norms > normthresh) {
+        // assemble trans and call conv_transform
+      }
     }
 
     template <typename T, Dimension NDIM>
@@ -70,14 +81,14 @@ namespace mra{
   } // namespace detail
 
   template <typename T, Dimension NDIM>
-  void submit_compress_kernel()
+  void submit_convolution_kernel()
   {
 
   }
 
   /* explicit instantiation */
   extern template
-  void submit_compress_kernel<double, 3>();
+  void submit_convolution_kernel<double, 3>();
 
 }
 
