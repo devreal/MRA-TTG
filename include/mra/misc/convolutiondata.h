@@ -18,6 +18,7 @@ namespace mra {
   template <typename T>
   struct ConvolutionData {
     Tensor<T, 2> R, S;
+    T normR, normS;
   };
 
   /// Nonstandard form of the operator
@@ -220,6 +221,8 @@ namespace mra {
         auto obj = ConvolutionData<T>();
         obj.R = std::move(R);
         obj.S = std::move(S);
+        obj.normR = normf(obj.R.current_view());
+        obj.normS = normf(obj.S.current_view());
 
         cachemutex.lock();
         if (nscache.find(key) == nscache.end()) {
