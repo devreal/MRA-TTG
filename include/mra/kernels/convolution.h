@@ -57,7 +57,8 @@ namespace mra{
       size_type K,
       const OperatorData<T, NDIM>& op,
       const TensorView<T, 2>& f,
-      TensorView<T, 2>& result,
+      TensorView<T, 2>& resultf, // for 2*K
+      TensorView<T, 2>& resultc, // for K
       TensorView<T, 2>& work1,
       TensorView<T, 2>& work2
     )
@@ -73,7 +74,7 @@ namespace mra{
           trans[d].current_view() = op->ops[d]->R;
         }
       }
-      conv_transform<T, NDIM>(2*K, ops.fac, trans, f, result, work1, work2);
+      conv_transform<T, NDIM>(2*K, ops.fac, trans, f, resultf, work1, work2);
 
       T norms = 1.0;
       for (size_type i = 0; i < NDIM; ++i) norms *= op->ops[i]->normS;
@@ -83,7 +84,7 @@ namespace mra{
           trans[d].current_view() = op->ops[d]->S;
         }
       }
-      conv_transform<T, NDIM>(K, -ops.fac, trans, f, result, work1, work2);
+      conv_transform<T, NDIM>(K, -ops.fac, trans, f, resultc, work1, work2);
     }
 
     template <typename T, Dimension NDIM>
