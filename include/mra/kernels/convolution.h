@@ -1,14 +1,15 @@
 #ifndef MRA_KERNELS_CONVOLUTION_H
 #define MRA_KERNELS_CONVOLUTION_H
 
+#include "mra/ops/mxm.h"
 #include "mra/kernels.h"
-#include "mra/kernels/transform.h"
 #include "mra/kernels/gaxpy.h"
+#include "mra/kernels/transform.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
-#include "mra/ops/mxm.h"
+#include "mra/misc/convolutiondata.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/child_slice.h"
 
@@ -21,8 +22,8 @@ namespace mra{
 
   template <typename T, Dimension NDIM>
   SCOPE void conv_transform(
-    size_type K,
-    size_type dimk,
+    const size_type dimk,
+    const T mufac,
     std::array<TensorView<T, 2>, NDIM>& trans,
     const TensorView<T, 2>& f,
     TensorView<T, 2>& result,
@@ -46,27 +47,43 @@ namespace mra{
       std::swap(work1.data(), work2.data());
     }
 
-    axpy_kernel_impl<T, NDIM>(work1, result, T(1.0));
+    axpy_kernel_impl<T, NDIM>(work1, result, mufac);
   }
 
   namespace detail {
 
     template <typename T, Dimension NDIM>
-    DEVSCOPE void convolution_kernel_impl()
+    DEVSCOPE void convolution_kernel_impl(
+      size_type K,
+      const OperatorData<T, NDIM>& op,
+      const TensorView<T, 2>& f,
+      TensorView<T, 2>& result,
+      TensorView<T, 2>& work1,
+      TensorView<T, 2>& work2
+    )
     {
       T normthresh = 1e-20; // Can potentially be a parameter
-      size_type TWOK = 2*K;
+      SHARED std::array<TensorView<T, 2>, NDIM> trans;
+
       T normr = 1.0;
-      for (size_type i = 0; i < NDIM; ++i) normr *= op[i]->normR;
+      for (size_type i = 0; i < NDIM; ++i) normr *= op->ops[i]->normR;
       if (normr > normthresh) {
         // assemble trans and call conv_transform
+        for (size_type d = 0; d < NDIM; ++d){
+          trans[d].current_view() = op->ops[d]->R;
+        }
       }
+      conv_transform<T, NDIM>(2*K, ops.fac, trans, f, result, work1, work2);
 
       T norms = 1.0;
-      for (size_type i = 0; i < NDIM; ++i) norms *= op[i]->normS;
+      for (size_type i = 0; i < NDIM; ++i) norms *= op->ops[i]->normS;
       if (norms > normthresh) {
         // assemble trans and call conv_transform
+        for (size_type d = 0; d < NDIM; ++d){
+          trans[d].current_view() = op->ops[d]->S;
+        }
       }
+      conv_transform<T, NDIM>(K, ops.fac, trans, f, result, work1, work2);
     }
 
     template <typename T, Dimension NDIM>
