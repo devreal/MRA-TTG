@@ -3,6 +3,7 @@
 
 #include "mra/kernels.h"
 #include "mra/kernels/transform.h"
+#include "mra/kernels/gaxpy.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
 #include "mra/misc/types.h"
@@ -22,33 +23,30 @@ namespace mra{
   SCOPE void conv_transform(
     size_type K,
     size_type dimk,
-    const TensorView<T, NDIM>& trans,
+    std::array<TensorView<T, 2>, NDIM>& trans,
     const TensorView<T, 2>& f,
     TensorView<T, 2>& result,
-    T* work1,
-    T* work2)
+    TensorView<T, 2>& work1,
+    TensorView<T, 2>& work2)
   {
-    // This function is a placeholder for the actual convolution transform logic.
-    // It should be implemented to perform the convolution operation on tensors.
-    // Analogue to madness apply_transformation()
-    size_type rank = trans.dim(0); // doing computation assuming full rank
+    size_type rank = trans[0].dim(0); // doing computation assuming full rank
     size_type size = 1;
     for (size_type i = 0; i < NDIM; ++i) size *= dimk;
     size_type dimi = size/dimk;
 
-    mTxmq(dimi, rank /* need to define it here */, dimk, work1, f.data(), trans.data(), dimk);
+    mTxmq(dimi, rank, dimk, work1.data(), f.data(), trans[0].data(), dimk);
 
     size = rank * size / dimk;
     dimi = size / dimk;
 
-    for (size_type d = 0; d < NDIM; ++d) {
-      mTxmq(dimi, rank, dimk, work2, work1, trans.data(), dimk);
+    for (size_type d = 1; d < NDIM; ++d) {
+      mTxmq(dimi, rank, dimk, work2.data(), work1.data(), trans[d].data(), dimk);
       size = rank * size / dimk;
       dimi = size / dimk;
-      std::swap(work1, work2);
+      std::swap(work1.data(), work2.data());
     }
 
-    // aligned_axpy();
+    axpy_kernel_impl<T, NDIM>(work1, result, T(1.0));
   }
 
   namespace detail {
