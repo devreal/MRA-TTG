@@ -83,7 +83,7 @@ namespace mra{
           trans[d].current_view() = op->ops[d]->S;
         }
       }
-      conv_transform<T, NDIM>(K, ops.fac, trans, f, result, work1, work2);
+      conv_transform<T, NDIM>(K, -ops.fac, trans, f, result, work1, work2);
     }
 
     template <typename T, Dimension NDIM>
@@ -92,6 +92,7 @@ namespace mra{
     {
       // Call the implementation function
       convolution_kernel_impl<T, NDIM>();
+      // gaxpy()
     }
   } // namespace detail
 
