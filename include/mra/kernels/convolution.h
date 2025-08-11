@@ -17,7 +17,9 @@ namespace mra{
 
   template <Dimension NDIM>
   SCOPE size_type convolution_tmp_size(size_type K) {
-    return 0;
+    size_type K2NDIM = std::pow(K, NDIM);
+    size_type TWOK2NDIM = std::pow(2*K, NDIM);
+    return TWOK2NDIM + 5*K2NDIM; // resultf, resultc, tmpresult, f0, work1, work2
   }
 
   template <typename T, Dimension NDIM>
@@ -55,19 +57,33 @@ namespace mra{
     template <typename T, Dimension NDIM>
     DEVSCOPE void convolution_kernel_impl(
       size_type K,
-      const OperatorData<T, NDIM>& op,
-      const TensorView<T, 2>& f,
-      TensorView<T, 2>& resultf, // for 2*K
-      TensorView<T, 2>& resultc, // for K
-      TensorView<T, 2>& work1,
-      TensorView<T, 2>& work2
-    )
+      const mra::OperatorData<T, NDIM>& op,
+      const TensorView<T, NDIM>& f,
+      TensorView<T, NDIM>& result,  // size K, stores the sum
+      T* tmp)
     {
+      std::array<Slice,NDIM> s0 = {Slice(0, K), Slice(0, K), Slice(0, K)}
       T normthresh = 1e-20; // Can potentially be a parameter
+
       SHARED std::array<TensorView<T, 2>, NDIM> trans;
+      SHARED TensorView<T, NDIM> resultf, resultc, work1, work2, f0;
+
+      size_type blockId = blockIdx.x;
+      T* block_tmp_ptr = &tmp[blockId*convolution_tmp_size<NDIM>(K)];
+      const size_type K2NDIM = std::pow(K, NDIM);
+      const size_type TWOK2NDIM = std::pow(2*K, NDIM);
+
+      // construct temporaries and pass them to conv_transform
+      resultf   = TensorView<T, NDIM>(&block_tmp_ptr[                    0], 2*K);
+      resultc   = TensorView<T, NDIM>(&block_tmp_ptr[            TWOK2NDIM], K);
+      tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[   TWOK2NDIM + K2NDIM], K);
+      f0        = TensorView<T, NDIM>(&block_tmp_ptr[ TWOK2NDIM + 2*K2NDIM], K);
+      work1     = TensorView<T, NDIM>(&block_tmp_ptr[ TWOK2NDIM + 3*K2NDIM], K);
+      work2     = TensorView<T, NDIM>(&block_tmp_ptr[ TWOK2NDIM + 4*K2NDIM], K);
 
       T normr = 1.0;
       for (size_type i = 0; i < NDIM; ++i) normr *= op->ops[i]->normR;
+
       if (normr > normthresh) {
         // assemble trans and call conv_transform
         for (size_type d = 0; d < NDIM; ++d){
@@ -77,6 +93,8 @@ namespace mra{
       conv_transform<T, NDIM>(2*K, ops.fac, trans, f, resultf, work1, work2);
 
       T norms = 1.0;
+      auto f0_view= f0.current_view();
+      f0(s0) = f.current_view()(s0);
       for (size_type i = 0; i < NDIM; ++i) norms *= op->ops[i]->normS;
       if (norms > normthresh) {
         // assemble trans and call conv_transform
@@ -84,7 +102,12 @@ namespace mra{
           trans[d].current_view() = op->ops[d]->S;
         }
       }
-      conv_transform<T, NDIM>(K, -ops.fac, trans, f, resultc, work1, work2);
+      conv_transform<T, NDIM>(K, -ops.fac, trans, f0, resultc, work1, work2);;
+
+      auto tmpresult_view = tmpresult.current_view();
+      tmpresult_view(s0) = resultf.current_view()(s0);
+      gaxpy_kernel_impl<T, NDIM>(
+        tmpresult, resultc, result, 1.0, 1.0);
     }
 
     template <typename T, Dimension NDIM>
@@ -93,7 +116,6 @@ namespace mra{
     {
       // Call the implementation function
       convolution_kernel_impl<T, NDIM>();
-      // gaxpy()
     }
   } // namespace detail
 
