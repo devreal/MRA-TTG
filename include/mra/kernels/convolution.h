@@ -25,10 +25,10 @@ namespace mra{
     const size_type dimk,
     const T mufac,
     std::array<TensorView<T, 2>, NDIM>& trans,
-    const TensorView<T, 2>& f,
-    TensorView<T, 2>& result,
-    TensorView<T, 2>& work1,
-    TensorView<T, 2>& work2)
+    const TensorView<T, NDIM>& f,
+    TensorView<T, NDIM>& result,
+    TensorView<T, NDIM>& work1,
+    TensorView<T, NDIM>& work2)
   {
     size_type rank = trans[0].dim(0); // doing computation assuming full rank
     size_type size = 1;
