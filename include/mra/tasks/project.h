@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -19,11 +20,11 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template<typename FnT, typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  template<typename T, mra::Dimension NDIM, typename FunctionSetT,
+           typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_project(
     const ttg::Buffer<mra::Domain<NDIM>>& db,
-    const ttg::Buffer<FnT>& fb,
-    std::size_t N,
+    const std::shared_ptr<FunctionSetT>& fns,
     std::size_t K,
     int max_level,
     const mra::FunctionData<T, NDIM>& functiondata,
@@ -35,19 +36,22 @@ namespace mra{
     DeviceMap devicemap = {})
   {
     /* create a non-owning buffer for domain and capture it */
-    auto fn = [&, N, K, max_level, thresh, gl = mra::GLbuffer<T>(), name]
+    auto fn = [&, K, max_level, thresh, gl = mra::GLbuffer<T>(), fns, name]
               (const mra::Key<NDIM>& key) -> TASKTYPE {
       using tensor_type = typename mra::Tensor<T, NDIM+1>;
       using key_type = typename mra::Key<NDIM>;
       using node_type = typename mra::FunctionsReconstructedNode<T, NDIM>;
+      using function_type = typename FunctionSetT::function_type;
+
+      size_type N = fns->num_functions(key);
       node_type result(key, N); // empty for fast-paths, no need to zero out
 #ifndef MRA_ENABLE_HOST
       auto outputs = ttg::device::forward();
 #endif // MRA_ENABLE_HOST
-      auto* fn_arr = fb.host_ptr();
+      auto fn_host_view = fns->host_view(key); // force the host view to be used
       bool all_initial_level = true;
       for (std::size_t i = 0; i < N; ++i) {
-        if (key.level() >= initial_level(fn_arr[i])) {
+        if (key.level() >= initial_level(fn_host_view[i])) {
           all_initial_level = false;
           break;
         }
@@ -69,11 +73,11 @@ namespace mra{
         bool all_negligible = true;
         auto trunc = mra::truncate_tol(key,thresh);
         for (std::size_t i = 0; i < N; ++i) {
-          all_negligible &= mra::is_negligible<FnT,T,NDIM>(
-                                      fn_arr[i], db.host_ptr()->template bounding_box<T>(key), trunc);
+          all_negligible &= mra::is_negligible<function_type,T,NDIM>(
+                                      fn_host_view[i], db.host_ptr()->template bounding_box<T>(key), trunc);
         }
-        //std::cout << "project " << key << " all negligible " << all_negligible << std::endl;
         if (all_negligible) {
+          //std::cout << "project " << key << " all negligible " << all_negligible << std::endl;
           result.set_all_leaf(true);
         } else {
           /* here we actually compute: first select a device */
@@ -101,7 +105,7 @@ namespace mra{
 
           /* TODO: cannot do this from a function, had to move it into the main task */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::select(db, gl, fb, coeffs.buffer(), phibar.buffer(),
+          co_await ttg::device::select(db, gl, fns->buffer(), coeffs.buffer(), phibar.buffer(),
                                       hgT.buffer(), tmp_scratch, is_leafs, result_norms.buffer());
 #endif
           auto coeffs_view = coeffs.current_view();
@@ -109,12 +113,12 @@ namespace mra{
           auto hgT_view    = hgT.current_view();
           T* tmp_device = tmp_scratch.current_device_ptr();
           bool *is_leafs_device = is_leafs.current_device_ptr();
-          auto *f_ptr   = fb.current_device_ptr();
+          auto fn_view   = fns->current_view(key); // the view for the functions in this batch
           auto& domain = *db.current_device_ptr();
           auto  gldata = gl.current_device_ptr();
 
           /* submit the kernel */
-          submit_fcoeffs_kernel(domain, gldata, f_ptr, key, N, K, tmp_device,
+          submit_fcoeffs_kernel(domain, gldata, fn_view, key, K, tmp_device,
                                 phibar_view, hgT_view, coeffs_view,
                                 is_leafs_device, thresh, ttg::device::current_stream());
 
@@ -166,7 +170,8 @@ namespace mra{
     };
 
     ttg::Edge<mra::Key<NDIM>, void> refine("refine");
-    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(ttg::fuse(control, refine)), ttg::edges(refine,result), name);
+    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(ttg::fuse(control, refine)),
+                                  ttg::edges(refine,result), name);
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
     return tt;

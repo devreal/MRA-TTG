@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -19,13 +20,15 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_norm(size_type N, size_type K,
-                ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
-                ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> result,
-                const char* name = "norm",
-                ProcMap procmap = {},
-                DeviceMap devicemap = {}) {
+  template <typename T, Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_norm(const std::shared_ptr<FunctionSetT>& fns,
+                 size_type K,
+                 ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
+                 ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> result,
+                 const char* name = "norm",
+                 ProcMap procmap = {},
+                 DeviceMap devicemap = {}) {
     static_assert(NDIM == 3); // TODO: worth fixing?
     using norm_tensor_type = mra::Tensor<T, 1>;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> node_e;
@@ -35,7 +38,7 @@ namespace mra{
     /**
      * Takes a tensor of norms from each child
      */
-    auto norm_fn = [N, K, name](const mra::Key<NDIM>& key,
+    auto norm_fn = [fns, K, name](const mra::Key<NDIM>& key,
                                 const norm_tensor_type& norm0,
                                 const norm_tensor_type& norm1,
                                 const norm_tensor_type& norm2,
@@ -47,6 +50,7 @@ namespace mra{
                                 const mra::FunctionsCompressedNode<T, NDIM>& in) -> TASKTYPE {
       // TODO: pass ttg::scope::Allocate once that's possible
       // TODO: reuse of one of the input norms?
+      size_type N = fns->num_functions(key);
       auto norms_result = norm_tensor_type(N);
       auto fnnorms = FunctionNorms(name, norm0, norm1, norm2, norm3, norm4, norm5, norm6, norm7);
       //std::cout << name << " " << key << std::endl;
@@ -102,10 +106,11 @@ namespace mra{
      * Task to dispatch incoming compressed nodes and forward empty
      * nodes for children that do not exist
      */
-    auto dispatch_fn = [N, K, name]
+    auto dispatch_fn = [fns, K, name]
                     (const mra::Key<NDIM>& key,
                       const mra::FunctionsCompressedNode<T, NDIM>& in) -> TASKTYPE {
       //std::cout << name << "-dispatch " << key << " sending node to " << num_children << std::endl;
+      size_type N = fns->num_functions(key);
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward(ttg::device::send<num_children>(key, in));
 #else  // MRA_ENABLE_HOST

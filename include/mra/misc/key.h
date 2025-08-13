@@ -41,13 +41,13 @@ namespace mra {
         /// Move constructor default is OK
         constexpr SCOPE Key(Key<NDIM>&& key) = default;
 
-        /// Construct from level, batch and translation
-        constexpr SCOPE Key(int32_t b, Level n, const std::array<Translation,NDIM>& l)
+        /// Construct from batch, level and translation
+        constexpr SCOPE Key(Batch b, Level n, const std::array<Translation,NDIM>& l)
         : b(b), n(n), l(l)
         { }
 
-        /// Construct from level and translation=0
-        constexpr SCOPE Key(int32_t b, Level n)
+        /// Construct from batch and level with translation=0
+        constexpr SCOPE Key(Batch b, Level n)
         : b(b), n(n), l({0})
         { }
 
@@ -94,7 +94,7 @@ namespace mra {
         SCOPE const std::array<Translation,NDIM>& translation() const {return l;}
 
         /// Batch number (used for batching functions in the same union node)
-        SCOPE uint32_t batch() const {return b;}
+        SCOPE Batch batch() const {return b;}
 
         /// Parent key
 
@@ -216,6 +216,12 @@ namespace mra {
         SCOPE constexpr bool is_valid() const {
             return n != -1;
         }
+
+        SCOPE constexpr Key<NDIM> step(Dimension axis, int width) const {
+            std::array<Translation, NDIM> l = translation();
+            l[axis] += width;
+            return Key<NDIM>(batch(), level(), l);
+        }
     };
 
     /// Range object used to iterate over children of a key
@@ -250,7 +256,7 @@ namespace mra {
 
     template <Dimension NDIM>
     std::ostream& operator<<(std::ostream& s, const Key<NDIM>& key) {
-        s << "Key<" << int(NDIM) << ">(" << int(key.level()) << "," << key.translation() << ")";
+        s << "Key<" << int(NDIM) << ">[" << key.batch() << "](" << int(key.level()) << "," << key.translation() << ")";
         return s;
     }
 }

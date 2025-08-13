@@ -5,6 +5,8 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 
 set(BUILD_TESTING OFF CACHE BOOL "Whether to build tests in this project and its subprojects")
 
+set(CMAKE_CXX_STANDARD 20)
+
 # needed for atomicAdd_block
 set(CMAKE_CUDA_ARCHITECTURES 80)
 

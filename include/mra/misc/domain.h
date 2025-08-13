@@ -130,7 +130,7 @@ namespace mra {
         /// @param[in] pt point in simulation coordinates
         /// @param[in] n the level of the box
         template <typename T>
-        SCOPE Key<NDIM> sim_to_key(const Coordinate<T,NDIM>& pt, Level n) const {
+        SCOPE Key<NDIM> sim_to_key(Batch b, const Coordinate<T,NDIM>& pt, Level n) const {
             static_assert(std::is_same<T,double>::value || std::is_same<T,float>::value, "Domain data only for float or double");
             assert(initialized);
             std::array<Translation,NDIM> l;
@@ -138,7 +138,7 @@ namespace mra {
             for (Dimension d=0; d<NDIM; ++d) {
                 l[d] = Translation(twon*pt[d]);
             }
-            return Key<NDIM>(n,l);
+            return Key<NDIM>(b, n,l);
         }
 
         SCOPE void print() const {

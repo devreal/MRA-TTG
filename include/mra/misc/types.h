@@ -53,7 +53,7 @@ namespace mra {
     /// A separate type facilitates template matching for NDIM (removing the constraint that Dimension=size_t)
     template <typename T, Dimension NDIM>
     class Coordinate {
-        std::array<T,NDIM> r;
+        std::array<T,NDIM> r = {0.0};
     public:
         SCOPE Coordinate() = default;
         template <typename arg0T, typename...argsT>

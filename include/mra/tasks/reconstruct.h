@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -19,9 +20,9 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_reconstruct(
-    const std::size_t N,
+    const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
@@ -32,9 +33,10 @@ namespace mra{
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> S("S");  // passes scaling functions down
 
-    auto do_reconstruct = [&, N, K, name](const mra::Key<NDIM>& key,
-                                    const mra::FunctionsCompressedNode<T, NDIM>& node,
-                                    const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
+    auto do_reconstruct = [&, fns, K, name](const mra::Key<NDIM>& key,
+                                            const mra::FunctionsCompressedNode<T, NDIM>& node,
+                                            const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
+      size_type N = fns->num_functions(key);
       const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*N;
       ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
       const auto& hg = functiondata.get_hg();

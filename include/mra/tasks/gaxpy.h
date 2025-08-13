@@ -9,6 +9,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -20,18 +21,21 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template<typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_gaxpy(ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in1,
-                ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in2,
-                ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
-                const T scalarA, const T scalarB, const size_t N, const size_t K,
-                const char* name = "gaxpy",
-                ProcMap procmap = {},
-                DeviceMap devicemap = {})
+  template<typename T, mra::Dimension NDIM, typename FunctionSetT,
+           typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_gaxpy(const T scalarA, const T scalarB,
+                  const std::shared_ptr<FunctionSetT>& fns,
+                  const size_t K,
+                  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in1,
+                  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in2,
+                  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
+                  const char* name = "gaxpy",
+                  ProcMap procmap = {},
+                  DeviceMap devicemap = {})
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> S1, S2; // to balance trees
 
-    auto func = [N, K, scalarA, scalarB, name](
+    auto func = [fns, K, scalarA, scalarB, name](
               const mra::Key<NDIM>& key,
               const mra::FunctionsCompressedNode<T, NDIM>& t1,
               const mra::FunctionsCompressedNode<T, NDIM>& t2) -> TASKTYPE {
@@ -46,6 +50,8 @@ namespace mra{
         ttg::send<0>(key, std::forward<S>(out));
       };
 #endif
+
+      size_type N = fns->num_functions(key);
 
       //std::cout << name << " " << key << " t1 empty " << t1.empty() << " t2 empty " << t2.empty() << std::endl;
 

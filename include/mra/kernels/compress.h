@@ -120,7 +120,6 @@ namespace mra {
     CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::compress_kernel, N, thread_dims, smem_size, stream,
       (key, N, K, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
-    checkSubmit();
   }
 
 

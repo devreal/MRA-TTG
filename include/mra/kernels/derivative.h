@@ -96,14 +96,11 @@ namespace mra {
       const int bc_left,
       const int bc_right)
     { // TODO: check for boundary conditions to return an invalid key
-      std::array<Translation, NDIM> l = key.translation();
-      l[axis] += step;
-      if (!enforce_bc(bc_left, bc_right, key.n, l[axis])){
+      auto res = key.step(axis, step);
+      if (!enforce_bc(bc_left, bc_right, key.level(), res.translation()[axis])){
         return Key<NDIM>::invalid();
       }
-      else{
-        return Key<NDIM>(key.n, l);
-      }
+      return res;
     }
     #endif
 

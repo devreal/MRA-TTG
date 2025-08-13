@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -21,9 +22,10 @@
 namespace mra
 {
 /// Make a composite operator that implements compression for a single function
-  template <typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   static auto make_compress(
-    const std::size_t N,
+    const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>& in,
@@ -44,7 +46,7 @@ namespace mra
     /* append out edge to set of edges */
     auto compress_out_edges = std::tuple_cat(send_to_compress_edges, std::make_tuple(out));
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
-    auto do_compress = [&, N, K, name](const mra::Key<NDIM>& key,
+    auto do_compress = [&, fns, K, name](const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in1,
@@ -56,6 +58,7 @@ namespace mra
                           const mra::FunctionsReconstructedNode<T,NDIM> &in7) -> TASKTYPE {
       //const typename ::detail::tree_types<T,K,NDIM>::compress_in_type& in,
       //typename ::detail::tree_types<T,K,NDIM>::compress_out_type& out) {
+        size_type N = fns->num_functions(key);
         constexpr const auto num_children = mra::Key<NDIM>::num_children();
         constexpr const auto out_terminal_id = num_children;
         mra::FunctionsCompressedNode<T,NDIM> result(key, N); // The eventual result
@@ -169,10 +172,15 @@ namespace mra
             ttg::send<out_terminal_id>(key, std::move(result));
 #endif
         } else {
+          bool all_correct = true;
           for (std::size_t i = 0; i < N; ++i) {
             if (std::abs(p.sum(i) - 1.0) > 1e-12) {
-              std::cout << "At root of compressed tree fn " << i << ": total normsq is " << p.sum(i) << std::endl;
+              all_correct = false;
+              std::cout << "At root of compressed tree " << key.batch() << " fn " << i << ": total normsq is " << p.sum(i) << std::endl;
             }
+          }
+          if (all_correct) {
+            std::cout << "At root of compressed tree " << key.batch() << ": all norms are 1.0 with 1e-12 tolerance" << std::endl;
           }
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::forward(

@@ -26,7 +26,7 @@ void test_coeffs(int argc, char** argv) {
   // mra::ConvolutionOperator<double, 3> op(K, npt, coeff, expnt, functiondata);
   mra::ConvolutionOperator<double, 3> op(K, npt, conv);
   // const mra::OperatorData<double, 3>& op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
-  std::shared_ptr<const mra::OperatorData<double, 3>> op_data = op.get_op(mra::Key<3>(2, {1, 1, 1}));
+  std::shared_ptr<const mra::OperatorData<double, 3>> op_data = op.get_op(mra::Key<3>(0, 2, {1, 1, 1}));
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);

@@ -109,9 +109,8 @@ namespace mra {
     fcoeffs_kernel(
       const Domain<NDIM>& D,
       const T* gldata,
-      const Fn* fns,
+      const TensorView<Fn, 1>& fns,
       Key<NDIM> key,
-      size_type N,
       size_type K,
       T* tmp,
       const TensorView<T, 2> phibar_view,
@@ -124,6 +123,8 @@ namespace mra {
       SHARED TensorView<T, NDIM> values, r0, r1, child_values, coeffs;
       SHARED TensorView<T, 2   > x_vec, x;
       SHARED T* workspace;
+      size_type N = fns.dim(0);
+
       if (is_team_lead()) {
         const size_type K2NDIM    = std::pow(K, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
@@ -159,9 +160,8 @@ namespace mra {
   void submit_fcoeffs_kernel(
       const mra::Domain<NDIM>& D,
       const T* gldata,
-      const Fn* fns,
+      const TensorView<Fn, 1>& fns,
       const mra::Key<NDIM>& key,
-      size_type N,
       size_type K,
       T* tmp,
       const mra::TensorView<T, 2>& phibar_view,
@@ -181,8 +181,8 @@ namespace mra {
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
     /* launch one block per child */
-    CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, smem_size, stream,
-      (D, gldata, fns, key, N, K, tmp,
+    CALL_KERNEL(detail::fcoeffs_kernel, fns.size(), thread_dims, smem_size, stream,
+      (D, gldata, fns, key, K, tmp,
        phibar_view, hgT_view, coeffs_view,
        is_leaf_scratch, thresh));
     checkSubmit();

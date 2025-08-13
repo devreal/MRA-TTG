@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -19,20 +20,24 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_derivative(size_type N, size_type K,
-                ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> in,
-                ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> result,
-                const mra::FunctionData<T, NDIM>& functiondata,
-                const ttg::Buffer<mra::Domain<NDIM>>& db,
-                const T g1,
-                const T g2,
-                const Dimension axis,
-                const int bc_left,
-                const int bc_right,
-                const std::string& name = "derivative",
-                ProcMap&& procmap = {},
-                DeviceMap&& devicemap = {})
+
+  template <typename T, Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_derivative(
+    const std::shared_ptr<FunctionSetT>& fns,
+    size_type K,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> in,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> result,
+    const mra::FunctionData<T, NDIM>& functiondata,
+    const ttg::Buffer<mra::Domain<NDIM>>& db,
+    const T g1,
+    const T g2,
+    const Dimension axis,
+    const int bc_left,
+    const int bc_right,
+    const std::string& name = "derivative",
+    ProcMap&& procmap = {},
+    DeviceMap&& devicemap = {})
   {
     // TODO: we could generalize this to NDIM by using the tuple-based API
     static_assert(NDIM == 3, "Derivative currently only supported in 3D!");
@@ -47,8 +52,8 @@ namespace mra{
       throw std::runtime_error("Invalid axis for derivative");
     }
 
-    auto dispatch_fn = [&, N, K, axis](const mra::Key<NDIM>& key,
-                          const mra::FunctionsReconstructedNode<T, NDIM>& in_node) -> TASKTYPE {
+    auto dispatch_fn = [&, axis](const mra::Key<NDIM>& key,
+                                 const mra::FunctionsReconstructedNode<T, NDIM>& in_node) -> TASKTYPE {
 
       //std::cout << "derivative dispatch " << key << " axis " << axis << std::endl;
 #ifndef MRA_ENABLE_HOST
@@ -98,7 +103,7 @@ namespace mra{
                                           ttg::edges(left, center, right),
                                           name+"-dispatch");
 
-    auto derivative_fn = [&, N, K, g1, g2, axis, bc_left, bc_right, name](
+    auto derivative_fn = [&, fns, K, g1, g2, axis, bc_left, bc_right, name](
                                 const mra::Key<NDIM>& key,
                                 const mra::FunctionsReconstructedNode<T, NDIM>& left,
                                 const mra::FunctionsReconstructedNode<T, NDIM>& center,
@@ -106,6 +111,7 @@ namespace mra{
 
       /* tuple of references to inputs */
       auto inputs = std::array{std::cref(left), std::cref(center), std::cref(right)};
+      size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
       // forward() returns a vector that we can push into

@@ -20,7 +20,8 @@
 namespace mra{
 
   template <Dimension NDIM, typename NodeT>
-  auto make_extract(ttg::Edge<Key<NDIM>, NodeT>& in, std::map<Key<NDIM>, NodeT>& map){
+  auto make_extract(ttg::Edge<Key<NDIM>, NodeT>& in, std::map<Key<NDIM>, NodeT>& map) {
+    /* TODO: need to bring together functions from different batches */
     auto func = [&map](const Key<NDIM>& key, NodeT&& node) {
       static std::mutex m;
       std::lock_guard<std::mutex> lock(m);

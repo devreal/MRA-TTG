@@ -170,7 +170,7 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
       l[i] = it->first.translation()[i];
     }
     auto mad_coeff = it->second;
-    Key<NDIM> key = Key<NDIM>(it->first.level(), l);
+    Key<NDIM> key = Key<NDIM>(0, it->first.level(), l);
     auto mra_coeff = mramap.find(key);
     auto mad_norm = mad_coeff.coeff().svd_normf();
     if (mra_coeff != mramap.end()) {
@@ -225,6 +225,9 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
   T g2 = 0;
 
 
+  auto pmap = make_procmap<NDIM>(N, 1);
+  auto dmap = make_devicemap<NDIM>(pmap);
+
   std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
 
   srand48(5551212); // for reproducible results
@@ -232,38 +235,38 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, derivative_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result,
+                                                                      reconstruct_result,
+                                                                      derivative_result;
 
-  auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
+  auto gaussians = make_functionset<Gaussian<T, NDIM>>(pmap.batch_manager());
+  auto gaussians_view = gaussians->current_view(); // host view
 
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> pmap; // results directly after project
 
-  for (int i = 0; i < N; ++i) {
+  for (int i = 0; i < gaussians->num_local_functions(); ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
       r[d] = 0.0;
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
   // put it into a buffer
-  auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
-  auto start = make_start(project_control);
+  auto start = make_start(gaussians, project_control);
   // auto start_d = make_start(project_d_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto extract_project = make_extract(project_result, pmap);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress");
+  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
   // D(R(C(P)))
   auto extract_u = make_extract(reconstruct_result, umap);
-  auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
-                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
+  auto derivative = make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
+                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap);
   auto extract = make_extract(derivative_result, cmap);
 
   auto connected = make_graph_executable(start.get());
@@ -277,10 +280,15 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
       // std::cout << "====  end dot  ====\n";
 
       beg = std::chrono::high_resolution_clock::now();
-      // This kicks off the entire computation
-      start->invoke(mra::Key<NDIM>(0, {0}));
   }
+
+  /* start executing */
   ttg::execute();
+
+  if (ttg::default_execution_context().rank() == 0) {
+      // This kicks off the entire computation
+      start->invoke();
+  }
   ttg::fence();
 
   madness::World world(SafeMPI::COMM_WORLD);

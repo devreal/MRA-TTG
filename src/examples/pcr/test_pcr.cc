@@ -9,7 +9,7 @@ using namespace mra;
 
 
 template<typename T, mra::Dimension NDIM>
-void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial_level) {
+void test_pcr(std::size_t N, std::size_t K, int num_batches, int max_level, int seed, int initial_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
@@ -19,8 +19,8 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
     for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
   }
 
-  auto pmap = PartitionKeymap<NDIM>(); // process map
-  auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
+  auto pmap = make_procmap<NDIM>(N, num_batches);
+  auto dmap = make_devicemap<NDIM>(pmap);
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
@@ -28,49 +28,51 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
   ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
 
   // define N Gaussians
-  auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
+  auto gaussians = make_functionset<mra::Gaussian<T, NDIM>>(pmap.batch_manager());
+  auto gaussians_view = gaussians->current_view(); // host view
   // T expnt = 1000.0;
-  for (int i = 0; i < N; ++i) {
+  for (int i = 0; i < gaussians->num_local_functions(); ++i) {
     T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
     mra::Coordinate<T,NDIM> r;
-    for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-6.0) + T(12.0)*drand48()) : 0.0;
-    }
     if (seed > 0) {
-      std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
+      for (size_t d=0; d<NDIM; d++) {
+        r[d] = T(-6.0) + T(12.0)*drand48();
+      }
     }
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
+    std::cout << gaussians_view[i] << std::endl;
   }
 
   if (seed == 0) {
-    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500 << std::endl;
+    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500
+                             << " in " << gaussians->num_batches() << " batches, "
+                             << gaussians->num_local_functions() << " functions are local in "
+                             << gaussians->num_local_batches() << " local batches" << std::endl;
   }
 
   // put it into a buffer
-  auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
-  auto start = make_start(project_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
+  auto start = make_start(gaussians, project_control);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
+  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   // C(R(C(P)))
-  auto compress_r = make_compress(N, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  auto compress_r = make_compress(gaussians, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
 
   // C(R(C(P))) - C(P)
-  auto gaxpy = make_gaxpy(compress_reconstruct_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy", pmap, dmap);
+  auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_reconstruct_result, compress_result, gaxpy_result, "gaxpy", pmap, dmap);
   // | C(R(C(P))) - C(P) |
-  auto norm  = make_norm(N, K, gaxpy_result, norm_result, "norm", pmap, dmap);
+  auto norm  = make_norm(gaussians, K, gaxpy_result, norm_result, "norm", pmap, dmap);
   // final check
   auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
     // TODO: check for the norm within machine precision
-    auto norms_arr = norms.buffer().current_device_ptr();
-    for (size_type i = 0; i < N; ++i) {
-      if (std::abs(norms_arr[i]) > 1e12) {
-        std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
+    auto norms_view = norms.current_view();
+    for (size_type i = 0; i < norms_view.size(); ++i) {
+      if (std::abs(norms_view[i]) > 1e12) {
+        std::cout << "Final norm " << i << " in batch " << key.batch() << " : " << norms_view[i] << std::endl;
       }
-
     }
   }, ttg::edges(norm_result), ttg::edges(), "norm-check");
 
@@ -79,16 +81,22 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
   if (ttg::default_execution_context().rank() == 0) {
-      // std::cout << "Is everything connected? " << connected << std::endl;
-      // std::cout << "==== begin dot ====\n";
-      // std::cout << ttg::Dot(true)(start.get()) << std::endl;
-      // std::cout << "====  end dot  ====\n";
+    // std::cout << "Is everything connected? " << connected << std::endl;
+    // std::cout << "==== begin dot ====\n";
+    // std::cout << ttg::Dot(true)(start.get()) << std::endl;
+    // std::cout << "====  end dot  ====\n";
 
-      beg = std::chrono::high_resolution_clock::now();
-      // This kicks off the entire computation
-      start->invoke(mra::Key<NDIM>(0, {0}));
+    beg = std::chrono::high_resolution_clock::now();
   }
   ttg::execute();
+
+  if (ttg::default_execution_context().rank() == 0) {
+    // This kicks off the entire computation
+    // NOTE: we need to do this after ttg::execute()
+    //       so we have TTG properly set up.
+    start->invoke();
+  }
+
   ttg::fence();
 
   if (ttg::default_execution_context().rank() == 0) {
@@ -111,6 +119,7 @@ int main(int argc, char **argv) {
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int initial_level = opt.parse("-i", 2);
   int seed    = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
+  int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
@@ -121,7 +130,7 @@ int main(int argc, char **argv) {
    * with the first key it receives. We need to find a way to do that automatically outside of make_project.
    */
   for (int i = 0; i < nrep; ++i) {
-    test_pcr<double, 3>(N, K, max_level, seed, initial_level);
+    test_pcr<double, 3>(N, K, num_batches, max_level, seed, initial_level);
   }
 
   allocator_fini();
