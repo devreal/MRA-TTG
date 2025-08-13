@@ -32,6 +32,9 @@ set(TTG_FETCH_BOOST OFF)
 set(TTG_PARSEC_USE_BOOST_SERIALIZATION OFF)
 set(TTG_EXAMPLES ON) # to pull in TA
 
+# whoever thought enabling OpenMP by default should be tarred and feathered!
+set(use_openmp OFF)
+
 # needed for tests
 set(MADNESS_BUILD_MADWORLD_ONLY OFF CACHE BOOL "Whether to build MADNESS runtime only")
 
