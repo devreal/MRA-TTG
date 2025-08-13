@@ -18,21 +18,21 @@ namespace mra {
     // Test gaussian functor
     template <typename T, Dimension NDIM>
     class Gaussian {
-        T expnt;
-        Coordinate<T,NDIM> origin;
-        T fac;
-        T maxr;
-        Level initlev;
+        T m_expnt;
+        Coordinate<T,NDIM> m_origin;
+        T m_fac;
+        T m_maxr;
+        Level m_initlev;
     public:
         /* default construction required for ttg::Buffer */
         Gaussian() = default;
 
         Gaussian(const Domain<NDIM>& domain, T expnt, const Coordinate<T,NDIM>& origin, int initial_level = 0)
-        : expnt(expnt)
-        , origin(origin)
-        , fac(std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*NDIM)))
-        , maxr(std::sqrt(std::log(fac/1e-12)/expnt))
-        , initlev(initial_level)
+        : m_expnt(expnt)
+        , m_origin(origin)
+        , m_fac(std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*NDIM)))
+        , m_maxr(std::sqrt(std::log(m_fac/1e-12)/m_expnt))
+        , m_initlev(initial_level)
         {
             // Pick initial level such that average gap between quadrature points
             // will find a significant value
@@ -41,11 +41,11 @@ namespace mra {
             const T log10 = std::log(10.0);
             const T log2 = std::log(2.0);
             const T L = domain.get_max_width();
-            const T a = expnt*L*L;
-            double n = std::log(a/(4*K*K*(N*log10+std::log(fac))))/(2*log2);
-            //std::cout << expnt << " " << a << " " << n << std::endl;
-            if (initial_level == 0) {
-                initlev = Level(n<2 ? 2.0 : std::ceil(n));
+            const T a = m_expnt*L*L;
+            double n = std::log(a/(4*K*K*(N*log10+std::log(m_fac))))/(2*log2);
+            //std::cout << m_expnt << " " << a << " " << n << std::endl;
+            if (m_initlev == 0) {
+                m_initlev = Level(n<2 ? 2.0 : std::ceil(n));
             }
         }
 
@@ -67,14 +67,30 @@ namespace mra {
         SCOPE void operator()(const TensorView<T,2>& x, T* values, size_type N) const {
             assert(x.dim(0) == NDIM);
             assert(x.dim(1) == N);
-            distancesq(origin, x, values, N);
+            distancesq(m_origin, x, values, N);
             for (size_type i = thread_id(); i < N; i += block_size()) {
-                values[i] = fac * std::exp(-expnt*values[i]);
+                values[i] = m_fac * std::exp(-m_expnt*values[i]);
             }
         }
 
         SCOPE Level initial_level() const {
-            return this->initlev;
+            return this->m_initlev;
+        }
+
+        SCOPE T expnt() const {
+            return m_expnt;
+        }
+
+        SCOPE T max_radius() const {
+            return m_maxr;
+        }
+
+        SCOPE T fac() const {
+            return m_fac;
+        }
+
+        SCOPE Coordinate<T,NDIM> origin() const {
+            return m_origin;
         }
 
         SCOPE bool is_negligible(const std::pair<Coordinate<T,NDIM>,Coordinate<T,NDIM>>& box, T thresh) const {
@@ -84,11 +100,11 @@ namespace mra {
             T maxw = 0.0; // max width of box
             for (Dimension d = 0; d < NDIM; ++d) {
                 maxw = std::max(maxw,hi(d)-lo(d));
-                T x = T(0.5)*(hi(d)+lo(d)) - origin(d);
+                T x = T(0.5)*(hi(d)+lo(d)) - m_origin(d);
                 rsq += x*x;
             }
             T diagndim = T(0.5)*std::sqrt(T(NDIM));
-            T boxradplusr = maxw*diagndim + maxr;
+            T boxradplusr = maxw*diagndim + m_maxr;
             // ttg::print(box, boxradplusr, bool(boxradplusr*boxradplusr < rsq));
             return (boxradplusr*boxradplusr < rsq);
         }
@@ -168,6 +184,13 @@ namespace mra {
             return (boxradplusr*boxradplusr < rsq);
         }
     };
+
+
+    template <typename T, Dimension NDIM>
+    std::ostream& operator<<(std::ostream& s, const Gaussian<T, NDIM>& g) {
+        s << "Gaussian<" << int(NDIM) << ">(" << g.expnt() << "," << g.max_radius() << "," << g.origin() << ")";
+        return s;
+    }
 
 } // namespace mra
 
