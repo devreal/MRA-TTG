@@ -76,9 +76,6 @@ if (HAVE_CUDA)
   add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
   target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
-  add_executable(mra-derivative-device-cuda-parsec examples/derivative/test_derivative.cu)
-  target_link_libraries(mra-derivative-device-cuda-parsec PUBLIC libmra-cuda-parsec)
-
   add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
@@ -114,9 +111,6 @@ if (HAVE_HIP)
 
   add_executable(mra-pcr-device-hip-parsec examples/pcr/test_pcr.hip)
   target_link_libraries(mra-pcr-device-hip-parsec PUBLIC libmra-hip-parsec)
-
-  add_executable(mra-derivative-device-hip-parsec examples/derivative/test_derivative.hip)
-  target_link_libraries(mra-derivative-device-hip-parsec PUBLIC libmra-hip-parsec)
 
   add_executable(mra-unit-device-hip-parsec examples/unit/test_unit.hip)
   target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)
