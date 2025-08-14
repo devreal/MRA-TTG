@@ -320,6 +320,19 @@ int main(int argc, char **argv) {
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
+  if (ttg::default_execution_context().size() > 1) {
+    throw std::runtime_error("MADNESS derivative test does not support distributed execution yet.");
+  }
+
+  std::cout << "Running MADNESS derivative test with parameters: "
+            << "N = " << N << ", K = " << K
+            << ", expnt = " << expnt
+            << ", axis = " << axis
+            << ", log_precision = " << log_precision
+            << ", max_level = " << max_level
+            << ", verification_log_precision = " << verification_log_precision
+            << std::endl;
+
   if (ttg::default_execution_context().rank() == 0) {
     std::cout << "Running MADNESS derivative test with parameters: "
               << "N = " << N << ", K = " << K
