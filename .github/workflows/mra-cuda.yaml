@@ -1,0 +1,32 @@
+name: Linux-CUDA Build
+
+on: [pull_request]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type : [ Release, Debug ]
+
+    name: self-hosted "${{ matrix.build_type }}"
+    runs-on: self-hosted
+
+    env:
+      BUILD_CONFIG: >
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DBUILD_SHARED_LIBS=OFF
+        -DCMAKE_CXX_STANDARD=20
+    steps:
+      - name: Checkout repository to host
+        uses: actions/checkout@v4
+
+      - name: Run in singularity image
+        run: |
+          apptainer exec \
+            --bind $GITHUB_WORKSPACE:/workspace \
+            /opt/containers/ubuntu_nvhpc.sif \
+            bash -c "
+            echo 'Running job in apptainer image'
+            cmake $GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$BUILD_TYPE $BUILD_CONFIG
+            cmake --build . -j 10"
