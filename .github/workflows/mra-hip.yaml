@@ -1,4 +1,4 @@
-name: Linux-CUDA Build
+name: Linux-HIP Build
 
 on: [pull_request]
 
@@ -20,8 +20,9 @@ jobs:
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DBUILD_SHARED_LIBS=OFF
         -DCMAKE_CXX_STANDARD=20
-        -DENABLE_CUDA=ON
-        -DTTG_ENABLE_CUDA=ON
+        -DENABLE_HIP=ON
+        -DTTG_ENABLE_HIP=ON
+        -DCMAKE_HIP_ARCHITECTURES=gfx908
 
     steps:
       - name: Checkout repository to host
@@ -31,7 +32,7 @@ jobs:
         run: |
           apptainer exec \
             --bind $GITHUB_WORKSPACE:/workspace \
-            /opt/containers/ubuntu_nvhpc.sif \
+            /opt/containers/ubuntu_hip.sif \
             bash -c "
             echo 'Running job in apptainer image'
             cmake $GITHUB_WORKSPACE $BUILD_CONFIG
