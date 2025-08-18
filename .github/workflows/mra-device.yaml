@@ -1,4 +1,4 @@
-name: Linux-CUDA Build
+name: Linux Build
 
 on: [pull_request]
 
@@ -13,8 +13,8 @@ jobs:
         build_type : [ Release, Debug ]
         device : [ cuda, hip ]
 
-    name: self-hosted "${{ matrix.build_type }}"
-    runs-on: self-hosted
+    name: self-hosted "${{ matrix.build_type }} ${{matrix.device}}"
+    runs-on: ${{ matrix.device }}
 
     env:
       BUILD_CONFIG: >
