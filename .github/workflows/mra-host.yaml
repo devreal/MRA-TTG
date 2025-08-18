@@ -13,7 +13,7 @@ jobs:
       matrix:
         build_type : [ Release, Debug ]
         os : [ macos-latest, ubuntu-22.04 ]
-        device : [host, cuda, hip]
+        device : [host]
         include:
           - os: ubuntu-22.04
             cc: /usr/bin/gcc-12
@@ -21,11 +21,6 @@ jobs:
           - os: macos-latest
             cc: clang
             cxx: clang++
-        exclude:
-          - os: macos-latest
-            device: cuda
-          - os: macos-latest
-            device: hip
 
     name: "${{ matrix.os }}: ${{ matrix.cxx }} ${{ matrix.device }} ${{ matrix.build_type }}"
     runs-on: ${{ matrix.os }}
@@ -63,26 +58,6 @@ jobs:
         sudo apt-get update
         sudo apt-get -y install ninja-build g++-12 liblapack-dev libboost-dev libboost-serialization-dev libboost-random-dev libeigen3-dev openmpi-bin libopenmpi-dev libtbb-dev ccache flex bison cmake doxygen
         echo "MPIEXEC=/usr/bin/mpiexec" >> $GITHUB_ENV
-    - name: Install extra dependencies [CUDA]
-      if: ${{ matrix.device == 'cuda'}}
-      run: |
-        wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
-        sudo dpkg -i cuda-keyring_1.1-1_all.deb
-        sudo apt update
-        sudo apt install -y cuda-toolkit
-        echo "CUDA_BUILD_OPTS=-DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER=${{ matrix.cxx }}" >> $GITHUB_ENV
-    - name: Install extra dependencies [HIP]
-      if: ${{ matrix.device == 'hip'}}
-      run: |
-        sudo mkdir --parents --mode=0755 /etc/apt/keyrings
-        wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/amdgpu/${ROCM_VER}/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/amdgpu.list
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VER} jammy main" | sudo tee --append /etc/apt/sources.list.d/rocm.list
-        echo -e 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600' | sudo tee /etc/apt/preferences.d/rocm-pin-600
-        sudo apt update
-        sudo apt install -y rocm-hip-runtime hip-dev hipcc rocm-device-libs rocprim-dev rocthrust-dev hipify-clang hipblas-dev
-        echo "PATH=/opt/rocm-${ROCM_VER}/bin:$PATH" >> $GITHUB_ENV
-        echo "HIP_BUILD_OPTS=-DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908" >> $GITHUB_ENV
     - name: Create Build Environment
       # Some projects don't allow in-source building, so create a separate build directory
       # We'll use this as our working directory for all subsequent commands
@@ -110,7 +85,7 @@ jobs:
       # and build directories, but this is only available with CMake 3.13 and higher.
       # The CMake binaries on the Github Actions machines are (as of this writing) 3.12
       run: |
-        cmake $GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$BUILD_TYPE $BUILD_CONFIG $CUDA_BUILD_OPTS $HIP_BUILD_OPTS || (cat CMakeFiles/CMakeOutput.log && cat CMakeFiles/CMakeError.log)
+        cmake $GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$BUILD_TYPE $BUILD_CONFIG || (cat CMakeFiles/CMakeOutput.log && cat CMakeFiles/CMakeError.log)
     - name: Build [host]
       working-directory: ${{github.workspace}}/build
       shell: bash

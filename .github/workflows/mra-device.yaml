@@ -1,9 +1,9 @@
-name: Linux-HIP Build
+name: Linux-CUDA Build
 
 on: [pull_request]
 
 env:
-  NTHREADS: 10
+  NTHREADS: 6
 
 jobs:
   build:
@@ -11,6 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type : [ Release, Debug ]
+        device : [ cuda, hip ]
 
     name: self-hosted "${{ matrix.build_type }}"
     runs-on: self-hosted
@@ -20,20 +21,27 @@ jobs:
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DBUILD_SHARED_LIBS=OFF
         -DCMAKE_CXX_STANDARD=20
-        -DENABLE_HIP=ON
-        -DTTG_ENABLE_HIP=ON
-        -DCMAKE_HIP_ARCHITECTURES=gfx908
 
     steps:
       - name: Checkout repository to host
         uses: actions/checkout@v4
 
-      - name: Build
+      - name: Build CUDA
+        if: ${{ matrix.device == 'cuda'}}
+        run: |
+          apptainer exec \
+            --bind $GITHUB_WORKSPACE:/workspace \
+            /opt/containers/ubuntu_nvhpc.sif \
+            bash -c "
+            cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON
+            cmake --build . -j ${NTHREADS}"
+      
+      - name: Build HIP
+        if: ${{ matrix.device == 'hip'}}
         run: |
           apptainer exec \
             --bind $GITHUB_WORKSPACE:/workspace \
             /opt/containers/ubuntu_hip.sif \
             bash -c "
-            echo 'Running job in apptainer image'
-            cmake $GITHUB_WORKSPACE $BUILD_CONFIG
+            cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908
             cmake --build . -j ${NTHREADS}"
