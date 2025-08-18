@@ -164,14 +164,19 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
   bool check = true;
   bool all_zero = true;
   const auto &coeffs = madfunc.get_impl()->get_coeffs();
+  /* iterate over MADNESS functions and try to find the corresponding MRA key */
   for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
     std::array<Translation,NDIM> l;
     for (int i=0; i<NDIM; ++i){
       l[i] = it->first.translation()[i];
     }
     auto mad_coeff = it->second;
+    /* map the */
     Key<NDIM> key = Key<NDIM>(0, it->first.level(), l);
-    auto mra_coeff = mramap.find(key);
+    auto mra_coeff = std::find_if(mramap.begin(), mramap.end(), [&](const auto& pair) {
+      auto pair_key = Key<NDIM>(0, pair.first.level(), pair.first.translation());
+      return pair_key == key;
+    });
     auto mad_norm = mad_coeff.coeff().svd_normf();
     if (mra_coeff != mramap.end()) {
       auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
