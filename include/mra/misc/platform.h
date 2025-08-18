@@ -45,7 +45,7 @@ namespace mra::detail {
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #else // __CUDA_ARCH__
-#define SCOPE
+#define SCOPE inline
 #define SYNCTHREADS() do {} while(0)
 #define DEVSCOPE inline
 #define SHARED
@@ -183,7 +183,7 @@ namespace mra {
 #endif // HAVE_DEVICE_ARCH
   }
 
-  SCOPE inline bool is_team_lead() {
+  SCOPE bool is_team_lead() {
 #if defined(HAVE_DEVICE_ARCH)
     return (0 == (threadIdx.x + threadIdx.y + threadIdx.z));
 #else  // HAVE_DEVICE_ARCH
