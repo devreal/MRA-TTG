@@ -13,7 +13,7 @@ jobs:
         build_type : [ Release, Debug ]
         device : [ CUDA, HIP ]
 
-    name: self-hosted "${{ matrix.build_type }} ${{matrix.device}}"
+    name: "self-hosted: ${{ matrix.build_type }} ${{matrix.device}}"
     runs-on: ${{ matrix.device }}
 
     env:
