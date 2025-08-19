@@ -14,7 +14,7 @@ jobs:
         device : [ CUDA, HIP ]
 
     name: "self-hosted: ${{ matrix.build_type }} ${{matrix.device}}"
-    runs-on: ${{ matrix.device }}
+    runs-on: self-hosted
 
     env:
       BUILD_CONFIG: >
