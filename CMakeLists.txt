@@ -8,6 +8,9 @@ set(BUILD_TESTING OFF CACHE BOOL "Whether to build tests in this project and its
 # needed for atomicAdd_block
 set(CMAKE_CUDA_ARCHITECTURES 80)
 
+# whoever thought enabling OpenMP by default should be tarred and feathered!
+set(use_openmp OFF)
+
 include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
