@@ -54,7 +54,40 @@ namespace mra {
         /// Move assignment default is OK
         SCOPE Key& operator=(Key<NDIM>&& key) = default;
 
-        SCOPE auto operator<=>(const Key<NDIM>&) const = default;
+        /* The HIP compiler seems to stumble over the spaceship operator (rocm/6.4.1)
+         * and complains about missing references to memcmp when linking.
+         * Maybe one day we can actually have nice things... */
+        //SCOPE auto operator<=>(const Key<NDIM>&) const = default;
+
+        /// Less-than comparison
+        SCOPE bool operator<(const Key<NDIM>& other) const {
+          auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return n < other.n || ((l[Is] < other.l[Is]) || ...);
+          };
+          return compare(std::make_index_sequence<NDIM>{});
+        }
+
+        /// Greater-than comparison
+        SCOPE bool operator>(const Key<NDIM>& other) const {
+          auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return n > other.n || ((l[Is] > other.l[Is]) || ...);
+          };
+          return compare(std::make_index_sequence<NDIM>{});
+        }
+
+        /// Equality comparison
+        SCOPE bool operator==(const Key<NDIM>& other) const {
+          auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return n == other.n && ((l[Is] == other.l[Is]) && ...);
+          };
+          return compare(std::make_index_sequence<NDIM>{});
+        }
+
+        /// Inequality comparison
+        SCOPE bool operator!=(const Key<NDIM>& other) const {
+          return !(*this == other);
+        }
+
 
         /// Hash to unsigned value
         SCOPE HashValue hash() const {return rehash();}
