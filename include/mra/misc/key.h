@@ -54,7 +54,7 @@ namespace mra {
         /// Move assignment default is OK
         SCOPE Key& operator=(Key<NDIM>&& key) = default;
 
-        auto operator<=>(const Key<NDIM>&) const = default;
+        SCOPE auto operator<=>(const Key<NDIM>&) const = default;
 
         /// Hash to unsigned value
         SCOPE HashValue hash() const {return rehash();}
@@ -186,83 +186,6 @@ namespace mra {
             return n != -1;
         }
     };
-    template <> SCOPE Key<1> Key<1>::parent(Level generation) const {
-        generation = std::min(generation,n);
-        return Key<1>(n-generation,{l[0]>>generation});
-    }
-
-    template <> SCOPE Key<2> Key<2>::parent(Level generation) const {
-        generation = std::min(generation,n);
-        return Key<2>(n-generation,{l[0]>>generation,l[1]>>generation});
-    }
-
-    template <> SCOPE Key<3> Key<3>::parent(Level generation) const {
-        generation = std::min(generation,n);
-        return Key<3>(n-generation,{l[0]>>generation,l[1]>>generation,l[2]>>generation});
-    }
-
-    template <> SCOPE Key<1> Key<1>::first_child() const {
-        assert(n<MAX_LEVEL);
-        return Key<1>(n+1, {l[0]<<1});
-    }
-
-    template <> SCOPE Key<2> Key<2>::first_child() const {
-        assert(n<MAX_LEVEL);
-        return Key<2>(n+1, {l[0]<<1,l[1]<<1});
-    }
-
-    template <> SCOPE Key<3> Key<3>::first_child() const {
-        assert(n<MAX_LEVEL);
-        return Key<3>(n+1, {l[0]<<1,l[1]<<1,l[2]<<1});
-    }
-
-    template <> SCOPE Key<1> Key<1>::last_child() const {
-        assert(n<MAX_LEVEL);
-        return Key<1>(n+1, {(l[0]<<1)+1});
-    }
-
-    template <> SCOPE Key<2> Key<2>::last_child() const {
-        assert(n<MAX_LEVEL);
-        return Key<2>(n+1, {(l[0]<<1)+1,(l[1]<<1)+1});
-
-    }
-
-    template <> SCOPE Key<3> Key<3>::last_child() const {
-        assert(n<MAX_LEVEL);
-        return Key<3>(n+1, {(l[0]<<1)+1,(l[1]<<1)+1,(l[2]<<1)+1});
-    }
-
-    template <> SCOPE void Key<1>::next_child(int& bits) {
-        bits++; l[0]++;
-        rehash();
-    }
-
-    template <> SCOPE void Key<2>::next_child(int& bits) {
-        int oldbits = bits++;
-        l[0] +=  (bits&0x1)     -  (oldbits&0x1);
-        l[1] += ((bits&0x2)>>1) - ((oldbits&0x2)>>1);
-        rehash();
-    }
-
-    template <> SCOPE void Key<3>::next_child(int& bits) {
-        int oldbits = bits++;
-        l[0] +=  (bits&0x1)     -  (oldbits&0x1);
-        l[1] += ((bits&0x2)>>1) - ((oldbits&0x2)>>1);
-        l[2] += ((bits&0x4)>>2) - ((oldbits&0x4)>>2);
-        rehash();
-    }
-
-    template <> SCOPE int Key<1>::childindex() const {
-        return l[0]&0x1;
-    }
-
-    template <> SCOPE int Key<2>::childindex() const {
-        return ((l[1]&0x1)<<1) | (l[0]&0x1);
-    }
-
-    template <> SCOPE int Key<3>::childindex() const {
-        return ((l[2]&0x1)<<2)  | ((l[1]&0x1)<<1) | (l[0]&0x1);
-    }
 
     /// Range object used to iterate over children of a key
     template <Dimension NDIM>
