@@ -1,0 +1,49 @@
+name: Linux Build
+
+on: [pull_request]
+
+env:
+  NTHREADS: 6
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type : [ Release, Debug ]
+        device : [ CUDA, HIP ]
+
+    name: "self-hosted: ${{ matrix.build_type }} ${{matrix.device}}"
+    runs-on: self-hosted
+
+    env:
+      BUILD_CONFIG: >
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DBUILD_SHARED_LIBS=OFF
+        -DCMAKE_CXX_STANDARD=20
+
+    steps:
+      - name: Checkout repository to host
+        uses: actions/checkout@v4
+
+      - name: Build CUDA
+        if: ${{ matrix.device == 'CUDA'}}
+        run: |
+          apptainer exec \
+            --bind $GITHUB_WORKSPACE:/workspace \
+            /opt/containers/ubuntu_nvhpc.sif \
+            bash -c "
+            mkdir build && cd build
+            cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON
+            cmake --build . -j ${NTHREADS}"
+      
+      - name: Build HIP
+        if: ${{ matrix.device == 'HIP'}}
+        run: |
+          apptainer exec \
+            --bind $GITHUB_WORKSPACE:/workspace \
+            /opt/containers/ubuntu_hip.sif \
+            bash -c "
+            mkdir build && cd build
+            cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908
+            cmake --build . -j ${NTHREADS}"
