@@ -36,7 +36,7 @@ jobs:
             mkdir build && cd build
             echo $PWD
             echo "cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON "
-            cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON
+            cmake $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON
             cmake --build . -j ${NTHREADS}"
 
       - name: Build HIP
@@ -49,5 +49,5 @@ jobs:
             mkdir build && cd build
             echo $PWD
             echo "cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON "
-            cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908
+            cmake $BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908
             cmake --build . -j ${NTHREADS}"
