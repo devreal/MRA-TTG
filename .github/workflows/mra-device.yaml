@@ -34,9 +34,11 @@ jobs:
             /opt/containers/ubuntu_nvhpc.sif \
             bash -c "
             mkdir build && cd build
+            echo $PWD
+            echo "cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON "
             cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON
             cmake --build . -j ${NTHREADS}"
-      
+
       - name: Build HIP
         if: ${{ matrix.device == 'HIP'}}
         run: |
@@ -45,5 +47,7 @@ jobs:
             /opt/containers/ubuntu_hip.sif \
             bash -c "
             mkdir build && cd build
+            echo $PWD
+            echo "cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON "
             cmake $GITHUB_WORKSPACE $BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908
             cmake --build . -j ${NTHREADS}"
