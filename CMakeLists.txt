@@ -16,6 +16,7 @@ check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
   set(TTG_ENABLE_CUDA ON)
+  include(FindOrFetchCUBLASDX)
 endif(CMAKE_CUDA_COMPILER)
 set(HAVE_CUDA ${CMAKE_CUDA_COMPILER} CACHE BOOL "True if we can compile .cu files")
 
@@ -47,17 +48,6 @@ set(BUILD_TESTING OFF)
 include(FindOrFetchTTG)
 
 # look for Kokkos
-find_package(Kokkos COMPONENTS separable_compilation)
-
-# look for cublasDx
-if (CMAKE_CUDA_COMPILER)
-  find_package(mathdx COMPONENTS cublasdx)
-  if (TARGET mathdx::cublasdx)
-    message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
-  else()
-    message(STATUS "cublasDx not found")
-  endif()
-endif(CMAKE_CUDA_COMPILER)
-
+#find_package(Kokkos COMPONENTS separable_compilation)
 
 add_subdirectory(src)
