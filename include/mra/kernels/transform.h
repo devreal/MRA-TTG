@@ -2,17 +2,17 @@
 #define MRA_KERNELS_TRANSFORM_H
 
 #include <cstdlib>
-#include "mra/ops/mxm.h"
-#include "mra/ops/inner.h"
+#include "mra/kernels/transform_cublasdx.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
+#include "mra/ops/mxm.h"
+#include "mra/ops/inner.h"
 #include "mra/tensor/cycledim.h"
 #include "mra/tensor/tensorview.h"
 
 //#define MRA_CUDA_ENABLE_SHARED_TRANSFORM
 
 namespace mra {
-
 
 #if defined(MRA_CUDA_ENABLE_SHARED_TRANSFORM) && defined(MRA_ENABLE_CUDA) && defined(MRA_HAVE_CUBLASDX)
   template <Dimension NDIM, typename T>
@@ -62,12 +62,17 @@ namespace mra {
 #endif // defined(MRA_ENABLE_CUDA)
 
   template <Dimension NDIM, typename T>
-  SCOPE void transform(
+  SCOPE void transform_mTxmq(
     const TensorView<T, NDIM>& t,
     const TensorView<T, 2>& c,
     TensorView<T, NDIM>& result,
-    T* workspace) {
+    T* workspace)
+  {
+    /* try CUBLASDX */
+    if (transform_cublasdx(t, c, result)) return;
+    /* try shared memory implementation */
     if (transform_shared(t, c, result, workspace)) return;
+    /* fallback to mTxmq */
     const T* pc = c.data();
     T *t0=workspace, *t1=result.data();
     if (t.ndim() & 0x1) std::swap(t0,t1);

@@ -50,12 +50,14 @@ include(FindOrFetchTTG)
 find_package(Kokkos COMPONENTS separable_compilation)
 
 # look for cublasDx
-find_package(mathdx COMPONENTS cublasdx)
-if (TARGET mathdx::cublasdx)
-  message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
-else()
-  message(STATUS "cublasDx not found")
-endif()
+if (CMAKE_CUDA_COMPILER)
+  find_package(mathdx COMPONENTS cublasdx)
+  if (TARGET mathdx::cublasdx)
+    message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
+  else()
+    message(STATUS "cublasDx not found")
+  endif()
+endif(CMAKE_CUDA_COMPILER)
 
 
 add_subdirectory(src)
