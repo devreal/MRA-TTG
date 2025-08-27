@@ -8,9 +8,10 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test_derivative(std::size_t N, std::size_t K, bool is_ns, Dimension axis, T precision, int max_level, int d) {
+void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, int max_level, int d) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
+  bool is_ns = false;
   D[0].set_cube(-d,d);
   T g1 = 0;
   T g2 = 0;
@@ -102,7 +103,6 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   int N = opt.parse("-N", 1);
   int K = opt.parse("-K", 10);
-  bool is_ns = false;
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int axis    = opt.parse("-a", 0);
   int log_precision = opt.parse("-p", 4); // default: 1e-4
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
   mra::GLinitialize();
   allocator_init(argc, argv);
 
-  test_derivative<double, 3>(N, K, is_ns, axis, std::pow(10, -log_precision), max_level, domain);
+  test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level, domain);
 
   allocator_fini();
   ttg::finalize();
