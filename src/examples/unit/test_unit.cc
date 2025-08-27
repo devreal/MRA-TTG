@@ -8,7 +8,7 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test(std::size_t N, std::size_t K, int max_level) {
+void test(std::size_t N, std::size_t K, bool is_ns, int max_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
@@ -41,7 +41,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result);
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result);
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result);
   auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result);
   auto gaxpy = make_gaxpy(compress_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K);
   auto multiply = make_multiply(reconstruct_result, reconstruct_result, multiply_result, functiondata, db, N, K);
@@ -85,13 +85,14 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 10);
+  bool is_ns = false;
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int max_level = opt.parse("-l", -1);
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
-  test<double, 3>(N, K, max_level);
+  test<double, 3>(N, K, is_ns, max_level);
 
   ttg::finalize();
 }
