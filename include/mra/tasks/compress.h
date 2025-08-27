@@ -87,6 +87,7 @@ namespace mra
 
           // allocate the result
           result = mra::FunctionsCompressedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
+          if (is_ns) result.set_ns(true);
           auto& d = result.coeffs();
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
