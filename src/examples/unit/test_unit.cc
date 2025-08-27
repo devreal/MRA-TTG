@@ -8,10 +8,11 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test(std::size_t N, std::size_t K, bool is_ns, int max_level) {
+void test(std::size_t N, std::size_t K, int max_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
+  bool is_ns = false;
   T g1 = 0;
   T g2 = 0;
   Dimension axis = 0;
@@ -85,14 +86,13 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 10);
-  bool is_ns = false;
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int max_level = opt.parse("-l", -1);
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
-  test<double, 3>(N, K, is_ns, max_level);
+  test<double, 3>(N, K, max_level);
 
   ttg::finalize();
 }

@@ -9,9 +9,10 @@ using namespace mra;
 
 
 template<typename T, mra::Dimension NDIM>
-void test_pcr(std::size_t N, std::size_t K, bool is_ns, int max_level, int seed, int initial_level) {
+void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
+  bool is_ns = false;
   D[0].set_cube(-6.0,6.0);
 
   if (seed > 0) {
@@ -105,7 +106,6 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 10);
-  bool is_ns = false;
   int nrep = opt.parse("-n", 3);
   bool norand = opt.exists("-norand");
   int max_level = opt.parse("-l", -1);
