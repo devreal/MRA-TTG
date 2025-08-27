@@ -49,13 +49,11 @@ namespace mra {
       transform<NDIM>(s, hgT, d, workspace);
 
 
-      if (key.level() > 0) {
-        if (!is_ns) {
-          auto child_slice = get_child_slice<NDIM>(key, K, 0);
-          p = d(child_slice);
-          d(child_slice) = 0.0;
-        }
-    }
+      if (key.level() > 0 && !is_ns) {
+        auto child_slice = get_child_slice<NDIM>(key, K, 0);
+        p = d(child_slice);
+        d(child_slice) = 0.0;
+      }
       sumabssq(d, d_sumsq);
     }
 
