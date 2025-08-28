@@ -12,7 +12,6 @@ template<typename T, mra::Dimension NDIM>
 void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
-  bool is_ns = false;
   D[0].set_cube(-6.0,6.0);
 
   if (seed > 0) {
@@ -53,11 +52,11 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
+  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   // // R(C(P))
   auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   // C(R(C(P)))
-  auto compress_r = make_compress(N, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  auto compress_r = make_compress(N, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
 
   // C(R(C(P))) - C(P)
   auto gaxpy = make_gaxpy(compress_reconstruct_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy", pmap, dmap);
