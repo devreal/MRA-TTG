@@ -36,6 +36,21 @@ namespace mra {
 
   };
 
+  /// Nonstandard form of the operator
+  template <typename T, Dimension NDIM>
+  struct OperatorData {
+    std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM> ops;
+    T norm;
+    T fac;
+
+    OperatorData() : ops{}, norm(0.0), fac(1.0) {}
+
+    OperatorData(const OperatorData&) = default;
+
+    ~OperatorData() = default;
+
+  };
+
   template <typename T, Dimension NDIM>
   class Convolution {
 
