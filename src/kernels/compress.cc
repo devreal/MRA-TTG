@@ -9,6 +9,7 @@ namespace mra {
     const Key<3>& key,
     size_type N,
     size_type K,
+    bool is_ns,
     TensorView<double, 3+1>& p_view,
     TensorView<double, 3+1>& result_view,
     const TensorView<double, 2>& hgT_view,

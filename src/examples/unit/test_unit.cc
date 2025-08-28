@@ -12,6 +12,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
+  bool is_ns = false;
   T g1 = 0;
   T g2 = 0;
   Dimension axis = 0;
@@ -41,7 +42,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result);
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result);
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result);
   auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result);
   auto gaxpy = make_gaxpy(compress_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K);
   auto multiply = make_multiply(reconstruct_result, reconstruct_result, multiply_result, functiondata, db, N, K);

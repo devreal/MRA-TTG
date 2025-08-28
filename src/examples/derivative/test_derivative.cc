@@ -11,6 +11,7 @@ template<typename T, mra::Dimension NDIM>
 void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, int max_level, int d) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
+  bool is_ns = false;
   D[0].set_cube(-d,d);
   T g1 = 0;
   T g2 = 0;
@@ -52,8 +53,8 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto project_d = make_project(db, gauss_deriv_buffer, N, K, max_level, functiondata, precision, project_control, project_d_result);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp");
-  auto compress_d = make_compress(N, K, functiondata, project_d_result, compress_d_result, "compress-Dcp");
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp");
+  auto compress_d = make_compress(N, K, is_ns, functiondata, project_d_result, compress_d_result, "compress-Dcp");
   // // R(C(P))
   auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
   // D(R(C(P)))
@@ -61,7 +62,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
                                     FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
 
   // C(D(R(C(P))))
-  auto compress_r = make_compress(N, K, functiondata, derivative_result, compress_derivative_result, "compress-deriv-crcp");
+  auto compress_r = make_compress(N, K, is_ns, functiondata, derivative_result, compress_derivative_result, "compress-deriv-crcp");
 
   // | C(D(R(C(P)))) - factor * C(P) |
   auto gaxpy_r = make_gaxpy(compress_derivative_result, compress_d_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy");
