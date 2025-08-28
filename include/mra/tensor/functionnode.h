@@ -324,7 +324,6 @@ namespace mra {
 
       private:
         std::vector<std::array<bool, Key<NDIM>::num_children()>> m_is_child_leafs; //< True if that child is leaf on tree
-        bool m_ns = false; // true if this node is part of a non-standard tree
 
       public:
         /* constructs an empty node without key information,
@@ -388,14 +387,6 @@ namespace mra {
               c = arg;
             }
           }
-        }
-
-        void set_ns(bool arg = true) {
-          m_ns = arg;
-        }
-
-        bool is_ns() const {
-          return m_ns;
         }
 
         bool is_all_child_leaf() const {
