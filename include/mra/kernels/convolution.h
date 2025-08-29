@@ -147,7 +147,7 @@ namespace mra{
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-
+    CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), f.dim(0), thread_dims, smem_size, stream,
       K, normr, norms, f, result, transr, transs, tmp);
   }
