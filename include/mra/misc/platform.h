@@ -38,7 +38,7 @@ namespace mra::detail {
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #elif defined(__HIP__)
-#define SCOPE __device__ __host__
+#define SCOPE __device__ __host__ inline
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
 #define SHARED __shared__
