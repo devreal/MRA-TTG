@@ -58,15 +58,53 @@ namespace mra{
     DEVSCOPE void convolution_kernel_impl(
       size_type K,
       const mra::OperatorData<T, NDIM>& op,
+      const T normr,
+      const T norms,
       const TensorView<T, NDIM>& f,
+      const std::array<TensorView<T, 2>, NDIM>& transr,
+      const std::array<TensorView<T, 2>, NDIM>& transs,
+      TensorView<T, NDIM>& resultf,
+      TensorView<T, NDIM>& resultc,
+      TensorView<T, NDIM>& tmpresult,
       TensorView<T, NDIM>& result,  // size K, stores the sum
-      T* tmp)
+      TensorView<T, NDIM>& work1,
+      TensorView<T, NDIM>& work2)
     {
       std::array<Slice,NDIM> s0 = {Slice(0, K), Slice(0, K), Slice(0, K)}
       T normthresh = 1e-20; // Can potentially be a parameter
 
-      SHARED std::array<TensorView<T, 2>, NDIM> trans;
-      SHARED TensorView<T, NDIM> resultf, resultc, work1, work2, f0;
+      if (normr > normthresh) {
+        conv_transform<T, NDIM>(2*K, ops.fac, transr, f, resultf, work1, work2);
+      }
+
+      SHARED TensorView<T, NDIM> f0;
+      f0(s0) = f.current_view()(s0);
+      SYNCTHREADS();
+
+      if (norms > normthresh) {
+        conv_transform<T, NDIM>(K, -ops.fac, transs, f0, resultc, work1, work2);
+      }
+
+      auto tmpresult_view = tmpresult.current_view();
+      tmpresult_view(s0) = resultf.current_view()(s0);
+      gaxpy_kernel_impl<T, NDIM>(
+        tmpresult, resultc, result, 1.0, 1.0);
+    }
+
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void convolution_kernel(
+      size_type K,
+      const T normr,
+      const T norms,
+      const TensorView<T, NDIM+1> f_view,
+      TensorView<T, NDIM+1> result_view,
+      const std::array<TensorView<T, 2>, NDIM> transr,
+      const std::array<TensorView<T, 2>, NDIM> transs,
+      T* tmp)
+    {
+      SHARED TensorView<T, NDIM> resultf, resultc, work1, work2;
+      SHARED TensorView<T, NDIM> f, result;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp[blockId*convolution_tmp_size<NDIM>(K)];
@@ -81,54 +119,52 @@ namespace mra{
       work1     = TensorView<T, NDIM>(&block_tmp_ptr[ TWOK2NDIM + 3*K2NDIM], K);
       work2     = TensorView<T, NDIM>(&block_tmp_ptr[ TWOK2NDIM + 4*K2NDIM], K);
 
-      T normr = 1.0;
-      for (size_type i = 0; i < NDIM; ++i) normr *= op->ops[i]->normR;
-
-      if (normr > normthresh) {
-        // assemble trans and call conv_transform
-        for (size_type d = 0; d < NDIM; ++d){
-          trans[d].current_view() = op->ops[d]->R;
+      for (size_type fnid = blockId; fnid < f_view.dim(0); fnid += gridDim.x){
+        if (is_team_lead()) {
+          f      = f_view(fnid);
+          result = result_view(fnid);
         }
       }
-      conv_transform<T, NDIM>(2*K, ops.fac, trans, f, resultf, work1, work2);
 
-      T norms = 1.0;
-      auto f0_view= f0.current_view();
-      f0(s0) = f.current_view()(s0);
-      for (size_type i = 0; i < NDIM; ++i) norms *= op->ops[i]->normS;
-      if (norms > normthresh) {
-        // assemble trans and call conv_transform
-        for (size_type d = 0; d < NDIM; ++d){
-          trans[d].current_view() = op->ops[d]->S;
-        }
-      }
-      conv_transform<T, NDIM>(K, -ops.fac, trans, f0, resultc, work1, work2);;
+      SYNCTHREADS();
 
-      auto tmpresult_view = tmpresult.current_view();
-      tmpresult_view(s0) = resultf.current_view()(s0);
-      gaxpy_kernel_impl<T, NDIM>(
-        tmpresult, resultc, result, 1.0, 1.0);
-    }
-
-    template <typename T, Dimension NDIM>
-    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
-    GLOBALSCOPE void convolution_kernel()
-    {
-      // Call the implementation function
-      convolution_kernel_impl<T, NDIM>();
+      convolution_kernel_impl<T, NDIM>(K, normr, norms, f, transr, transs,
+        resultf, resultc, tmpresult, result, work1, work2);
     }
   } // namespace detail
 
   template <typename T, Dimension NDIM>
-  void submit_convolution_kernel()
+  void submit_convolution_kernel(
+    size_type K,
+    const T normr,
+    const T norms,
+    const TensorView<T, NDIM+1>& f,
+    TensorView<T, NDIM+1>& result,
+    const std::array<TensorView<T, 2>, NDIM>& transr,
+    const std::array<TensorView<T, 2>, NDIM>& transs,
+    T* tmp
+    ttg::device::Stream stream)
   {
+    Dim3 thread_dims = max_thread_dims(2*K);
+    auto smem_size = mTxmq_shmem_size<T>(2*K);
 
+    CALL_KERNEL((detail::convolution_kernel<T, NDIM>), f.dim(0), thread_dims, smem_size, stream,
+      K, normr, norms, f, result, transr, transs, tmp);
   }
 
   /* explicit instantiation */
   extern template
-  void submit_convolution_kernel<double, 3>();
+  void submit_convolution_kernel<double, 3>(
+    size_type K,
+    const double normr,
+    const double norms,
+    const TensorView<double, 3+1>& f,
+    TensorView<double, 3+1>& result,
+    const std::array<TensorView<double, 2>, 3>& transr,
+    const std::array<TensorView<double, 2>, 3>& transs,
+    T* tmp
+    ttg::device::Stream stream);
 
-}
+} // namespace mra
 
 #endif // MRA_KERNELS_CONVOLUTION_H
