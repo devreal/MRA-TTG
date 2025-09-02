@@ -223,7 +223,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
   D[0].set_cube(-6,6);
   T g1 = 0;
   T g2 = 0;
-
+  bool is_ns = false;
 
   std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
 
@@ -257,7 +257,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto extract_project = make_extract(project_result, pmap);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress");
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
   // // R(C(P))
   auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
   // D(R(C(P)))
