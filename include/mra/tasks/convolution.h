@@ -24,12 +24,12 @@ namespace mra{
   auto make_convolution(size_type N, size_type K,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> result,
-                        const mra::OperatorData<T, NDIM>& op,
+                        const mra::ConvolutionOperator<T, NDIM>& op,
                         const char* name = "convolution",
                         ProcMap procmap = {},
                         DeviceMap devicemap = {}) {
 
-    auto conv_fn = [&, N, K, op, name](
+    auto conv_fn = [&, N, K, name](
                     const mra::Key<NDIM>& key,
                     const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
@@ -49,18 +49,22 @@ namespace mra{
       result.set_ns(is_ns);
       auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
 
-      T normr = 1.0, norms = 1.0;
-      for (size_type i = 0; i < NDIM; ++i) normr *= op->ops[i]->normR;
-      for (size_type i = 0; i < NDIM; ++i) normr *= op->ops[i]->normR;
+      std::shared_ptr<const mra::OperatorData<T, NDIM>> op_data = op.get_op(key);
+
+      T normr = 1.0;
+      T norms = 1.0;
+      T fac = op_data->fac;
+      for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
+      for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
 
       std::array<TensorView<T, 2>, NDIM> transr;
       for (size_type d = 0; d < NDIM; ++d){
-        transr[d].current_view() = op->ops[d]->R;
+        transr[d] = op_data->ops[d]->R.current_view();
       }
       std::array<TensorView<T, 2>, NDIM> transs;
 
       for (size_type d = 0; d < NDIM; ++d){
-        transs[d].current_view() = op->ops[d]->S;
+        transs[d] = op_data->ops[d]->S.current_view();
       }
 
 #ifndef MRA_ENABLE_HOST
@@ -69,7 +73,9 @@ namespace mra{
 #endif // MRA_ENABLE_HOST
 
       auto result_view = result.coeffs().current_view();
-      submit_convolution_kernel<T, NDIM>(K, N, normr, norms, in_node.coeffs.current_view(), result_view, transr, transs,
+      auto in_node_view = in_node.coeffs().current_view();
+
+      submit_convolution_kernel(K, N, normr, norms, fac, in_node_view, result_view, transr, transs,
         tmp.current_device_ptr(), ttg::device::current_stream());
 
 #ifndef MRA_ENABLE_HOST
