@@ -29,8 +29,9 @@ namespace mra{
                         ProcMap procmap = {},
                         DeviceMap devicemap = {}) {
 
-    auto conv_fn = [&, N, K, op, name](const mra::Key<NDIM>& key,
-                          const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
+    auto conv_fn = [&, N, K, op, name](
+                    const mra::Key<NDIM>& key,
+                    const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
@@ -44,7 +45,7 @@ namespace mra{
 #endif
 
       bool is_ns = true;
-      mra::FunctionsCompresssedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
+      mra::FunctionsCompressedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
       result.set_ns(is_ns);
       auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
 
@@ -68,7 +69,7 @@ namespace mra{
 #endif // MRA_ENABLE_HOST
 
       auto result_view = result.coeffs().current_view();
-      submit_convolution_kernel<T, NDIM>(K, normr, norms, in_node.coeffs.current_view(), result_view, transr, transs,
+      submit_convolution_kernel<T, NDIM>(K, N, normr, norms, in_node.coeffs.current_view(), result_view, transr, transs,
         tmp.current_device_ptr(), ttg::device::current_stream());
 
 #ifndef MRA_ENABLE_HOST
@@ -87,3 +88,7 @@ namespace mra{
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
     return tt;
   }
+
+} // namespace mra
+
+#endif // MRA_TASKS_CONVOLUTION_H
