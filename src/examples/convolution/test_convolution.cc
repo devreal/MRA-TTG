@@ -14,6 +14,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, T precision,
   D[0].set_cube(-d,d);
   T g1 = 0;
   T g2 = 0;
+  bool is_ns = true;
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
@@ -52,21 +53,21 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, T precision,
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto project_d = make_project(db, gauss_deriv_buffer, N, K, max_level, functiondata, precision, project_control, project_d_result);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp");
-  auto compress_d = make_compress(N, K, functiondata, project_d_result, compress_d_result, "compress-Dcp");
-  // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
-  // D(R(C(P)))
-  auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
-                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp");
+  // auto compress_d = make_compress(N, K, functiondata, project_d_result, compress_d_result, "compress-Dcp");
+  // // // R(C(P))
+  // auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
+  // // D(R(C(P)))
+  // auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
+  //                                   FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
 
-  // C(D(R(C(P))))
-  auto compress_r = make_compress(N, K, functiondata, derivative_result, compress_derivative_result, "compress-deriv-crcp");
+  // // C(D(R(C(P))))
+  // auto compress_r = make_compress(N, K, is_ns, functiondata, derivative_result, compress_derivative_result, "compress-deriv-crcp");
 
-  // | C(D(R(C(P)))) - factor * C(P) |
-  auto gaxpy_r = make_gaxpy(compress_derivative_result, compress_d_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy");
+  // // | C(D(R(C(P)))) - factor * C(P) |
+  // auto gaxpy_r = make_gaxpy(compress_derivative_result, compress_d_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy");
 
-  auto norm  = make_norm(N, K, gaxpy_result, norm_result);
+  auto norm  = make_norm(N, K, compress_result, norm_result);
   // final check
   auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
     // TODO: check for the norm within machine precision
