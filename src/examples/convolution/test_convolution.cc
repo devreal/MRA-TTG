@@ -19,16 +19,13 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, T precision,
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
 
-  ttg::Edge<mra::Key<NDIM>, void> project_control, project_d_control;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_derivative_result, gaxpy_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_d_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> derivative_result, project_d_result;
+  ttg::Edge<mra::Key<NDIM>, void> project_control;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_convolution_result;
   ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
 
   // define N Gaussians
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-  auto gaussians_deriv = std::make_unique<mra::GaussianDerivative<T, NDIM>[]>(N);
   T expnt = 1000.0;
   T factor = expnt;
 
@@ -41,33 +38,22 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, T precision,
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     std::cout << "GaussianDerivative " << i << " expnt " << expnt << std::endl;
     gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r);
-    gaussians_deriv[i] = mra::GaussianDerivative<T, NDIM>(D[0], expnt, r);
+    // gaussians_deriv[i] = mra::GaussianDerivative<T, NDIM>(D[0], expnt, r);
   }
+  T coeff = 10.0; // coefficient for the Gaussian
+  mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata);
+  mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
 
   // put it into a buffer
   auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
-  auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
+  // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
-  // auto start_d = make_start(project_d_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto project_d = make_project(db, gauss_deriv_buffer, N, K, max_level, functiondata, precision, project_control, project_d_result);
-  // C(P)
-  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp");
-  // auto compress_d = make_compress(N, K, functiondata, project_d_result, compress_d_result, "compress-Dcp");
-  // // // R(C(P))
-  // auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
-  // // D(R(C(P)))
-  // auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
-  //                                   FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
+  auto convolve = make_convolution(N, K, compress_result, compress_convolution_result, op, "convolution");
 
-  // // C(D(R(C(P))))
-  // auto compress_r = make_compress(N, K, is_ns, functiondata, derivative_result, compress_derivative_result, "compress-deriv-crcp");
-
-  // // | C(D(R(C(P)))) - factor * C(P) |
-  // auto gaxpy_r = make_gaxpy(compress_derivative_result, compress_d_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy");
-
-  auto norm  = make_norm(N, K, compress_result, norm_result);
+  auto norm  = make_norm(N, K, compress_convolution_result, norm_result);
   // final check
   auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
     // TODO: check for the norm within machine precision
