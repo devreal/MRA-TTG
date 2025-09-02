@@ -57,7 +57,6 @@ namespace mra{
     template <typename T, Dimension NDIM>
     DEVSCOPE void convolution_kernel_impl(
       size_type K,
-      const mra::OperatorData<T, NDIM>& op,
       const T normr,
       const T norms,
       const TensorView<T, NDIM>& f,
