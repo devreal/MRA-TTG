@@ -49,9 +49,9 @@ namespace mra {
       const T* quad_w;                                 // quadrature weights
       Tensor<T, 3> c;                                  // autocorrelation coefficients
       FunctionData<T, NDIM>& functiondata;             // function data
-      std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
-      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
-      std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
+      mutable std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
+      mutable std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
+      mutable std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
       mutable std::mutex cachemutex;                   // mutex for thread safety
 
       void autoc(){
@@ -67,7 +67,7 @@ namespace mra {
       }
 
       // projection of a Gaussian onto double order polynomials
-      const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) {
+      const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         auto it = rnlpcache.find(key);
         if (it != rnlpcache.end()) {
@@ -127,7 +127,7 @@ namespace mra {
       Convolution& operator=(Convolution&&) = default;
       Convolution& operator=(const Convolution&) = delete;
 
-      const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) {
+      const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = rnlijcache.find(key);
@@ -167,7 +167,7 @@ namespace mra {
         return r;
       }
 
-      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) {
+      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = nscache.find(key);
@@ -244,7 +244,7 @@ namespace mra {
     size_type K;
     // size_type seprank;
     Convolution<T, NDIM>& conv;                             // convolution object
-    std::map<Key<NDIM>, std::shared_ptr<op_type>> opdata;   // map for storing operator data
+    mutable std::map<Key<NDIM>, std::shared_ptr<op_type>> opdata;   // map for storing operator data
     mutable std::mutex cachemutex;                          // mutex for thread safety
 
     T norm_ns(Level n, std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM>& ns) const {
@@ -282,7 +282,7 @@ namespace mra {
     ConvolutionOperator& operator=(ConvolutionOperator&&) = default;
     ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
 
-    std::shared_ptr<const OperatorData<T, NDIM>> get_op(const Key<NDIM>& key) {
+    std::shared_ptr<const OperatorData<T, NDIM>> get_op(const Key<NDIM>& key) const {
       cachemutex.lock();
       auto it = opdata.find(key);
       cachemutex.unlock();
