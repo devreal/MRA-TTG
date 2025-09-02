@@ -23,6 +23,10 @@ add_executable(mra-derivative-host-parsec
                examples/derivative/test_derivative.cc)
 target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)
 
+add_executable(mra-convolution-host-parsec
+               examples/convolution/test_convolution.cc)
+target_link_libraries(mra-convolution-host-parsec PUBLIC libmra-host-parsec)
+
 add_executable(mra-unit-host-parsec
                examples/unit/test_unit.cc)
 target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
@@ -83,6 +87,9 @@ if (HAVE_CUDA)
   add_executable(mra-derivative-device-cuda-parsec examples/derivative/test_derivative.cu)
   target_link_libraries(mra-derivative-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
+  add_executable(mra-convolution-device-cuda-parsec examples/convolution/test_convolution.cu)
+  target_link_libraries(mra-convolution-device-cuda-parsec PUBLIC libmra-cuda-parsec)
+
   add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
@@ -121,6 +128,9 @@ if (HAVE_HIP)
 
   add_executable(mra-derivative-device-hip-parsec examples/derivative/test_derivative.hip)
   target_link_libraries(mra-derivative-device-hip-parsec PUBLIC libmra-hip-parsec)
+
+  add_executable(mra-convolution-device-hip-parsec examples/convolution/test_convolution.hip)
+  target_link_libraries(mra-convolution-device-hip-parsec PUBLIC libmra-hip-parsec)
 
   add_executable(mra-unit-device-hip-parsec examples/unit/test_unit.hip)
   target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)
