@@ -30,13 +30,13 @@ jobs:
 
       - name: Configure CUDA
         if: ${{ matrix.device == 'CUDA'}}
-        run: |"
+        run: |
           echo " -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON" >> $BUILD_CONFIG \
           echo "ubuntu_nvhpc.sif" >> $SIF_PATH
 
       - name: Configure HIP
         if: ${{ matrix.device == 'HIP'}}
-        run: |"
+        run: |
           echo " -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908" >> $BUILD_CONFIG \
           echo "ubuntu_hip.sif" >> $SIF_PATH
 
