@@ -10,6 +10,10 @@
 #include "mra/tensor/tensorview.h"
 #include "mra/kernels/fcube.h"
 #include "mra/kernels/transform.h"
+#include "mra/tensor/functionnode.h"
+#include "mra/misc/functiondata.h"
+#include "mra/tensor/functionnorm.h"
+#include "mra/kernels/kernel_state.h"
 
 namespace mra {
 
@@ -147,6 +151,137 @@ namespace mra {
     }
   } // namespace detail
 
+
+  template<typename Fn, typename T, mra::Dimension NDIM>
+  class FcoeffsKernel {
+
+    using key_type = typename mra::Key<NDIM>;
+    using node_type = typename mra::FunctionsReconstructedNode<T, NDIM>;
+
+    const ttg::Buffer<mra::Domain<NDIM>>& m_domain;
+    const ttg::Buffer<const T>& m_gl;
+    const ttg::Buffer<Fn>& m_fns;
+    const mra::Key<NDIM> m_key;
+    const mra::FunctionData<T, NDIM>& m_fndata;
+    const T m_thresh;
+    node_type& m_result; // empty for fast-paths, no need to zero out
+    ttg::Buffer<bool, DeviceAllocator<bool>> m_is_leafs;
+    ttg::Buffer<T, DeviceAllocator<T>> m_scratch;
+    FunctionNorms<T, NDIM> m_norms;
+    detail::KernelState m_state = detail::KernelState::Initialized;
+
+  public:
+
+    FcoeffsKernel(const ttg::Buffer<mra::Domain<NDIM>>& domain,
+                  const ttg::Buffer<const T>& gl,
+                  const ttg::Buffer<Fn>& fns,
+                  const mra::Key<NDIM>& key,
+                  const mra::FunctionData<T, NDIM>& fndata,
+                  const T thresh,
+                  node_type& result,
+                  std::string name = "fcoeffs")
+    : m_domain(domain)
+    , m_gl(gl)
+    , m_fns(fns)
+    , m_key(key)
+    , m_fndata(fndata)
+    , m_thresh(thresh)
+    , m_result(result)
+    , m_is_leafs(m_result.count())
+    , m_scratch(fcoeffs_tmp_size<NDIM>(m_result.coeffs().dim(m_result.ndim()-1)), TempScope)
+    , m_norms(name, result)
+    { }
+
+
+    /**
+     * Returns the buffers to use to select a device, using ttg::device::select().
+     */
+    auto select() {
+      assert(m_state == detail::KernelState::Initialized);
+      const auto& phibar = m_fndata.get_phibar();
+      const auto& hgT = m_fndata.get_hgT();
+      m_state = detail::KernelState::Select;
+#ifndef MRA_ENABLE_HOST
+      return ttg::device::select(m_domain, m_gl, m_fb, m_result.coeffs().buffer(), phibar.buffer(),
+                                 hgT.buffer(), m_scratch, m_is_leafs, m_norms.buffer());
+#else
+      return;
+#endif
+    }
+
+    /**
+     * Submit the kernel. select() must have been called before.
+     * Returns the buffers that should be waited on, just like wait();
+     */
+    auto submit() {
+      assert(m_state == detail::KernelState::Select);
+      m_state = detail::KernelState::Submit;
+
+      /**
+       * Launch the kernel with KxKxK threads in each of the N blocks.
+       * Computation on functions is embarassingly parallel and no
+       * synchronization is required.
+       */
+      size_type K = m_result.coeffs().dim(m_result.ndim()-1);
+      size_type N = m_result.count();
+      Dim3 thread_dims = max_thread_dims(K);
+
+      const auto& phibar = m_fndata.get_phibar();
+      const auto& hgT = m_fndata.get_hgT();
+      auto smem_size = mTxmq_shmem_size<T>(2*K);
+      CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
+      /* launch one block per child */
+      CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, smem_size, ttg::device::current_stream(),
+        (*m_domain.current_device_ptr(),
+         m_gl.current_device_ptr(),
+         m_fns.current_device_ptr(),
+         m_key, N, K,
+         m_scratch.current_device_ptr(),
+         phibar.current_view(), hgT.current_view(), m_result.coeffs().current_view(),
+         m_is_leafs.current_device_ptr(), m_thresh));
+      checkSubmit();
+
+      m_norms.compute();
+
+#ifndef MRA_ENABLE_HOST
+      return ttg::device::wait(m_is_leafs, m_norms.buffer());
+#else
+      return;
+#endif
+    }
+
+    /**
+     * Returns the buffers that should be transferred out of the device.
+     * submit() must have been called before.
+     */
+    auto wait() {
+      assert(m_state == detail::KernelState::Submit);
+      m_state = detail::KernelState::Wait;
+#ifndef MRA_ENABLE_HOST
+      return ttg::device::wait(m_is_leafs, m_norms.buffer());
+#else
+      return;
+#endif
+    }
+
+    /**
+     * The epilogue, handling cleanup and norm checks (if enabled).
+     * submit() or wait() must have been called before.
+     */
+    void epilogue() {
+      assert(m_state == detail::KernelState::Wait || m_state == detail::KernelState::Submit);
+      m_norms.verify(); // extracts the norms and stores them in the node
+      m_state = detail::KernelState::Epilogue;
+    }
+
+    bool is_leaf(size_type idx) const {
+      return m_is_leafs.host_ptr()[idx];
+    }
+
+  }; // FcoeffsKernel
+
+
+#if 0
   /**
    * Fcoeffs used in project
    */
@@ -182,6 +317,7 @@ namespace mra {
        is_leaf_scratch, thresh));
     checkSubmit();
   }
+#endif // 0
 
 } // namespace mra
 

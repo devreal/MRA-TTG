@@ -4,6 +4,7 @@
 #include "mra/misc/key.h"
 #include "mra/ops/functions.h"
 #include "mra/tensor/tensor.h"
+#include "mra/misc/dims.h"
 
 #include <ttg/serialization/std/vector.h>
 #include <ttg/serialization/std/array.h>

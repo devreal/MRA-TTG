@@ -84,51 +84,24 @@ namespace mra{
            */
           // allocate tensor
           result = node_type(key, N, K, ttg::scope::Allocate);
-          tensor_type& coeffs = result.coeffs();
 
-          // compute the norm of functions
-          auto result_norms = FunctionNorms(name, result);
-
-          /* global function data */
-          // TODO: need to make our own FunctionData with dynamic K
-          const auto& phibar = functiondata.get_phibar();
-          const auto& hgT = functiondata.get_hgT();
-
-          /* temporaries */
-          const std::size_t tmp_size = fcoeffs_tmp_size<NDIM>(K)*N;
-          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
-          auto is_leafs = ttg::Buffer<bool, DeviceAllocator<bool>>(N, TempScope);
+          auto kernel = FcoeffsKernel(db, gl, fb, key, functiondata, thresh,
+                                      result, name);
 
           /* TODO: cannot do this from a function, had to move it into the main task */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::select(db, gl, fb, coeffs.buffer(), phibar.buffer(),
-                                      hgT.buffer(), tmp_scratch, is_leafs, result_norms.buffer());
-#endif
-          auto coeffs_view = coeffs.current_view();
-          auto phibar_view = phibar.current_view();
-          auto hgT_view    = hgT.current_view();
-          T* tmp_device = tmp_scratch.current_device_ptr();
-          bool *is_leafs_device = is_leafs.current_device_ptr();
-          auto *f_ptr   = fb.current_device_ptr();
-          auto& domain = *db.current_device_ptr();
-          auto  gldata = gl.current_device_ptr();
-
-          /* submit the kernel */
-          submit_fcoeffs_kernel(domain, gldata, f_ptr, key, N, K, tmp_device,
-                                phibar_view, hgT_view, coeffs_view,
-                                is_leafs_device, thresh, ttg::device::current_stream());
-
-          result_norms.compute();
-
-          /* wait and get is_leaf back */
-#ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(is_leafs, result_norms.buffer());
+          /* select device */
+          co_await kernel.select();
+          /* submit kernel and wait for completion */
+          co_await kernel.submit();
+#else
+          kernel.submit();
 #endif
 
-          result_norms.verify(); // extracts the norms and stores them in the node
-          const bool* is_leafs_arr = is_leafs.host_ptr();
+          kernel.epilogue();
+
           for (std::size_t i = 0; i < N; ++i) {
-            result.is_leaf(i) = is_leafs_arr[i];
+            result.is_leaf(i) = kernel.is_leaf(i);
           }
           /**
            * END FCOEFFS HERE
