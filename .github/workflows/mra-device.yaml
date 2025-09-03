@@ -55,5 +55,5 @@ jobs:
             /opt/containers/ubuntu_hip.sif \
             bash -c "
             mkdir build && cd build
-            cmake ../ $BUILD_CONFIG -DCMAKE_HIP_ARCHITECTURES=gfx908
+            cmake ../ $BUILD_CONFIG
             cmake --build . -j ${NTHREADS}"
