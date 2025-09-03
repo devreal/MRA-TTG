@@ -22,6 +22,8 @@ jobs:
         -DBUILD_SHARED_LIBS=OFF
         -DCMAKE_CXX_STANDARD=20
 
+      SIF_PATH: /opt/containers/
+
     steps:
       - name: Checkout repository to host
         uses: actions/checkout@v4
@@ -29,30 +31,21 @@ jobs:
       - name: Configure CUDA
         if: ${{ matrix.device == 'CUDA'}}
         run: |"
-          echo " -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON" >> $BUILD_CONFIG
+          echo " -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON" >> $BUILD_CONFIG \
+          echo "ubuntu_nvhpc.sif" >> $SIF_PATH
 
       - name: Configure HIP
         if: ${{ matrix.device == 'HIP'}}
         run: |"
-          echo " -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908" >> $BUILD_CONFIG
+          echo " -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908" >> $BUILD_CONFIG \
+          echo "ubuntu_hip.sif" >> $SIF_PATH
 
-      - name: Build CUDA
+      - name: Build
         if: ${{ matrix.device == 'CUDA'}}
         run: |
           apptainer exec \
             --bind $GITHUB_WORKSPACE:/workspace \
-            /opt/containers/ubuntu_nvhpc.sif \
-            bash -c "
-            mkdir build && cd build
-            cmake ../ $BUILD_CONFIG
-            cmake --build . -j ${NTHREADS}"
-
-      - name: Build HIP
-        if: ${{ matrix.device == 'HIP'}}
-        run: |
-          apptainer exec \
-            --bind $GITHUB_WORKSPACE:/workspace \
-            /opt/containers/ubuntu_hip.sif \
+            $SIF_PATH \
             bash -c "
             mkdir build && cd build
             cmake ../ $BUILD_CONFIG
