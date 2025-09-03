@@ -21,8 +21,7 @@ jobs:
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DBUILD_SHARED_LIBS=OFF
         -DCMAKE_CXX_STANDARD=20
-        -DENABLE_${{matrix.device}}=ON
-        -DTTG_ENABLE_${{matrix.device}}=ON
+
     steps:
       - name: Checkout repository to host
         uses: actions/checkout@v4
