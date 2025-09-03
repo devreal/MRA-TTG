@@ -75,7 +75,7 @@ namespace mra{
       auto result_view = result.coeffs().current_view();
       auto in_node_view = in_node.coeffs().current_view();
 
-      submit_convolution_kernel(K, N, normr, norms, fac, in_node_view, result_view, transr, transs,
+      submit_convolution_kernel<T, NDIM>(K, N, normr, norms, fac, in_node_view, result_view, transr, transs,
         tmp.current_device_ptr(), ttg::device::current_stream());
 
 #ifndef MRA_ENABLE_HOST

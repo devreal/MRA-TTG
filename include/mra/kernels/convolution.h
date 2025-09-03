@@ -148,7 +148,7 @@ namespace mra{
     const TensorView<T, NDIM+1>& f,
     TensorView<T, NDIM+1>& result,
     const std::array<TensorView<T, 2>, (size_t)NDIM>& transr,
-    const std::array<TensorView<T, 2>, 3>& transs,
+    const std::array<TensorView<T, 2>, (size_t)NDIM>& transs,
     T* tmp,
     ttg::device::Stream stream)
   {
