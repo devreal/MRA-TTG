@@ -41,7 +41,6 @@ jobs:
           echo "ubuntu_hip.sif" >> $SIF_PATH
 
       - name: Build
-        if: ${{ matrix.device == 'CUDA'}}
         run: |
           apptainer exec \
             --bind $GITHUB_WORKSPACE:/workspace \
