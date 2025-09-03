@@ -1,6 +1,7 @@
 #ifndef MRA_KERNELS_CONVOLUTION_H
 #define MRA_KERNELS_CONVOLUTION_H
 
+#include <algorithm>
 #include "mra/ops/mxm.h"
 #include "mra/kernels.h"
 #include "mra/kernels/gaxpy.h"
@@ -37,19 +38,22 @@ namespace mra{
     for (size_type i = 0; i < NDIM; ++i) size *= dimk;
     size_type dimi = size/dimk;
 
-    mTxmq(dimi, rank, dimk, work1.data(), f.data(), trans[0].data(), dimk);
+    T* work1ptr = work1.data();
+    T* work2ptr = work2.data();
+
+    mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0].data());
 
     size = rank * size / dimk;
     dimi = size / dimk;
 
     for (size_type d = 1; d < NDIM; ++d) {
-      mTxmq(dimi, rank, dimk, work2.data(), work1.data(), trans[d].data(), dimk);
+      mTxmq(dimi, rank, dimk, work2ptr, work1ptr, trans[d].data());
       size = rank * size / dimk;
       dimi = size / dimk;
-      std::swap(work1.data(), work2.data());
+      std::swap(work1ptr, work2ptr);
     }
 
-    axpy_kernel_impl<T, NDIM>(work1, result, mufac);
+    detail::axpy_kernel_impl<T, NDIM>(work1, result, mufac);
   }
 
   namespace detail {
