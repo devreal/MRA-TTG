@@ -62,15 +62,7 @@ namespace mra {
         /// Less-than comparison
         SCOPE bool operator<(const Key<NDIM>& other) const {
           auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return n < other.n || ((l[Is] < other.l[Is]) || ...);
-          };
-          return compare(std::make_index_sequence<NDIM>{});
-        }
-
-        /// Greater-than comparison
-        SCOPE bool operator>(const Key<NDIM>& other) const {
-          auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return n > other.n || ((l[Is] > other.l[Is]) || ...);
+            return std::tie(n, l[Is]...) < std::tie(other.n, other.l[Is]...);
           };
           return compare(std::make_index_sequence<NDIM>{});
         }
