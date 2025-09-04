@@ -57,15 +57,8 @@ namespace mra{
       for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
       for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
 
-      std::array<TensorView<T, 2>, NDIM> transr;
-      for (size_type d = 0; d < NDIM; ++d){
-        transr[d] = op_data->ops[d]->R.current_view();
-      }
-      std::array<TensorView<T, 2>, NDIM> transs;
-
-      for (size_type d = 0; d < NDIM; ++d){
-        transs[d] = op_data->ops[d]->S.current_view();
-      }
+      auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
+      auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
 
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), result.coeffs().buffer(), tmp);
