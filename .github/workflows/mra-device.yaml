@@ -26,7 +26,7 @@ jobs:
       - name: Checkout repository to host
         uses: actions/checkout@v4
 
-      - name: Configure
+      - name: Configure Build Environment
         run: |
           if [ "${{ matrix.device }}" = "CUDA" ]; then
             echo "BUILD_CONFIG=$BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON" >> $GITHUB_ENV
