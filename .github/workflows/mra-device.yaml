@@ -36,7 +36,7 @@ jobs:
             echo "CONTAINER=/opt/containers/ubuntu_hip.sif" >> $GITHUB_ENV
           fi
 
-     - name: Build
+      - name: Build
         run: |
           apptainer exec \
             --bind $GITHUB_WORKSPACE:/workspace \
