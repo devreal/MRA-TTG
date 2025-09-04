@@ -20,7 +20,7 @@ add_executable(mra-pcr-host-parsec
 target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
 
 add_executable(mra-derivative-host-parsec
-               examples/derivative/test_derivative.cc)
+               examples/derivative/test_derivative.cc kernels/derivative.cc)
 target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)
 
 add_executable(mra-unit-host-parsec
@@ -29,7 +29,7 @@ target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
 
 # Holding this off until BLAS in MADNESS works for our use case
 add_executable(mra-mad-deriv-host-parsec
-               tests/mad_derivative_test.cc)
+               tests/mad_derivative_test.cc kernels/derivative.cc)
 target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
 
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
@@ -80,14 +80,14 @@ if (HAVE_CUDA)
   add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
   target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
-  add_executable(mra-derivative-device-cuda-parsec examples/derivative/test_derivative.cu)
+  add_executable(mra-derivative-device-cuda-parsec examples/derivative/test_derivative.cu kernels/derivative.cu)
   target_link_libraries(mra-derivative-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
   add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
   add_executable(mra-mad-deriv-device-cuda-parsec
-                 tests/mad_derivative_test.cu)
+                 tests/mad_derivative_test.cu kernels/derivative.cu)
   target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra libmra-cuda-parsec)
 
   if (TARGET Kokkos::kokkos)
@@ -119,14 +119,14 @@ if (HAVE_HIP)
   add_executable(mra-pcr-device-hip-parsec examples/pcr/test_pcr.hip)
   target_link_libraries(mra-pcr-device-hip-parsec PUBLIC libmra-hip-parsec)
 
-  add_executable(mra-derivative-device-hip-parsec examples/derivative/test_derivative.hip)
+  add_executable(mra-derivative-device-hip-parsec examples/derivative/test_derivative.hip kernels/derivative.hip)
   target_link_libraries(mra-derivative-device-hip-parsec PUBLIC libmra-hip-parsec)
 
   add_executable(mra-unit-device-hip-parsec examples/unit/test_unit.hip)
   target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)
 
   add_executable(mra-mad-deriv-device-hip-parsec
-                 tests/mad_derivative_test.cu)
+                 tests/mad_derivative_test.cu kernels/derivative.hip)
   target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC MADworld MADtensor MADmra libmra-hip-parsec)
 
 endif (HAVE_HIP)
