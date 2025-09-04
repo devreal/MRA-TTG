@@ -6,7 +6,7 @@ target_link_libraries(libmra-base-parsec INTERFACE MADworld ttg-parsec $<$<TARGE
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
 #define a target for the host
-add_library(libmra-host-parsec OBJECT gl.cc twoscale.cc kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc)
+add_library(libmra-host-parsec OBJECT gl.cc twoscale.cc kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc kernels/derivative.cc)
 target_link_libraries(libmra-host-parsec PUBLIC libmra-base-parsec)
 target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
 
@@ -74,7 +74,7 @@ if (HAVE_CUDA)
                                                $<$<TARGET_EXISTS:tiledarray>:tiledarray>
                                                $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
 
-  add_library(libmra-cuda-parsec OBJECT gl.cc twoscale.cc kernels/compress.cu kernels/reconstruct.cu kernels/multiply.cu)
+  add_library(libmra-cuda-parsec OBJECT gl.cc twoscale.cc kernels/compress.cu kernels/reconstruct.cu kernels/multiply.cu kernels/derivative.cu)
   target_link_libraries(libmra-cuda-parsec PUBLIC libmra-cuda-base-parsec)
 
   add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
@@ -110,7 +110,7 @@ endif (HAVE_CUDA)
 if (HAVE_HIP)
 
   # define a target for HIP
-  add_library(libmra-hip-parsec OBJECT gl.cc twoscale.cc kernels/compress.hip kernels/reconstruct.hip kernels/multiply.hip)
+  add_library(libmra-hip-parsec OBJECT gl.cc twoscale.cc kernels/compress.hip kernels/reconstruct.hip kernels/multiply.hip kernels/derivative.hip)
   target_compile_definitions(libmra-hip-parsec PUBLIC MRA_ENABLE_HIP=1)
   target_link_libraries(libmra-hip-parsec PUBLIC libmra-base-parsec
                                               $<$<TARGET_EXISTS:tiledarray>:tiledarray>
