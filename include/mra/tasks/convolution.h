@@ -32,7 +32,6 @@ namespace mra{
     auto conv_fn = [&, N, K, name](
                     const mra::Key<NDIM>& key,
                     const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
-
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(S&& out){
@@ -43,33 +42,34 @@ namespace mra{
         ttg::send<0>(key, std::forward<S>(out));
       };
 #endif
+      if (!in_node.empty() && in_node.is_ns()) {
+				bool is_ns = true;
+				mra::FunctionsCompressedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
+				result.set_ns(is_ns);
+				auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
 
-      bool is_ns = true;
-      mra::FunctionsCompressedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
-      result.set_ns(is_ns);
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
+				std::shared_ptr<const mra::OperatorData<T, NDIM>> op_data = op.get_op(key);
 
-      std::shared_ptr<const mra::OperatorData<T, NDIM>> op_data = op.get_op(key);
+				T normr = 1.0;
+				T norms = 1.0;
+				T fac = op_data->fac;
+				for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
+				for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
 
-      T normr = 1.0;
-      T norms = 1.0;
-      T fac = op_data->fac;
-      for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
-      for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
-
-      auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
-      auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
+				auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
+				auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
 
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(in_node.coeffs().buffer(), result.coeffs().buffer(), tmp);
-      co_await ttg::device::select(input);
+				auto input = ttg::device::Input(in_node.coeffs().buffer(), result.coeffs().buffer(), tmp);
+				co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
-      auto result_view = result.coeffs().current_view();
-      auto in_node_view = in_node.coeffs().current_view();
+				auto result_view = result.coeffs().current_view();
+				auto in_node_view = in_node.coeffs().current_view();
 
-      submit_convolution_kernel<T, NDIM>(K, N, normr, norms, fac, in_node_view, result_view, transr, transs,
-        tmp.current_device_ptr(), ttg::device::current_stream());
+				submit_convolution_kernel<T, NDIM>(K, N, normr, norms, fac, in_node_view, result_view, transr, transs,
+				tmp.current_device_ptr(), ttg::device::current_stream());
+			}
 
 #ifndef MRA_ENABLE_HOST
       co_await ttg::device::wait(result.coeffs().buffer());
