@@ -3,7 +3,7 @@ name: Linux Build
 on: [pull_request]
 
 env:
-  NTHREADS: 1
+  NTHREADS: 4
 
 jobs:
   build:
@@ -26,24 +26,22 @@ jobs:
       - name: Checkout repository to host
         uses: actions/checkout@v4
 
-      - name: Build CUDA
-        if: ${{ matrix.device == 'CUDA'}}
+      - name: Configure Build Environment
         run: |
-          apptainer exec \
-            --bind $GITHUB_WORKSPACE:/workspace \
-            /opt/containers/ubuntu_nvhpc.sif \
-            bash -c "
-            mkdir build && cd build
-            cmake ../ $BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON
-            cmake --build . -j ${NTHREADS}"
+          if [ "${{ matrix.device }}" = "CUDA" ]; then
+            echo "BUILD_CONFIG=$BUILD_CONFIG -DENABLE_CUDA=ON -DTTG_ENABLE_CUDA=ON" >> $GITHUB_ENV
+            echo "CONTAINER=/opt/containers/ubuntu_nvhpc.sif" >> $GITHUB_ENV
+          elif [ "${{ matrix.device }}" = "HIP" ]; then
+            echo "BUILD_CONFIG=$BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908" >> $GITHUB_ENV
+            echo "CONTAINER=/opt/containers/ubuntu_hip.sif" >> $GITHUB_ENV
+          fi
 
-      - name: Build HIP
-        if: ${{ matrix.device == 'HIP'}}
+      - name: Build
         run: |
           apptainer exec \
             --bind $GITHUB_WORKSPACE:/workspace \
-            /opt/containers/ubuntu_hip.sif \
+            $CONTAINER \
             bash -c "
-            mkdir build && cd build
-            cmake ../ $BUILD_CONFIG -DENABLE_HIP=ON -DTTG_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx908
-            cmake --build . -j ${NTHREADS}"
+              mkdir build && cd build
+              cmake ../ $BUILD_CONFIG
+              cmake --build . -j ${NTHREADS}"

@@ -37,15 +37,15 @@ namespace mra::detail {
 #define SHARED __shared__
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
-#elif defined(__HIP__)
-#define SCOPE __device__ __host__
+#elif defined(__HIP_DEVICE_COMPILE__)
+#define SCOPE __device__ __host__ inline
 #define SYNCTHREADS() __syncthreads()
 #define DEVSCOPE __device__
 #define SHARED __shared__
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
 #define HAVE_DEVICE_ARCH 1
 #else // __CUDA_ARCH__
-#define SCOPE
+#define SCOPE inline
 #define SYNCTHREADS() do {} while(0)
 #define DEVSCOPE inline
 #define SHARED
@@ -167,7 +167,7 @@ namespace mra {
  * Function returning the thread ID in a flat ID space.
  */
 namespace mra {
-  DEVSCOPE int thread_id() {
+  SCOPE int thread_id() {
 #if defined(HAVE_DEVICE_ARCH)
     return blockDim.x * ((blockDim.y * threadIdx.z) + threadIdx.y) + threadIdx.x;
 #else  // HAVE_DEVICE_ARCH
@@ -175,7 +175,7 @@ namespace mra {
 #endif // HAVE_DEVICE_ARCH
   }
 
-  DEVSCOPE int block_size() {
+  SCOPE int block_size() {
 #if defined(HAVE_DEVICE_ARCH)
     return blockDim.x * blockDim.y * blockDim.z;
 #else  // HAVE_DEVICE_ARCH
@@ -183,7 +183,7 @@ namespace mra {
 #endif // HAVE_DEVICE_ARCH
   }
 
-  SCOPE inline bool is_team_lead() {
+  SCOPE bool is_team_lead() {
 #if defined(HAVE_DEVICE_ARCH)
     return (0 == (threadIdx.x + threadIdx.y + threadIdx.z));
 #else  // HAVE_DEVICE_ARCH
