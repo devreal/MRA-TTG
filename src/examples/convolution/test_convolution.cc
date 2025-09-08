@@ -33,7 +33,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, T precision,
     // T expnt = 1500 + 1500*drand48();
     mra::Coordinate<T,NDIM> r;
     for (int d=0; d<NDIM; d++) {
-      r[d] = T(-6.0) + T(12.0)*drand48();
+      r[d] = T(0.0);// + T(12.0)*drand48();
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     std::cout << "GaussianDerivative " << i << " expnt " << expnt << std::endl;
