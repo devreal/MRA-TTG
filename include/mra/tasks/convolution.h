@@ -48,8 +48,8 @@ namespace mra{
 			}
 			else {
 				mra::FunctionsCompressedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
-				std::cout << "Convolution " << key << " N " << N << " K " << K << std::endl;
 				result.set_ns();
+				// set child leaf information
 				for (size_type i = 0; i < N; ++i) {
 					for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
 						result.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
