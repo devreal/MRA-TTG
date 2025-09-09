@@ -79,7 +79,7 @@ namespace mra {
         auto rnlp_view = rnlp.current_view();
         rnlp_view = 0.0;
 
-        if (lx < 0) lx = -lx-1;
+        // if (lx < 0) lx = -lx-1; // translation is defined to be unsigned
         T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
         T beta = expnt * std::pow(T(0.25), T(n));
         T h = 1.0/std::sqrt(beta);
