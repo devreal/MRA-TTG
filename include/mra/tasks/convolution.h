@@ -84,6 +84,7 @@ namespace mra{
 #endif // MRA_ENABLE_HOST
 
 				send_out(key, std::move(result));
+
 			}
 
 #ifndef MRA_ENABLE_HOST
