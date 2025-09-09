@@ -35,7 +35,7 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
     T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-6.0) + T(12.0)*drand48()) : 0.0;
+      r[d] = (seed > 0) ? (T(-2.0) + T(4.0)*drand48()) : 0.0;
     }
     if (seed > 0) {
       std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
@@ -68,7 +68,7 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
     // TODO: check for the norm within machine precision
     auto norms_arr = norms.buffer().current_device_ptr();
     for (size_type i = 0; i < N; ++i) {
-      if (std::abs(norms_arr[i]) > 1e12) {
+      if (std::abs(norms_arr[i]) > 1e-12) {
         std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
       }
 
