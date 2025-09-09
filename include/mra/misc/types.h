@@ -9,6 +9,7 @@
 #include <ttg.h>
 
 #include "mra/misc/platform.h"
+#include "mra/misc/misc.h"
 
 #ifdef MRA_ENABLE_HOST
 #ifndef TASKTYPE
