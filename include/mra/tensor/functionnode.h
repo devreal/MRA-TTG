@@ -416,6 +416,7 @@ namespace mra {
         void serialize(Archive& ar) {
           base_type::serialize(ar);
           ar& this->m_is_child_leafs;
+          ar& this->m_ns;
         }
 
         template <typename Archive>
