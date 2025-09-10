@@ -4,23 +4,49 @@
 #include <numbers>
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
+#include <madness/mra/operator.h>
 
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
 
 using namespace mra;
 
-typedef madness::Vector<double,3> coordT;
-typedef madness::Function<double,3> functionT;
-typedef madness::FunctionFactory<double,3> factoryT;
-typedef madness::Tensor<double> tensorT;
+// typedef madness::Vector<double,3> coordT;
+// typedef madness::Function<double,3> functionT;
+// typedef madness::FunctionFactory<double,3> factoryT;
+// typedef madness::Tensor<double> tensorT;
 
-static const double Length = 4.0;
+static const double Length = 3.0;
+static const double width = 2*Length;
+static double expnt = width*width;
+static double coeff = width/sqrt(madness::constants::pi);
 static const int init_lev = 2;
-static double expnt = 1000.0;
 
-template <typename T>
+using coord_t = madness::Vector<double, 3>;
+using real_factory_t = madness::FunctionFactory<double, 3>;
+using real_function_t = madness::Function<double, 3>;
+using real_convolution_t = madness::SeparatedConvolution<double, 3>;
+
+// template <typename T, Dimension NDIM>
+double g(const coord_t& r) {
+  // fac (initially: std::pow(madness::constants::inv_sqrt_pi, coord_t::static_size);)
+  // is modified to match the normalization in MRA
+  static const double fac = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
+  return std::exp(-madness::inner(r,r)) * fac;
+}
+
+template <typename T, Dimension NDIM>
 auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init_lev) {
+
+  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
+  ops[0].reset(new madness::GaussianConvolution1D<double>(k, coeff, expnt, 0, false));
+  real_convolution_t op(world, ops, k);
+
+  real_function_t f = real_factory_t(world).f(g);
+
+  real_function_t opf = op(f);
+  return opf;
+
 }
 
 template<typename T, Dimension NDIM>
@@ -81,55 +107,55 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
 }
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(std::size_t N, size_type K, Dimension axis, T precision, int max_level,
-                     T verification_precision, int argc, char** argv) {
+void test_convolution(std::size_t N, size_type K, T precision, int max_level,
+                     T verification_precision, int seed, int argc, char** argv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
-  D[0].set_cube(-6,6);
-  T g1 = 0;
-  T g2 = 0;
-  bool is_ns = false;
-
-  std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
+  D[0].set_cube(-Length,Length);
+  bool is_ns = true;
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
 
+  std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> cmap;
+
   ttg::Edge<mra::Key<NDIM>, void> project_control;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, derivative_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_convolution_result;
+  ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
 
+  // define N Gaussians
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> pmap; // results directly after project
+  T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
 
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = 0.0;
+      r[d] = (seed > 0) ? (T(-2.0) + T(4.0)*drand48()) : 0.0;
     }
-    std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
+    if (seed > 0) {
+      std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
+    }
     gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
+  if (seed == 0) {
+    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500 << std::endl;
+  }
+
+  T coeff = 10.0; // coefficient for the Gaussian
+  mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata);
+  mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
+
   // put it into a buffer
   auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
+  // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
-  // auto start_d = make_start(project_d_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto extract_project = make_extract(project_result, pmap);
-  // C(P)
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
-  // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
-  // D(R(C(P)))
-  auto extract_u = make_extract(reconstruct_result, umap);
-  auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
-                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
-  auto extract = make_extract(derivative_result, cmap);
+  auto convolve = make_convolution(N, K, compress_result, compress_convolution_result, op, "convolution");
+  auto extract = make_extract(compress_convolution_result, cmap);
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
@@ -151,11 +177,8 @@ void test_convolution(std::size_t N, size_type K, Dimension axis, T precision, i
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   {
-    auto u_result = compute_u_madness<T>(world, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(u_result, umap, "u_result", verification_precision);
-
-    auto deriv_result = compute_udx_madness<T>(world, axis, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(deriv_result, cmap, "deriv_result", verification_precision);
+    auto conv_result = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
+    compare_mra_madness<T, NDIM>(conv_result, cmap, "conv_result", verification_precision);
   }
   world.gop.fence();
 }
@@ -165,23 +188,23 @@ int main(int argc, char **argv) {
   /* options */
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
-  size_type K = opt.parse("-K", 8);
-  expnt = opt.parse("-e", 100.0); // default: 100.0
+  size_type K = opt.parse("-K", 10);
+  expnt = opt.parse("-e", expnt); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int axis    = opt.parse("-a", 0);
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
-  int domain = opt.parse("-d", 6);
+  int domain = opt.parse("-d", Length);
+  bool norand = opt.exists("-norand");
+  int seed = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
   int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
   if (ttg::default_execution_context().rank() == 0) {
-    std::cout << "Running MADNESS derivative test with parameters: "
+    std::cout << "Running MADNESS convolution test with parameters: "
               << "N = " << N << ", K = " << K
               << ", expnt = " << expnt
-              << ", axis = " << axis
               << ", log_precision = " << log_precision
               << ", max_level = " << max_level
               << ", verification_log_precision = " << verification_log_precision
@@ -194,8 +217,8 @@ int main(int argc, char **argv) {
 #endif // TTG_PARSEC_IMPORTED
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
 
-  test_convolution<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level,
-                             std::pow(10, -verification_log_precision), argc, argv);
+  test_convolution<double, 3>(N, K, std::pow(10, -log_precision), max_level,
+                             std::pow(10, -verification_log_precision), seed, argc, argv);
 
   madness::finalize();
   ttg::finalize();

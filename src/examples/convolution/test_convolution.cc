@@ -12,17 +12,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-d,d);
-  T g1 = 0;
-  T g2 = 0;
   bool is_ns = true;
-
-  if (seed > 0) {
-    srand48(seed);
-    for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
-  }
-
-  auto pmap = PartitionKeymap<NDIM>(); // process map
-  auto dmap = PartitionKeymap<NDIM>(ttg::device::num_devices(), pmap.target_level()+1); // device map is one level below the process map
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
