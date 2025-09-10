@@ -34,7 +34,6 @@ namespace mra
     DeviceMap&& devicemap = {})
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
-
     constexpr const std::size_t num_children = mra::Key<NDIM>::num_children();
     // creates the right number of edges for nodes to flow from send_leafs_up to compress
     // send_leafs_up will select the right input for compress
@@ -174,7 +173,7 @@ namespace mra
         } else {
           for (std::size_t i = 0; i < N; ++i) {
             if (std::abs(p.sum(i) - 1.0) > 1e-12) {
-              std::cout << "At root of compressed tree fn " << i << ": total normsq is " << p.sum(i) << std::endl;
+              std::cout << name << " At root of compressed tree fn " << i << ": total normsq is " << p.sum(i) << std::endl;
             }
           }
 #ifndef MRA_ENABLE_HOST
