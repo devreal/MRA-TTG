@@ -11,11 +11,6 @@
 
 using namespace mra;
 
-// typedef madness::Vector<double,3> coordT;
-// typedef madness::Function<double,3> functionT;
-// typedef madness::FunctionFactory<double,3> factoryT;
-// typedef madness::Tensor<double> tensorT;
-
 static const double Length = 3.0;
 static const double width = 2*Length;
 static double expnt = width*width;
@@ -37,6 +32,13 @@ double g(const coord_t& r) {
 
 template <typename T, Dimension NDIM>
 auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init_lev) {
+
+  madness::FunctionDefaults<3>::set_cubic_cell( -6, 6 );
+  madness::FunctionDefaults<3>::set_k(k);
+  madness::FunctionDefaults<3>::set_refine(true);
+  madness::FunctionDefaults<3>::set_autorefine(true);
+  madness::FunctionDefaults<3>::set_thresh(thresh);
+  madness::FunctionDefaults<3>::set_initial_level(init_lev);
 
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
   ops[0].reset(new madness::GaussianConvolution1D<double>(k, coeff, expnt, 0, false));
@@ -121,7 +123,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_convolution_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, convolution_result;
   ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
 
   // define N Gaussians
@@ -131,12 +133,12 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-2.0) + T(4.0)*drand48()) : 0.0;
+      r[d] = (seed > 0) ? (T(-Length) + T(2*Length)*drand48()) : 0.0;
     }
     if (seed > 0) {
       std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     }
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
+    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], 1500, r, init_lev);
   }
 
   if (seed == 0) {
@@ -154,8 +156,8 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
-  auto convolve = make_convolution(N, K, compress_result, compress_convolution_result, op, "convolution");
-  auto extract = make_extract(compress_convolution_result, cmap);
+  auto convolve = make_convolution(N, K, compress_result, convolution_result, op, "convolution");
+  auto extract = make_extract(convolution_result, cmap);
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
