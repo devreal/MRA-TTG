@@ -11,9 +11,9 @@
 
 using namespace mra;
 
-static const double Length = 3.0;
-static const double width = 2*Length;
-static double expnt = width*width;
+static double Length = 3.0;
+static double width = 2*Length;
+static double expnt = 1500.0;
 static double coeff = width/sqrt(madness::constants::pi);
 static const int init_lev = 2;
 
@@ -27,13 +27,13 @@ double g(const coord_t& r) {
   // fac (initially: std::pow(madness::constants::inv_sqrt_pi, coord_t::static_size);)
   // is modified to match the normalization in MRA
   static const double fac = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
-  return std::exp(-madness::inner(r,r)) * fac;
+  return fac*(std::exp(-1*expnt*r[0]*r[0]) * std::exp(-1*expnt*r[1]*r[1]) * std::exp(-1*expnt*r[2]*r[2]));
 }
 
 template <typename T, Dimension NDIM>
 auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init_lev) {
 
-  madness::FunctionDefaults<3>::set_cubic_cell( -6, 6 );
+  madness::FunctionDefaults<3>::set_cubic_cell( -Length, Length );
   madness::FunctionDefaults<3>::set_k(k);
   madness::FunctionDefaults<3>::set_refine(true);
   madness::FunctionDefaults<3>::set_autorefine(true);
@@ -47,8 +47,7 @@ auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init
   real_function_t f = real_factory_t(world).f(g);
 
   real_function_t opf = op(f);
-  return opf;
-
+  return std::make_tuple(std::move(f), std::move(opf));
 }
 
 template<typename T, Dimension NDIM>
@@ -110,42 +109,36 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
 
 template<typename T, mra::Dimension NDIM>
 void test_convolution(std::size_t N, size_type K, T precision, int max_level,
-                     T verification_precision, int seed, int argc, char** argv) {
+                     T verification_precision, int argc, char** argv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-Length,Length);
-  bool is_ns = true;
 
-  srand48(5551212); // for reproducible results
-  for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
-
-  std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> cmap;
+  //std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> compmap, convmap;
+  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> rmap, convmap;
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, convolution_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result,
+                                                                      reconstruct_result,
+                                                                      reconstruct_conv_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result,
+                                                                   compress_r_result,
+                                                                   convolution_result;
   ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
 
   // define N Gaussians
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-  T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
 
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-Length) + T(2*Length)*drand48()) : 0.0;
+      r[d] = 0.0;
     }
-    if (seed > 0) {
-      std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
-    }
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], 1500, r, init_lev);
+    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
-  if (seed == 0) {
-    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500 << std::endl;
-  }
+  std::cout << N << " Gaussians with expnt " << expnt << std::endl;
 
-  T coeff = 10.0; // coefficient for the Gaussian
   mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata);
   mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
 
@@ -155,9 +148,13 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
-  auto convolve = make_convolution(N, K, compress_result, convolution_result, op, "convolution");
-  auto extract = make_extract(convolution_result, cmap);
+  auto compress = make_compress(N, K, false, functiondata, project_result, compress_result, "compress");
+  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto compress_r = make_compress(N, K, true, functiondata, reconstruct_result, compress_r_result, "compress_r");
+  auto extract_r = make_extract(reconstruct_result, rmap);
+  auto convolve = make_convolution(N, K, compress_r_result, convolution_result, op, "convolution");
+  auto reconstruct_c = make_reconstruct(N, K, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_conv");
+  auto extract_conv = make_extract(reconstruct_conv_result, convmap);
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
@@ -176,11 +173,23 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   ttg::execute();
   ttg::fence();
 
+  /**
+   * compare reconstructed and convolved results of MRA
+   */
+  for (auto& [key, _] : rmap) {
+    auto cit = convmap.find(key);
+    if (cit == convmap.end()) {
+      std::cout << "Missing key in convolution result: " << key << std::endl;
+      throw std::runtime_error("Missing key in convolution result");
+    }
+  }
+
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   {
-    auto conv_result = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(conv_result, cmap, "conv_result", verification_precision);
+    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
+    compare_mra_madness<T, NDIM>(madfunc, rmap, "compress_result", verification_precision);
+    compare_mra_madness<T, NDIM>(madconv, convmap, "conv_result", verification_precision);
   }
   world.gop.fence();
 }
@@ -195,9 +204,8 @@ int main(int argc, char **argv) {
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
-  int domain = opt.parse("-d", Length);
+  Length = opt.parse("-d", Length);
   bool norand = opt.exists("-norand");
-  int seed = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
   int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
 
   ttg::initialize(argc, argv, cores);
@@ -207,9 +215,9 @@ int main(int argc, char **argv) {
     std::cout << "Running MADNESS convolution test with parameters: "
               << "N = " << N << ", K = " << K
               << ", expnt = " << expnt
-              << ", log_precision = " << log_precision
+              << ", log_precision = " << -1*log_precision
               << ", max_level = " << max_level
-              << ", verification_log_precision = " << verification_log_precision
+              << ", verification_log_precision = " << -1*verification_log_precision
               << std::endl;
   }
 
@@ -220,7 +228,7 @@ int main(int argc, char **argv) {
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
 
   test_convolution<double, 3>(N, K, std::pow(10, -log_precision), max_level,
-                             std::pow(10, -verification_log_precision), seed, argc, argv);
+                             std::pow(10, -verification_log_precision), argc, argv);
 
   madness::finalize();
   ttg::finalize();
