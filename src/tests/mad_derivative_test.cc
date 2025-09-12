@@ -227,9 +227,6 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
 
   std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
 
-  srand48(5551212); // for reproducible results
-  for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
-
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, derivative_result;
