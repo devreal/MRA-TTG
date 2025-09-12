@@ -41,6 +41,10 @@ add_executable(mra-mad-conv-host-parsec
                tests/mad_convolution_test.cc autocorr.cc)
 target_link_libraries(mra-mad-conv-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
 
+add_executable(mra-mad-debug-host-parsec
+               tests/mad_conv.cc autocorr.cc)
+target_link_libraries(mra-mad-debug-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
+
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
 target_link_libraries(mra-cycledimtest PUBLIC libmra-host-parsec)
 
