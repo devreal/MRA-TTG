@@ -188,7 +188,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   startup(world,argc,argv);
   {
     auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(madfunc, rmap, "compress_result", verification_precision);
+    compare_mra_madness<T, NDIM>(madfunc, rmap, "reconstruct_result", verification_precision);
     compare_mra_madness<T, NDIM>(madconv, convmap, "conv_result", verification_precision);
   }
   world.gop.fence();
