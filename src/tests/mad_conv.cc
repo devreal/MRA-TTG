@@ -126,7 +126,9 @@ auto compute_conv_mra(size_type N, size_type K, T precision, int domain, int max
 
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto extract = make_extract(project_result, rmap);
+  auto compress = make_compress(N, K, false, functiondata, project_result, compress_result, "compress");
+  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto extract = make_extract(reconstruct_result, rmap);
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
@@ -154,7 +156,7 @@ int main(int argc, char** argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 8);
-  // double expnt = opt.parse("-e", 1500.0); // default: 1500
+  expnt = opt.parse("-e", expnt); // default: 1500
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
