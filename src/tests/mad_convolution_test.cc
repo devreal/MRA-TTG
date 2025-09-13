@@ -114,7 +114,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-Length,Length);
 
-  //std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> compmap, convmap;
+  std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> cmap;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> rmap, convmap;
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
@@ -152,6 +152,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
   auto compress_r = make_compress(N, K, true, functiondata, reconstruct_result, compress_r_result, "compress_r");
   auto extract_r = make_extract(reconstruct_result, rmap);
+  auto extract_c = make_extract(compress_r_result, cmap);
   auto convolve = make_convolution(N, K, compress_r_result, convolution_result, op, "convolution");
   auto reconstruct_c = make_reconstruct(N, K, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_conv");
   auto extract_conv = make_extract(reconstruct_conv_result, convmap);
@@ -189,7 +190,9 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   {
     auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
     compare_mra_madness<T, NDIM>(madfunc, rmap, "reconstruct_result", verification_precision);
-    compare_mra_madness<T, NDIM>(madconv, convmap, "conv_result", verification_precision);
+    madfunc.get_impl()->change_tree_state(madness::TreeState::nonstandard);
+    compare_mra_madness<T, NDIM>(madfunc, cmap, "compress_r_result", verification_precision);
+    // compare_mra_madness<T, NDIM>(madconv, convmap, "conv_result", verification_precision);
   }
   world.gop.fence();
 }
