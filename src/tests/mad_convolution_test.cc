@@ -190,8 +190,10 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   {
     auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
     compare_mra_madness<T, NDIM>(madfunc, rmap, "reconstruct_result", verification_precision);
-    madfunc.get_impl()->change_tree_state(madness::TreeState::nonstandard);
-    compare_mra_madness<T, NDIM>(madfunc, cmap, "compress_r_result", verification_precision);
+    // madfunc.get_impl()->change_tree_state(madness::TreeState::nonstandard);
+    madness::Function<T,NDIM> fff=(madfunc);
+    fff.make_nonstandard(false, true);
+    compare_mra_madness<T, NDIM>(fff, cmap, "compress_r_result", verification_precision);
     // compare_mra_madness<T, NDIM>(madconv, convmap, "conv_result", verification_precision);
   }
   world.gop.fence();
