@@ -33,7 +33,7 @@ namespace mra{
                     const mra::Key<NDIM>& key,
                     const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
-      auto sends = ttg::device::forward(ttg::device::send<0>(key, in_node));
+      auto sends = ttg::device::forward();
       auto send_out = [&]<typename S>(auto& k, S&& out){
         sends.push_back(ttg::device::send<0>(k, std::forward<S>(out)));
       };
