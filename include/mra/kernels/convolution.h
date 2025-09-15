@@ -20,7 +20,7 @@ namespace mra{
   SCOPE size_type convolution_tmp_size(size_type K) {
     size_type K2NDIM = std::pow(K, NDIM);
     size_type TWOK2NDIM = std::pow(2*K, NDIM);
-    return 4*TWOK2NDIM + 4*K2NDIM; // resultf, resultc, tmpresult, result, f, work1, work2
+    return 3*TWOK2NDIM + 4*K2NDIM; // resultf, resultc, tmpresult, result, f, work1, work2
   }
 
   template <typename T, Dimension NDIM>
@@ -121,10 +121,10 @@ namespace mra{
       resultc   = TensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
       work1     = TensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], K);
       work2     = TensorView<T, NDIM>(&block_tmp_ptr[              3*K2NDIM], K);
-      f         = TensorView<T, NDIM>(&block_tmp_ptr[              4*K2NDIM], 2*K);
-      tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 4*K2NDIM], 2*K);
-      resultf   = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 4*K2NDIM], 2*K);
-      result    = TensorView<T, NDIM>(&block_tmp_ptr[3*TWOK2NDIM + 4*K2NDIM], 2*K);
+      // f         = TensorView<T, NDIM>(&block_tmp_ptr[              4*K2NDIM], 2*K);
+      tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[               4*K2NDIM], 2*K);
+      resultf   = TensorView<T, NDIM>(&block_tmp_ptr[   TWOK2NDIM + 4*K2NDIM], 2*K);
+      result    = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 4*K2NDIM], 2*K);
 
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
         if (is_team_lead()) {
