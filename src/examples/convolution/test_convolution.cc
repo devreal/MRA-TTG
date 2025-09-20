@@ -52,7 +52,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
-  auto convolve = make_convolution(N, K, compress_result, compress_convolution_result, op, "convolution");
+  auto convolve = make_convolution(N, K, compress_result, compress_convolution_result, op, precision, "convolution");
 
   auto norm  = make_norm(N, K, compress_convolution_result, norm_result);
   // final check
