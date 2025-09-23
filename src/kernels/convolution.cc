@@ -17,6 +17,7 @@ namespace mra {
     TensorView<double, 3+1>& result,
     const std::array<TensorView<double, 2>, 3>& transr,
     const std::array<TensorView<double, 2>, 3>& transs,
+    const std::array<bool, 2>& at,
     const double tol,
     double* tmp,
     ttg::device::Stream stream);

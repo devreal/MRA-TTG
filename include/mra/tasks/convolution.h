@@ -82,12 +82,16 @@ namespace mra{
           T normr = 1.0;
           T norms = 1.0;
           T fac = op_data->fac;
+          std::array<bool, 2> at = {true, true}; // apply terms analogue in MADNESS
+          if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
           auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
           auto out_view = out.coeffs().current_view();
 
           for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
           for (size_type i = 0; i < NDIM; ++i) norms *= op_data->ops[i]->normS;
+
+          std::cout << "For Key: " << key << " the operators being passed are " << op_data->ops[0]->R.current_view() << std::endl;
 
           auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
           auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
@@ -97,7 +101,7 @@ namespace mra{
           co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
-          submit_convolution_kernel<T, NDIM>(key, K, N, opnorm, normr, norms, fac, in_node_view, out_view, transr, transs, tol,
+          submit_convolution_kernel<T, NDIM>(key, K, N, opnorm, normr, norms, fac, in_node_view, out_view, transr, transs, at, tol,
           tmp.current_device_ptr(), ttg::device::current_stream());
 
 #ifndef MRA_ENABLE_HOST

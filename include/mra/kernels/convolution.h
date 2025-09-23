@@ -67,6 +67,7 @@ namespace mra{
       const T fac,
       const std::array<TensorView<T, 2>, NDIM>& transr,
       const std::array<TensorView<T, 2>, NDIM>& transs,
+      const std::array<bool, 2>& at,
       TensorView<T, NDIM>& f,
       TensorView<T, NDIM>& f0,
       TensorView<T, NDIM>& resultf,
@@ -76,24 +77,26 @@ namespace mra{
       TensorView<T, NDIM>& work1,
       TensorView<T, NDIM>& work2)
     {
+      // std::cout << "Convolution kernel for key: " << key << "\n with transr " << transr << "\n transs " << transs << "\n and fac =  " << fac << std::endl;
+
       const std::array<Slice,NDIM> s0 = {Slice(0, K), Slice(0, K), Slice(0, K)};
       T normthresh = 1e-20; // Can potentially be a parameter
 
-      if (normr > normthresh) {
+      if (at[0] && normr > normthresh/(normr * NDIM)) {
         conv_transform<T, NDIM>(2*K, fac, transr, f, resultf, work1, work2);
-        // std::cout << "key: " << key << " source node " << f  << " transformed node " << resultf << std::endl;
+        // std::cout << "MRA key: " << key << " source node " << f  << " \ntransformed node " << resultf << std::endl;
       }
 
       f0(s0) = f(s0);
 
-      if (norms > normthresh) {
+      if (at[1] && norms > normthresh/(norms * NDIM)) {
         conv_transform<T, NDIM>(K, -fac, transs, f0, resultc, work1, work2);
-        // std::cout << "key: " << key << " source node " << f0  << " transformed node " << resultc << std::endl;
+        // std::cout << "\nMRA key: " << key << " source node " << f0  << " \ntransformed node " << resultc << std::endl;
       }
 
       // auto tmpresult_view = tmpresult.current_view();
       tmpresult(s0) = resultf(s0);
-      // std::cout << "key: " << key << " adding transformed nodes " << tmpresult << " and " << resultc << " with fac " << 1.0 << "\n\n\n\n" << std::endl;
+      // std::cout << "\nMRA key: " << key << " adding transformed nodes " << tmpresult << " and " << resultc << " via gaxpy with fac " << 1.0 << "\n\n\n\n" << std::endl;
       gaxpy_kernel_impl<T, NDIM>(
         tmpresult, resultc, result, 1.0, 1.0);
     }
@@ -112,6 +115,7 @@ namespace mra{
       TensorView<T, NDIM+1> result_view,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transr,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transs,
+      const std::array<bool, 2>& at,
       const T tol,
       T* tmp)
     {
@@ -143,7 +147,7 @@ namespace mra{
 
       const T cnorm = mra::normf(f);
       if (opnorm > 0.01*tol && opnorm*cnorm > tol) {
-        convolution_kernel_impl<T, NDIM>(key, K, normr, norms, fac, transr, transs, f, f0,
+        convolution_kernel_impl<T, NDIM>(key, K, normr, norms, fac, transr, transs, at, f, f0,
           resultf, resultc, tmpresult, result, work1, work2);
       }
     }
@@ -162,6 +166,7 @@ namespace mra{
     TensorView<T, NDIM+1>& result,
     const std::array<TensorView<T, 2>, (size_t)NDIM>& transr,
     const std::array<TensorView<T, 2>, (size_t)NDIM>& transs,
+    const std::array<bool, 2>& at,
     const T tol,
     T* tmp,
     ttg::device::Stream stream)
@@ -171,7 +176,7 @@ namespace mra{
 
     CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
-    (key, K, N, opnorm, normr, norms, fac, f, result, transr, transs, tol, tmp));
+    (key, K, N, opnorm, normr, norms, fac, f, result, transr, transs, at, tol, tmp));
     checkSubmit();
   }
 
@@ -189,6 +194,7 @@ namespace mra{
     TensorView<double, 3+1>& result,
     const std::array<TensorView<double, 2>, 3>& transr,
     const std::array<TensorView<double, 2>, 3>& transs,
+    const std::array<bool, 2>& at,
     const double tol,
     double* tmp,
     ttg::device::Stream stream);
