@@ -20,7 +20,7 @@ namespace mra{
   SCOPE size_type convolution_tmp_size(size_type K) {
     size_type K2NDIM = std::pow(K, NDIM);
     size_type TWOK2NDIM = std::pow(2*K, NDIM);
-    return 3*TWOK2NDIM + 4*K2NDIM; // resultf, resultc, tmpresult, result, f, work1, work2
+    return 2*TWOK2NDIM + 5*K2NDIM; // resultf, resultc, tmpresult, result, f, work1, work2
   }
 
   template <typename T, Dimension NDIM>
@@ -84,19 +84,19 @@ namespace mra{
 
       if (at[0] && normr > normthresh/(normr * NDIM)) {
         conv_transform<T, NDIM>(2*K, fac, transr, f, resultf, work1, work2);
-        // std::cout << "MRA key: " << key << " source node " << f  << " \ntransformed node " << resultf << std::endl;
+        std::cout << "MRA key: " << key << "\n source node \n" << f  << " \ntransformed node \n" << resultf << std::endl;
       }
 
       f0(s0) = f(s0);
 
       if (at[1] && norms > normthresh/(norms * NDIM)) {
         conv_transform<T, NDIM>(K, -fac, transs, f0, resultc, work1, work2);
-        // std::cout << "\nMRA key: " << key << " source node " << f0  << " \ntransformed node " << resultc << std::endl;
+        std::cout << "\nMRA key: " << key << "\n source node \n" << f0  << " \ntransformed node\n " << resultc << std::endl;
       }
 
       // auto tmpresult_view = tmpresult.current_view();
-      tmpresult(s0) = resultf(s0);
-      // std::cout << "\nMRA key: " << key << " adding transformed nodes " << tmpresult << " and " << resultc << " via gaxpy with fac " << 1.0 << "\n\n\n\n" << std::endl;
+      tmpresult = resultf(s0);
+      std::cout << "\nMRA key: " << key << " adding transformed nodes \n" << tmpresult << " and \n" << resultc << " via gaxpy with fac " << 1.0 << "\n\n\n\n" << std::endl;
       gaxpy_kernel_impl<T, NDIM>(
         tmpresult, resultc, result, 1.0, 1.0);
     }
@@ -128,14 +128,13 @@ namespace mra{
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
 
       // construct temporaries and pass them to conv_transform
-      f0        = TensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
-      resultc   = TensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
-      work1     = TensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], K);
-      work2     = TensorView<T, NDIM>(&block_tmp_ptr[              3*K2NDIM], K);
-      // f         = TensorView<T, NDIM>(&block_tmp_ptr[              4*K2NDIM], 2*K);
-      tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[               4*K2NDIM], 2*K);
-      resultf   = TensorView<T, NDIM>(&block_tmp_ptr[   TWOK2NDIM + 4*K2NDIM], 2*K);
-      result    = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 4*K2NDIM], 2*K);
+      f0        = TensorView<T, NDIM>(&block_tmp_ptr[                    0], K);
+      resultc   = TensorView<T, NDIM>(&block_tmp_ptr[               K2NDIM], K);
+      work1     = TensorView<T, NDIM>(&block_tmp_ptr[             2*K2NDIM], K);
+      work2     = TensorView<T, NDIM>(&block_tmp_ptr[             3*K2NDIM], K);
+      tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[             4*K2NDIM], K);
+      resultf   = TensorView<T, NDIM>(&block_tmp_ptr[             5*K2NDIM], 2*K);
+      result    = TensorView<T, NDIM>(&block_tmp_ptr[ TWOK2NDIM + 5*K2NDIM], 2*K);
 
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
         if (is_team_lead()) {
