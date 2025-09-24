@@ -66,20 +66,6 @@ namespace mra {
         c_view(slices) = autocorr_view(slices);
       }
 
-
-    public:
-
-      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
-        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
-        GLget(&quad_x, &quad_w, npt);
-        autoc();
-      }
-
-      Convolution(Convolution&&) = default;
-      Convolution(const Convolution&) = delete;
-      Convolution& operator=(Convolution&&) = default;
-      Convolution& operator=(const Convolution&) = delete;
-
       // projection of a Gaussian onto double order polynomials
       const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
@@ -133,6 +119,19 @@ namespace mra {
         const auto& r = it->second;
         return r;
       }
+
+    public:
+
+      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
+        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
+        GLget(&quad_x, &quad_w, npt);
+        autoc();
+      }
+
+      Convolution(Convolution&&) = default;
+      Convolution(const Convolution&) = delete;
+      Convolution& operator=(Convolution&&) = default;
+      Convolution& operator=(const Convolution&) = delete;
 
       const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
