@@ -66,6 +66,20 @@ namespace mra {
         c_view(slices) = autocorr_view(slices);
       }
 
+
+    public:
+
+      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
+        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
+        GLget(&quad_x, &quad_w, npt);
+        autoc();
+      }
+
+      Convolution(Convolution&&) = default;
+      Convolution(const Convolution&) = delete;
+      Convolution& operator=(Convolution&&) = default;
+      Convolution& operator=(const Convolution&) = delete;
+
       // projection of a Gaussian onto double order polynomials
       const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
@@ -79,9 +93,9 @@ namespace mra {
         auto rnlp_view = rnlp.current_view();
         rnlp_view = 0.0;
 
-        // if (lx < 0) lx = -lx-1; // translation is defined to be unsigned
-        // T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
-        T scaledcoeff  = coeff;
+        Translation lkeep = lx;
+        if (lx < 0) lx = -lx-1;
+        T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
         T beta = expnt * std::pow(T(0.25), T(n));
         T h = 1.0/std::sqrt(beta);
         T nbox = 1.0/h;
@@ -104,6 +118,11 @@ namespace mra {
             }
             delete[] phix;
           }
+          if (lkeep < 0) {
+            for (int p = 1; p < 2*K; p += 2) {
+              rnlp_view(p) = -rnlp_view(p);
+            }
+          }
         }
         cachemutex.lock();
         if (rnlpcache.find(key) == rnlpcache.end()) {
@@ -114,19 +133,6 @@ namespace mra {
         const auto& r = it->second;
         return r;
       }
-
-    public:
-
-      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
-        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
-        GLget(&quad_x, &quad_w, npt);
-        autoc();
-      }
-
-      Convolution(Convolution&&) = default;
-      Convolution(const Convolution&) = delete;
-      Convolution& operator=(Convolution&&) = default;
-      Convolution& operator=(const Convolution&) = delete;
 
       const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
@@ -146,16 +152,21 @@ namespace mra {
         auto rnlp1_view = rnlp1.current_view();
         auto rnlp2_view = rnlp2.current_view();
 
+        // std::cout << "Function call for rnlp1 results in \n" << rnlp1_view << "\n and rnlp2 results in \n" << rnlp2_view << std::endl;
         std::array<Slice,1> slice1 = {Slice(0, 2*K)};
         R_view(slice1) = rnlp1_view(slice1);
+        // std::cout << "After copying rnlp1 to R_view, R_view is \n" << R_view << std::endl;
         std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
         R_view(slice2) = rnlp2_view(slice1);
+        // std::cout << "After copying rnlp2 to R_view, R_view is \n" << R_view << std::endl;
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         rnlij_view = 0.0;
+        // std::cout << "***MRA: Before inner, R_view: \n" << R_view << " \n and c_view: \n" << c.current_view() << std::endl;
         detail::inner(c.current_view(), R_view, rnlij_view);
+        // std::cout << "***MRA: After inner, rnlij_view: \n" << rnlij_view << std::endl;
 
         cachemutex.lock();
         if (rnlijcache.find(key) == rnlijcache.end()) {
