@@ -327,7 +327,7 @@ namespace mra {
 
   /**
    * Creates a batch manager with the given number of functions and batches.
-   * If no number of batches is specified, we use the default suggested by DefaultBatchManager::suggest_num_batches.
+   * If number of batches is -1, we use the default suggested by DefaultBatchManager::suggest_num_batches.
    */
   template<typename PEInfo>
   auto make_batch_manager(
@@ -337,7 +337,7 @@ namespace mra {
     BatchDistribution distribution = BatchDistribution::INVALID)
   {
     using BatchManager = DefaultBatchManager<PEInfo>;
-    if (num_batches == -1) {
+    if (num_batches == 0) {
       num_batches = BatchManager::suggest_num_batches(num_functions);
     }
     if (distribution == BatchDistribution::INVALID) {
