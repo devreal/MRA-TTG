@@ -42,7 +42,11 @@ namespace mra{
         size_type N = fns->num_functions(key);
         auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
         r_empty.set_all_leaf(false);
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::send<0>(key, std::move(r_empty));
+#else
         ttg::send<0>(key, std::move(r_empty));
+#endif
       }
     };
 
