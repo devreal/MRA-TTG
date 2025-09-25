@@ -40,13 +40,14 @@ void test_pcr(std::size_t N, std::size_t K, int num_batches, int max_level, int 
       }
     }
     gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
-    std::cout << gaussians_view[i] << std::endl;
+    //std::cout << gaussians_view[i] << std::endl;
   }
 
   if (seed == 0) {
     if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500
                              << " in " << gaussians->num_batches() << " batches, "
-                             << gaussians->num_local_functions() << " functions are local in "
+                             << gaussians->num_local_functions() << " of "
+                             << N << " functions are local in "
                              << gaussians->num_local_batches() << " local batches" << std::endl;
   }
 
