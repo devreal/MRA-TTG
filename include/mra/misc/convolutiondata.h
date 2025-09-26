@@ -84,7 +84,7 @@ namespace mra {
         T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
         T beta = expnt * std::pow(T(0.25), T(n));
         T h = 1.0/std::sqrt(beta);
-        T nbox = 1.0/h;
+        size_type nbox = size_type(1.0/h);
         if (nbox < 1) nbox = 1;
         h = 1.0/nbox;
         T sch = std::abs(scaledcoeff*h);
@@ -151,6 +151,7 @@ namespace mra {
         auto rnlp1_view = rnlp1.current_view();
         auto rnlp2_view = rnlp2.current_view();
 
+        std::cout << "For (" << n << ", " << lx << ") rnlp1 is \n" << rnlp1_view << "\n and rnlp2 is \n" << rnlp2_view << std::endl;
         // std::cout << "Function call for rnlp1 results in \n" << rnlp1_view << "\n and rnlp2 results in \n" << rnlp2_view << std::endl;
         std::array<Slice,1> slice1 = {Slice(0, 2*K)};
         R_view(slice1) = rnlp1_view(slice1);
@@ -163,9 +164,9 @@ namespace mra {
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         rnlij_view = 0.0;
-        // std::cout << "***MRA: Before inner, R_view: \n" << R_view << " \n and c_view: \n" << c.current_view() << std::endl;
+        // std::cout << "***MRA: for (" << n << ", " << lx << ") Before inner, R_view: \n" << R_view << std::endl; //" \n and c_view: \n" << c.current_view() << std::endl;
         detail::inner(c.current_view(), R_view, rnlij_view);
-        // std::cout << "***MRA: After inner, rnlij_view: \n" << rnlij_view << std::endl;
+        // std::cout << "***MRA: for (" << n << ", " << lx << ") After inner, rnlij_view: \n" << rnlij_view << std::endl;
 
         cachemutex.lock();
         if (rnlijcache.find(key) == rnlijcache.end()) {
