@@ -49,6 +49,7 @@ namespace mra {
       const T* quad_w;                                 // quadrature weights
       Tensor<T, 3> c;                                  // autocorrelation coefficients
       FunctionData<T, NDIM>& functiondata;             // function data
+      FunctionData<T, NDIM>& functiondata2;            // second function data for rnlp at finer level
       mutable std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
       mutable std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
       mutable std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
@@ -64,6 +65,31 @@ namespace mra {
         c_view(slices) = autocorr_view(slices);
         slices = {Slice(0, K), Slice(0, K), Slice(2*K, 4*K)};
         c_view(slices) = autocorr_view(slices);
+      }
+
+
+
+    public:
+
+      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata, FunctionData<T, NDIM>& functiondata2)
+        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata), functiondata2(functiondata2) {
+        GLget(&quad_x, &quad_w, npt);
+        autoc();
+      }
+
+      Convolution(Convolution&&) = default;
+      Convolution(const Convolution&) = delete;
+      Convolution& operator=(Convolution&&) = default;
+      Convolution& operator=(const Convolution&) = delete;
+
+      bool issmall(Level n, Translation lx) const {
+        T beta = expnt * std::pow(T(0.25), T(n));
+        Translation l;
+        if (l > 0) l = lx-1;
+        else if (lx < 0) l = -lx-1;
+        else l = 0;
+
+        return beta*l*l > 49.0; // heuristic cutoff (empirical)
       }
 
       // projection of a Gaussian onto double order polynomials
@@ -120,18 +146,63 @@ namespace mra {
         return r;
       }
 
-    public:
+      const Tensor<T, 1>& get_rnlp (const Level n, const Translation lx) const {
+        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        auto it = rnlpcache.find(key);
+        if (it != rnlpcache.end()) {
+          const auto& r = it->second;
+          return r;
+        }
 
-      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
-        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
-        GLget(&quad_x, &quad_w, npt);
-        autoc();
+        Tensor<T, 1> rnlp;
+        Level natlev = 0.5*std::log2(expnt) + 1; // natural level for Gaussian
+
+        if (issmall(n, lx)) {
+          rnlp = Tensor<T, 1>(2*K); // initialize it to zero
+          auto rnlp_view = rnlp.current_view();
+          rnlp_view = 0.0;
+          return rnlp; // zero
+        }
+        else if (n < natlev) {
+          // compute at a finer level
+          Tensor<T, 1> tmp(4*K), R(4*K), work(2*K);
+          const auto& r1 = get_rnlp(n+1, 2*lx);
+          const auto& r2 = get_rnlp(n+1, 2*lx+1);
+
+          auto tmp_view = tmp.current_view();
+          auto r1_view = r1.current_view();
+          auto r2_view = r2.current_view();
+
+          std::array<Slice,1> slice1 = {Slice(0, 2*K)};
+          std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
+          tmp_view(slice1) = r1_view(slice1);
+          tmp_view(slice2) = r2_view(slice1);
+
+          const auto& hgTtwo = functiondata2.get_hgT();
+          auto hgTtwo_view = hgTtwo.current_view();
+          auto R_view = rnlp.current_view();
+          transform(tmp_view, hgTtwo_view, R_view, work.data());
+
+          rnlp = Tensor<T, 1>(2*K);
+          auto rnlp_view = rnlp.current_view();
+          rnlp_view(slice1) = R_view(slice1);
+
+          cachemutex.lock();
+          if (rnlpcache.find(key) == rnlpcache.end()) {
+            rnlpcache.emplace(key, std::move(rnlp));
+          }
+          it = rnlpcache.find(key);
+          cachemutex.unlock();
+          const auto& r = it->second;
+          return r;
+        }
+        else {
+          // the usual computation
+          return make_rnlp(n, lx);
+        }
+
+
       }
-
-      Convolution(Convolution&&) = default;
-      Convolution(const Convolution&) = delete;
-      Convolution& operator=(Convolution&&) = default;
-      Convolution& operator=(const Convolution&) = delete;
 
       const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
@@ -146,8 +217,8 @@ namespace mra {
         Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
 
-        const auto& rnlp1 = make_rnlp(n, lx-1);
-        const auto& rnlp2 = make_rnlp(n, lx);
+        const auto& rnlp1 = get_rnlp(n, lx-1);
+        const auto& rnlp2 = get_rnlp(n, lx);
         auto rnlp1_view = rnlp1.current_view();
         auto rnlp2_view = rnlp2.current_view();
 
