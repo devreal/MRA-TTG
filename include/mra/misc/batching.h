@@ -100,7 +100,13 @@ namespace mra {
     size_type compute_batches_per_pe() const {
       switch (m_distribution) {
         case BatchDistribution::BLOCK:
-          return (m_num_batches + m_peinfo.num_pes() - 1) / m_peinfo.num_pes();
+        {
+          if (m_num_batches <= m_peinfo.num_pes()) {
+            return 1; // one batch per PE
+          } else {
+            return m_num_batches / m_peinfo.num_pes();
+          }
+        }
         case BatchDistribution::FULL:
           return m_num_batches; // all processes get all batches
         default:
@@ -112,7 +118,15 @@ namespace mra {
       int batches_per_pe = compute_batches_per_pe();
       switch (m_distribution) {
         case BatchDistribution::BLOCK:
-          return (m_peinfo.num_pes() + batches_per_pe - 1) / batches_per_pe;
+        {
+          int pes_per_batches;
+          if (m_num_batches >= m_peinfo.num_pes()) {
+            pes_per_batches = 1; // one batch per PE
+          } else {
+            pes_per_batches = m_peinfo.num_pes() / m_num_batches; // round up
+          }
+          return pes_per_batches;
+        }
         case BatchDistribution::FULL:
           return m_peinfo.num_pes(); // all processes get all batches
         default:
@@ -155,7 +169,7 @@ namespace mra {
                         Batch num_batches,
                         PEInfo peinfo)
     : m_num_funcs(num_funcs)
-    , m_num_batches(num_batches) // round up
+    , m_num_batches(num_batches)
     , m_distribution(dist)
     , m_peinfo(peinfo)
     { }
