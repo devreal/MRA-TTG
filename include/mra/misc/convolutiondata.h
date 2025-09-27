@@ -67,14 +67,21 @@ namespace mra {
         c_view(slices) = autocorr_view(slices);
       }
 
-
-
     public:
 
       Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata, FunctionData<T, NDIM>& functiondata2)
         : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata), functiondata2(functiondata2) {
         GLget(&quad_x, &quad_w, npt);
         autoc();
+
+        // initialize rnlpcache with an empty tensor for issmall cases
+        Tensor<T, 1> rnlp; // initialize it to zero
+        Key<NDIM> key(-SHRT_MAX, std::array<Translation, NDIM>({0}));
+        cachemutex.lock();
+        if (rnlpcache.find(key) == rnlpcache.end()) {
+          rnlpcache.emplace(key, std::move(rnlp));
+        }
+        cachemutex.unlock();
       }
 
       Convolution(Convolution&&) = default;
@@ -158,10 +165,16 @@ namespace mra {
         Level natlev = 0.5*std::log2(expnt) + 1; // natural level for Gaussian
 
         if (issmall(n, lx)) {
-          rnlp = Tensor<T, 1>(2*K); // initialize it to zero
-          auto rnlp_view = rnlp.current_view();
-          rnlp_view = 0.0;
-          return rnlp; // zero
+          // store an empty tensor at n=-int_MAX (initialized in the constructor) and return it when issmall is true
+          // rnlp = Tensor<T, 1>(2*K); // initialize it to zero
+          // auto rnlp_view = rnlp.current_view();
+          // rnlp_view = 0.0;
+          Key<NDIM> key_small(-SHRT_MAX, std::array<Translation, NDIM>({0}));
+          cachemutex.lock();
+          auto it_small = rnlpcache.find(key_small); // guaranteed to be there since we initialized it in the constructor
+          cachemutex.unlock();
+          const auto& r_small = it_small->second;
+          return r_small;
         }
         else if (n < natlev) {
           // compute at a finer level
