@@ -188,12 +188,12 @@ namespace mra {
 
           std::array<Slice,1> slice1 = {Slice(0, 2*K)};
           std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
-          tmp_view(slice1) = r1_view(slice1);
-          tmp_view(slice2) = r2_view(slice1);
+          if (!r1.empty()) tmp_view(slice1) = r1_view(slice1);
+          if (!r2.empty()) tmp_view(slice2) = r2_view(slice1);
 
           const auto& hgTtwo = functiondata2.get_hgT();
           auto hgTtwo_view = hgTtwo.current_view();
-          auto R_view = rnlp.current_view();
+          auto R_view = R.current_view();
           transform(tmp_view, hgTtwo_view, R_view, work.data());
 
           rnlp = Tensor<T, 1>(2*K);
@@ -213,8 +213,6 @@ namespace mra {
           // the usual computation
           return make_rnlp(n, lx);
         }
-
-
       }
 
       const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) const {
@@ -237,11 +235,12 @@ namespace mra {
 
         std::cout << "For (" << n << ", " << lx << ") rnlp1 is \n" << rnlp1_view << "\n and rnlp2 is \n" << rnlp2_view << std::endl;
         // std::cout << "Function call for rnlp1 results in \n" << rnlp1_view << "\n and rnlp2 results in \n" << rnlp2_view << std::endl;
+
         std::array<Slice,1> slice1 = {Slice(0, 2*K)};
-        R_view(slice1) = rnlp1_view(slice1);
+        if (!rnlp1.empty()) R_view(slice1) = rnlp1_view(slice1);
         // std::cout << "After copying rnlp1 to R_view, R_view is \n" << R_view << std::endl;
         std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
-        R_view(slice2) = rnlp2_view(slice1);
+        if (!rnlp2.empty()) R_view(slice2) = rnlp2_view(slice2);
         // std::cout << "After copying rnlp2 to R_view, R_view is \n" << R_view << std::endl;
 
         T scale = std::pow(T(0.5), T(0.5*n));
