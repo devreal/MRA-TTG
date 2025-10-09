@@ -79,8 +79,9 @@ namespace mra {
 
 
   enum class BatchDistribution {
-    BLOCK, //< Block distribution: each batch is assigned to a set of processes
-    FULL,  //< Full distribution: each process gets all batches
+    BLOCK, //< Block distribution: each batch is assigned to a set of PE
+    FULL,  //< Full distribution: each PE is involved in all batches
+    SINGLE_PE, //< Single distribution: each batch is assigned to a single PE
     INVALID,
   };
 
@@ -104,11 +105,13 @@ namespace mra {
           if (m_num_batches <= m_peinfo.num_pes()) {
             return 1; // one batch per PE
           } else {
-            return m_num_batches / m_peinfo.num_pes();
+            return (m_num_batches + m_peinfo.num_pes() - 1) / m_peinfo.num_pes(); // round up
           }
         }
         case BatchDistribution::FULL:
           return m_num_batches; // all processes get all batches
+        case BatchDistribution::SINGLE_PE:
+          return (m_num_batches + m_peinfo.num_pes() - 1) / m_peinfo.num_pes(); // each batch is assigned to a single PE
         default:
           throw std::runtime_error("Invalid distribution type");
       }
@@ -129,6 +132,8 @@ namespace mra {
         }
         case BatchDistribution::FULL:
           return m_peinfo.num_pes(); // all processes get all batches
+        case BatchDistribution::SINGLE_PE:
+          return 1; // each batch is assigned to a single PE
         default:
           throw std::runtime_error("Invalid distribution type");
       }
@@ -157,6 +162,14 @@ namespace mra {
         case BatchDistribution::FULL:
           local_range = {0, m_num_batches};
           break;
+        case BatchDistribution::SINGLE_PE:
+        {
+          assert(batches_per_pe >= 1);
+          Batch start_batch = m_peinfo.my_rank() * batches_per_pe;
+          Batch end_batch = std::min(static_cast<Batch>(start_batch + batches_per_pe), m_num_batches);
+          local_range = {start_batch, end_batch};
+          break;
+        }
         default:
           throw std::runtime_error("Invalid distribution type");
       }
@@ -247,20 +260,11 @@ namespace mra {
      * Returns the size of each batch.
      */
     size_type batch_size(size_type batch) const {
-      assert(batch < m_num_batches);
-      switch (m_distribution) {
-        case BatchDistribution::BLOCK: {
-          size_type batch_size = (m_num_funcs + m_num_batches - 1) / m_num_batches; // round up
-          if (batch < m_num_batches - 1) {
-            return batch_size; // all but the last batch have the same size
-          } else {
-            return m_num_funcs - (batch_size * (m_num_batches - 1)); // last batch may be smaller
-          }
-        }
-        case BatchDistribution::FULL:
-          return m_num_batches;
-        default:
-          throw std::runtime_error("Invalid distribution type");
+      size_type batch_size = (m_num_funcs + m_num_batches - 1) / m_num_batches; // round up
+      if (batch < m_num_batches - 1) {
+        return batch_size; // all but the last batch have the same size
+      } else {
+        return m_num_funcs - (batch_size * (m_num_batches - 1)); // last batch may be smaller
       }
     }
 
@@ -276,6 +280,12 @@ namespace mra {
       assert(batch < m_num_batches);
       switch (m_distribution) {
         case BatchDistribution::BLOCK: {
+          if (m_num_batches <= m_peinfo.num_pes()) {
+            /* more processes than batches: one batch per process */
+            int start_pe = batch;
+            int end_pe = std::min(start_pe, start_pe + 1);
+            return {start_pe, end_pe};
+          }
           int pes_per_batch = compute_pes_per_batch();
           int batches_per_pe = compute_batches_per_pe();
           int start_pe;
@@ -289,6 +299,10 @@ namespace mra {
         }
         case BatchDistribution::FULL:
           return {0, m_peinfo.num_pes()}; // all processes are involved in all batches
+        case BatchDistribution::SINGLE_PE: {
+          int start_pe = batch % m_peinfo.num_pes();
+          return {start_pe, start_pe + 1};
+        }
         default:
           throw std::runtime_error("Invalid distribution type");
       }
