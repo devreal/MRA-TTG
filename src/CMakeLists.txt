@@ -23,10 +23,10 @@ add_executable(mra-deriv-host-parsec
                examples/derivative/bench_derivative.cc)
 target_link_libraries(mra-deriv-host-parsec PUBLIC libmra-host-parsec)
 
-add_executable(mad-bench-derivative
+add_executable(mad-derivative
                examples/derivative/bench_mad_derivative.cc)
-target_link_libraries(mad-bench-derivative PUBLIC MADchem)
-target_include_directories(mad-bench-derivative PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mad-derivative PUBLIC MADchem)
+target_include_directories(mad-derivative PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(mra-unit-host-parsec
                examples/unit/test_unit.cc)
