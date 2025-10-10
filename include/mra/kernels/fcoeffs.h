@@ -109,7 +109,7 @@ namespace mra {
     fcoeffs_kernel(
       const Domain<NDIM>& D,
       const T* gldata,
-      const TensorView<Fn, 1>& fns,
+      const TensorView<Fn, 1> fns,
       Key<NDIM> key,
       size_type K,
       T* tmp,
