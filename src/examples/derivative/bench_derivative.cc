@@ -118,6 +118,7 @@ int main(int argc, char **argv) {
   int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
   int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
   int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
+  int nrep = opt.parse("-n", 1); // number of repetitions
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
@@ -134,9 +135,11 @@ int main(int argc, char **argv) {
               << std::endl;
   }
 
-  test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level,
-                             std::pow(10, -verification_log_precision), initial_level,
-                             num_batches);
+  for (int i = 0; i < nrep; ++i) {
+    test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level,
+                              std::pow(10, -verification_log_precision), initial_level,
+                              num_batches);
+  }
 
   ttg::finalize();
 }
