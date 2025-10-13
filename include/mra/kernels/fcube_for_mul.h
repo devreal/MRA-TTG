@@ -31,13 +31,17 @@ namespace mra {
   template <typename T>
   SCOPE void compute_scaling(
     const T x,
-    const size_type order,
+    const size_type K,
     T* p,
     const T* phi_norm,
     const T* nn1)
   {
-    compute_legendre(T(2)*x - 1, order - 1, p, nn1);
-    for (size_type n=0; n<order; ++n) {
+    /* compute_legendre has a loop-carried dependency so execute sequentially */
+    if (is_team_lead()) {
+      compute_legendre(T(2)*x - 1, K - 1, p, nn1);
+    }
+    SYNCTHREADS();
+    for (size_type n=thread_id(); n<K; n+=block_size()) {
       p[n] *= phi_norm[n];
     }
   }
@@ -49,20 +53,37 @@ namespace mra {
     const Translation lp,
     const Translation lc,
     TensorView<T, 2>& phi,
-    T* pv,
     const T* nn1,
     const T* phi_norms,
     const TensorView<T, 1>& quad_x,
     const size_type K)
   {
-    T scale = pow(2.0, T(np-nc));
+    T scale = std::pow(2.0, T(np-nc));
 
-    for(size_type mu = 0; mu < K; ++mu) {
+    /**
+     * The first K threads compute.
+     * compute_scaling has a loop-carried dependency so we cannot parallelize it.
+     * If we inline everything into the mu-loop we can avoid the temporary array p.
+     */
+    for(size_type mu = thread_id(); mu < K; mu += block_size()) {
       T xmu = scale * (quad_x(mu) + lc) - lp;
       assert(xmu > -1e-15 && xmu < 1.0 + 1e-15);
-      compute_scaling(xmu, K, pv, phi_norms, nn1);
-      for (size_type i = 0; i < K; ++i) phi(i, mu) = pv[i];
+
+      // inlined compute_scaling and assignment to phi(:,mu)
+      //compute_scaling(xmu, K, p, phi_norms, nn1);
+      //for (size_type i = thread_id(); i < K; i += block_size()) phi(i, mu) = p[i];
+      T x = T(2)*xmu - 1;
+      T pm0 = 1.0, pm1 = x;
+      phi(0, mu) = pm0 * phi_norms[0];
+      phi(1, mu) = pm1 * phi_norms[1];
+      for (int n = 2; n < K; ++n) {
+        T pm2 = (x * pm1 - pm0) * nn1[n-1] + x * pm1;
+        phi(n, mu) = pm2 * phi_norms[n];
+        pm0 = pm1;
+        pm1 = pm2;
+      }
     }
+    SYNCTHREADS();
     T scale_phi = std::pow(2.0, 0.5*np);
     phi *= scale_phi;
   }
@@ -96,7 +117,7 @@ namespace mra {
 #else
       T* phi = new T[K*K*NDIM];
 #endif
-      SHARED T p[MAX_ORDER], nn1[MAX_ORDER], phi_norms[MAX_ORDER];
+      SHARED T nn1[MAX_ORDER], phi_norms[MAX_ORDER];
       SHARED std::array<TensorView<T, 2>, NDIM> phi_views;
       if(is_team_lead()){
         for (int d = 0; d < NDIM; ++d){
@@ -109,11 +130,11 @@ namespace mra {
         phi_norms[i] = std::sqrt(T(2*i + 1));
       }
 
-      auto parent_l = parent.translation();
-      auto child_l = child.translation();
+      auto& parent_l = parent.translation();
+      auto& child_l = child.translation();
       for (size_type d=0; d < NDIM; ++d){
         phi_for_mul<T>(parent.level(), child.level(), parent_l[d], child_l[d],
-                       phi_views[d], p, nn1, phi_norms, quad_x, K);
+                       phi_views[d], nn1, phi_norms, quad_x, K);
       }
 
       SHARED TensorView<T, NDIM> result_tmp;
