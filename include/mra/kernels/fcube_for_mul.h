@@ -53,8 +53,6 @@ namespace mra {
     const Translation lp,
     const Translation lc,
     TensorView<T, 2>& phi,
-    const T* nn1,
-    const T* phi_norms,
     const TensorView<T, 1>& quad_x,
     const size_type K)
   {
@@ -69,16 +67,24 @@ namespace mra {
       T xmu = scale * (quad_x(mu) + lc) - lp;
       assert(xmu > -1e-15 && xmu < 1.0 + 1e-15);
 
+      auto phi_norms = [](int i) {
+        return std::sqrt(T(2*i + 1));
+      };
+
+      auto nn1 = [](int i) {
+        return T(i) / T(i + 1.0);
+      };
+
       // inlined compute_scaling and assignment to phi(:,mu)
       //compute_scaling(xmu, K, p, phi_norms, nn1);
       //for (size_type i = thread_id(); i < K; i += block_size()) phi(i, mu) = p[i];
       T x = T(2)*xmu - 1;
       T pm0 = 1.0, pm1 = x;
-      phi(0, mu) = pm0 * phi_norms[0];
-      phi(1, mu) = pm1 * phi_norms[1];
-      for (int n = 2; n < K; ++n) {
-        T pm2 = (x * pm1 - pm0) * nn1[n-1] + x * pm1;
-        phi(n, mu) = pm2 * phi_norms[n];
+      phi(0, mu) = pm0 * phi_norms(0);
+      phi(1, mu) = pm1 * phi_norms(1);
+      for (int i = 2; i < K; ++i) {
+        T pm2 = (x * pm1 - pm0) * nn1(i-1) + x * pm1;
+        phi(i, mu) = pm2 * phi_norms(i);
         pm0 = pm1;
         pm1 = pm2;
       }
@@ -86,6 +92,8 @@ namespace mra {
     SYNCTHREADS();
     T scale_phi = std::pow(2.0, 0.5*np);
     phi *= scale_phi;
+
+    std::cout << "phi_for_mul np " << np << " nc " << nc << " lp " << lp << " lc " << lc << "\n" << normf(phi) << std::endl;
   }
 
 
@@ -117,7 +125,6 @@ namespace mra {
 #else
       T* phi = new T[K*K*NDIM];
 #endif
-      SHARED T nn1[MAX_ORDER], phi_norms[MAX_ORDER];
       SHARED std::array<TensorView<T, 2>, NDIM> phi_views;
       if(is_team_lead()){
         for (int d = 0; d < NDIM; ++d){
@@ -125,16 +132,12 @@ namespace mra {
         }
       }
       SYNCTHREADS();
-      for (size_type i = thread_id(); i < MAX_ORDER; i+=block_size()) {
-        nn1[i] = T(i) / T(i + 1.0);
-        phi_norms[i] = std::sqrt(T(2*i + 1));
-      }
 
-      auto& parent_l = parent.translation();
-      auto& child_l = child.translation();
+      const auto& parent_l = parent.translation();
+      const auto& child_l = child.translation();
       for (size_type d=0; d < NDIM; ++d){
         phi_for_mul<T>(parent.level(), child.level(), parent_l[d], child_l[d],
-                       phi_views[d], nn1, phi_norms, quad_x, K);
+                       phi_views[d], quad_x, K);
       }
 
       SHARED TensorView<T, NDIM> result_tmp;
