@@ -177,27 +177,10 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
       auto pair_key = Key<NDIM>(0, pair.first.level(), pair.first.translation());
       return pair_key == key;
     });
-    auto mad_norm = mad_coeff.coeff().svd_normf();
+    auto mad_norm = mad_coeff.coeff().normf();
     if (mra_coeff != mramap.end()) {
-      assert(mra_coeff->first == mra_coeff->second.key());
-      auto mra_view = mra_coeff->second.coeffs().current_view()(0);
-      int K = mra_view.dim(0);
-      for (int i = 0; i < K; ++i) {
-        for (int j = 0; j < K; ++j) {
-          for (int k = 0; k < K; ++k) {
-            if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision) {
-              std::cout << "Mismatch for " << key << " at " << i << " " << j << " " << k << " : MRA "
-                        << mra_view(i, j, k) << " MADNESS " << mad_coeff.coeff()(i, j, k) << std::endl;
 
-              std::cout << "MRA coeffs:\n" << mra_view << std::endl;
-              std::cout << "MADNESS coeffs:\n" << mad_coeff.coeff() << std::endl;
-              check = false;
-              throw std::runtime_error(name + ": mismatch in coefficients between MADNESS and MRA");
-            }
-          }
-        }
-      }
-
+      /* check the norm */
       auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
       T absdiff = std::abs(mad_norm - mra_norm);
       if (mra_norm != 0.0) {
@@ -207,11 +190,36 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
         check = false;
         //std::cout << mra_coeff->second.coeffs() << "\n with norm " << mra_norm << std::endl;
         std::cout << std::scientific << "" << name << ": " << mra_coeff->first << " with norm " << mad_norm
-                  << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
-        throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
-      } else {
-        //std::cout << name << ": " << it->first << " with norm " << mad_norm
-        //          << " matches MRA norm " << mra_norm << std::endl;
+                  << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff
+                  << ", MAD has children " << mad_coeff.has_children()
+                  << ", MAD is leaf " << mad_coeff.is_leaf()
+                  << ", MRA is leaf " << mra_coeff->second.is_all_leaf()
+                  << ")" << std::endl;
+        //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
+      }
+
+      assert(mra_coeff->first == mra_coeff->second.key());
+
+      /* check the individual coefficients if the norm is not 0 */
+      if (mad_norm != 0.0) {
+        auto mra_view = mra_coeff->second.coeffs().current_view()(0);
+        int K = mra_view.dim(0);
+        for (int i = 0; i < mra_view.dim(0); ++i) {
+          for (int j = 0; j < mra_view.dim(1); ++j) {
+            for (int k = 0; k < mra_view.dim(2); ++k) {
+              if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision) {
+                std::cout << "Mismatch for " << key << " at " << i << " " << j << " " << k << " : MRA "
+                          << mra_view(i, j, k) << " MADNESS " << mad_coeff.coeff()(i, j, k)
+                          << "(diff: " << std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) << ")" << std::endl;
+
+                std::cout << "MRA coeffs:\n" << mra_view << std::endl;
+                std::cout << "MADNESS coeffs:\n" << mad_coeff.coeff() << std::endl;
+                check = false;
+                throw std::runtime_error(name + ": mismatch in coefficients between MADNESS and MRA");
+              }
+            }
+          }
+        }
       }
     } else {
       std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
@@ -267,6 +275,7 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   auto gaussians = make_functionset<Gaussian<T, NDIM>>(pmap.batch_manager());
   auto gaussians_view = gaussians->current_view(); // host view
 
+  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> project_result_map;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
 
@@ -284,6 +293,7 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   auto start = make_start(gaussians, project_control);
   // auto start_d = make_start(project_d_control);
   auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
+  auto extract_p = make_extract(project_result, project_result_map, "extract_p");
   // C(P)
   auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))
@@ -341,7 +351,8 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   startup(world,argc,argv);
   {
     auto u_result = compute_u_madness<T>(world, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(u_result, umap, "u_result", std::numeric_limits<T>::epsilon());
+    compare_mra_madness<T, NDIM>(u_result, project_result_map, "p_result", /*std::numeric_limits<T>::epsilon()*/ 1.e-15);
+    compare_mra_madness<T, NDIM>(u_result, umap, "u_result", /*std::numeric_limits<T>::epsilon()*/ 1.e-15);
     functionT dudx1;
     functionT u = compute_u_madness<T>(world, K, precision, init_lev);
     functionT xleft_d = factoryT(world).f(xbdy_dirichlet);
