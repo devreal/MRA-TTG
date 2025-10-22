@@ -139,7 +139,7 @@ namespace mra {
 
       deriv = 0;
 
-      std::cout << "DERIVATIVE " << key << " axis " << axis << std::endl;
+      //std::cout << "DERIVATIVE " << key << " axis " << axis << std::endl;
 
       parent_to_child(D, left,   key.neighbor(axis, -1), node_left, left_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
       transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RPT), tmp_result, transform_result, axis);

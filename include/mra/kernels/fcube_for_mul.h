@@ -92,8 +92,6 @@ namespace mra {
     SYNCTHREADS();
     T scale_phi = std::pow(2.0, 0.5*np);
     phi *= scale_phi;
-
-    std::cout << "phi_for_mul np " << np << " nc " << nc << " lp " << lp << " lc " << lc << "\n" << normf(phi) << std::endl;
   }
 
 
