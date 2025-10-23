@@ -42,7 +42,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   }
 
   T coeff = 10.0; // coefficient for the Gaussian
-  mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata);
+  mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata, functiondata);
   mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
 
   // put it into a buffer
