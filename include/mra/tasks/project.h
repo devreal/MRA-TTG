@@ -145,6 +145,9 @@ namespace mra{
         }
 
         if (!result.is_all_leaf()) {
+          if (!result.is_any_leaf()) {
+            result = node_type(key, N); // drop coeffs if none of the functions are leafs
+          }
           std::vector<mra::Key<NDIM>> bcast_keys;
           for (auto child : children(key)) bcast_keys.push_back(child);
 #ifndef MRA_ENABLE_HOST

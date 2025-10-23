@@ -95,6 +95,11 @@ namespace mra {
             // std::cout << "fcoeffs not leaf " << key << " norm " << norm << std::endl;
           }
         }
+        SYNCTHREADS();
+        if (!*is_leaf) {
+          /* zero out coeffs if this is not a leaf */
+          coeffs = T(0.0);
+        }
       }
     }
 

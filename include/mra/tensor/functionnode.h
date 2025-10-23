@@ -273,6 +273,14 @@ namespace mra {
           return all_leaf;
         }
 
+        bool is_any_leaf() const {
+          bool any_leaf = false;
+          for (auto& data : m_metadata) {
+            any_leaf |= data.is_leaf;
+          }
+          return any_leaf;
+        }
+
         bool& is_leaf(size_type i) {
           return m_metadata[i].is_leaf;
         }
