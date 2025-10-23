@@ -199,7 +199,7 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
 
 template<typename T, mra::Dimension NDIM>
 void test_convolution(std::size_t N, size_type K, T precision, int max_level,
-                     T verification_precision, int argc, char** argv) {
+                     int npt, T verification_precision, int argc, char** argv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-Length,Length);
@@ -229,7 +229,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
 
   std::cout << N << " Gaussians with expnt " << expnt << std::endl;
 
-  mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata);
+  mra::Convolution<T, NDIM> conv(K, npt, coeff, expnt, functiondata, functiondata);
   mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
 
   // put it into a buffer
@@ -244,8 +244,8 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto compress_r    = make_compress(N, K, true, functiondata, reconstruct_result, compress_r_result, "compress_r");
   // auto extract_r     = make_extract(reconstruct_result, rmap);
   // auto extract_cc    = make_extract(compress_r_result, ccmap);
-  // auto convolve      = make_convolution(N, K, compress_r_result, convolution_result, op, precision, "convolution");
-  auto reconstruct_c = make_reconstruct(N, K, functiondata, compress_r_result, reconstruct_conv_result, "reconstruct_conv");
+  auto convolve      = make_convolution(N, K, compress_r_result, convolution_result, op, precision, "convolution");
+  auto reconstruct_c = make_reconstruct(N, K, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_conv");
   auto extract_conv  = make_extract(reconstruct_conv_result, convmap);
   auto connected     = make_graph_executable(start.get());
   assert(connected);
@@ -282,7 +282,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
     // test_conv_node<T, NDIM>(world, madcoeff, N, K, cmap, op, precision, init_lev);
     // compare_mra_madness<T, NDIM>(madfunc, rmap, "reconstruct_result", verification_precision);
     // madfunc.get_impl()->change_tree_state(madness::TreeState::nonstandard);
-    // madness::Function<T,NDIM> fff=(madfunc);
+    madness::Function<T,NDIM> fff=(madfunc);
     // fff.make_nonstandard(false, true);
     // fff.compress();
     // compare_mra_madness<T, NDIM>(fff, cmap, "compress_r_result", verification_precision);
@@ -296,7 +296,7 @@ int main(int argc, char **argv) {
   /* options */
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
-  size_type K = opt.parse("-K", 10);
+  size_type K = opt.parse("-K", 6);
   expnt = opt.parse("-e", expnt); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int log_precision = opt.parse("-p", 6); // default: 1e-6
@@ -306,6 +306,7 @@ int main(int argc, char **argv) {
   bool norand = opt.exists("-norand");
   int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
 
+  int npt = 2*K; // default number of points for quadrature in convolution
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
 
@@ -325,7 +326,7 @@ int main(int argc, char **argv) {
 #endif // TTG_PARSEC_IMPORTED
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
 
-  test_convolution<double, 3>(N, K, std::pow(10, -log_precision), max_level,
+  test_convolution<double, 3>(N, K, std::pow(10, -log_precision), max_level, npt,
                              std::pow(10, -verification_log_precision), argc, argv);
 
   madness::finalize();
