@@ -29,11 +29,8 @@ namespace mra {
     T fac;
 
     OperatorData() : ops{}, norm(0.0), fac(1.0) {}
-
     OperatorData(const OperatorData&) = default;
-
     ~OperatorData() = default;
-
   };
 
   template <typename T, Dimension NDIM>
@@ -75,13 +72,13 @@ namespace mra {
         autoc();
 
         // initialize rnlpcache with an empty tensor for issmall cases
-        // Tensor<T, 1> rnlp; // initialize it to zero
-        // Key<NDIM> key(-SHRT_MAX, std::array<Translation, NDIM>({0}));
-        // cachemutex.lock();
-        // if (rnlpcache.find(key) == rnlpcache.end()) {
-        //   rnlpcache.emplace(key, std::move(rnlp));
-        // }
-        // cachemutex.unlock();
+        Tensor<T, 1> rnlp; // initialize it to zero
+        Key<NDIM> key(-SHRT_MAX, std::array<Translation, NDIM>({0}));
+        cachemutex.lock();
+        if (rnlpcache.find(key) == rnlpcache.end()) {
+          rnlpcache.emplace(key, std::move(rnlp));
+        }
+        cachemutex.unlock();
       }
 
       Convolution(Convolution&&) = default;
@@ -102,7 +99,9 @@ namespace mra {
       // projection of a Gaussian onto double order polynomials
       const Tensor<T, 1>& make_rnlp(Level n, Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
         auto it = rnlpcache.find(key);
+        cachemutex.unlock();
         if (it != rnlpcache.end()) {
           const auto& r = it->second;
           return r;
@@ -155,7 +154,9 @@ namespace mra {
 
       const Tensor<T, 1>& get_rnlp (Level n, Translation lx) const {
         mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
         auto it = rnlpcache.find(key);
+        cachemutex.unlock();
         if (it != rnlpcache.end()) {
           const auto& r = it->second;
           return r;
@@ -165,19 +166,17 @@ namespace mra {
         Level natlev = 0.5*std::log2(expnt) + 1; // natural level for Gaussian
 
         if (issmall(n, lx)) {
-          // store an empty tensor at n=-int_MAX (initialized in the constructor) and return it when issmall is true
-          // rnlp = Tensor<T, 1>(2*K); // initialize it to zero
-          // auto rnlp_view = rnlp.current_view();
-          // rnlp_view = 0.0;
-          // Key<NDIM> key_small(-SHRT_MAX, std::array<Translation, NDIM>({0}));
-          // cachemutex.lock();
-          // auto it_small = rnlpcache.find(key_small); // guaranteed to be there since we initialized it in the constructor
-          // cachemutex.unlock();
-          // const auto& r_small = it_small->second;
-          // return r_small;
+          // store an empty tensor at n=-SHRT_MAX (initialized in the constructor) and return it when issmall is true
+          Key<NDIM> key_small(-SHRT_MAX, std::array<Translation, NDIM>({0}));
+          cachemutex.lock();
+          auto it_small = rnlpcache.find(key_small); // guaranteed to be there since we initialized it in the constructor
+          cachemutex.unlock();
+          const auto& r_small = it_small->second;
+          return r_small;
 
-          const auto & r = Tensor<T, 1>(); // return an empty tensor
-          return r;
+          // // const auto & r = Tensor<T, 1>(); // return an empty tensor
+          // rnlp = Tensor<T, 1>();
+          // return rnlp;
         }
         else if (n < natlev) {
           // compute at a finer level
@@ -236,26 +235,18 @@ namespace mra {
         auto rnlp1_view = rnlp1.current_view();
         auto rnlp2_view = rnlp2.current_view();
 
-        std::cout << "rnlp for (" << n << ", " << lx-1 << ") is \n" << rnlp1_view << std::endl;
-        std::cout << "rnlp for (" << n << ", " << lx << ") is \n" << rnlp2_view << std::endl;
-
-        // std::cout << "For (" << n << ", " << lx << ") rnlp1 is \n" << rnlp1_view << "\n and rnlp2 is \n" << rnlp2_view << std::endl;
-        // std::cout << "Function call for rnlp1 results in \n" << rnlp1_view << "\n and rnlp2 results in \n" << rnlp2_view << std::endl;
-
         std::array<Slice,1> slice1 = {Slice(0, 2*K)};
         if (!rnlp1.empty()) R_view(slice1) = rnlp1_view(slice1);
         // std::cout << "After copying rnlp1 to R_view, R_view is \n" << R_view << std::endl;
         std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
-        if (!rnlp2.empty()) R_view(slice2) = rnlp2_view(slice2);
+        if (!rnlp2.empty()) R_view(slice2) = rnlp2_view(slice1);
         // std::cout << "After copying rnlp2 to R_view, R_view is \n" << R_view << std::endl;
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
         auto rnlij_view = rnlij.current_view();
         rnlij_view = 0.0;
-        // std::cout << "***MRA: for (" << n << ", " << lx << ") Before inner, R_view: \n" << R_view << std::endl; //" \n and c_view: \n" << c.current_view() << std::endl;
         detail::inner(c.current_view(), R_view, rnlij_view);
-        // std::cout << "***MRA: for (" << n << ", " << lx << ") After inner, rnlij_view: \n" << rnlij_view << std::endl;
 
         cachemutex.lock();
         if (rnlijcache.find(key) == rnlijcache.end()) {
