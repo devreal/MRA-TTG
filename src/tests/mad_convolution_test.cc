@@ -201,6 +201,7 @@ template<typename T, mra::Dimension NDIM>
 void test_convolution(std::size_t N, size_type K, T precision, int max_level,
                      int npt, T verification_precision, int argc, char** argv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
+  auto functiondata2 = mra::FunctionData<T,NDIM>(2*K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-Length,Length);
 
@@ -229,7 +230,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
 
   std::cout << N << " Gaussians with expnt " << expnt << std::endl;
 
-  mra::Convolution<T, NDIM> conv(K, npt, coeff, expnt, functiondata, functiondata);
+  mra::Convolution<T, NDIM> conv(K, npt, coeff, expnt, functiondata, functiondata2);
   mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
 
   // put it into a buffer
