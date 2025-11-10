@@ -1,6 +1,8 @@
 #ifndef CONV_MAD_H
 #define CONV_MAD_H
 
+#include <madness/mra/mra.h>
+#include <madness/world/world.h>
 #include <madness/mra/operator.h>
 #include <madness/mra/convolution1d.h>
 #include "mra/misc/types.h"
@@ -13,8 +15,16 @@ namespace mra {
     T expnt;
     T coeff;
 
-    OperatorInfo() : K(8), expnt(1500), coeff(1) {}
-    OperatorInfo(size_type K, T expnt, T coeff) : K(K), expnt(expnt), coeff(coeff) {}
+    void init_madness() {
+      madness::World& world = madness::World::get_default();
+      madness::startup(world, 0, nullptr, false);
+    }
+    OperatorInfo() : K(8), expnt(1500), coeff(1) {
+      init_madness();
+    }
+    OperatorInfo(size_type K, T expnt, T coeff) : K(K), expnt(expnt), coeff(coeff) {
+      init_madness();
+    }
   };
 
   template <typename T>
@@ -50,10 +60,14 @@ namespace mra {
   public:
     OperatorInfo<T> op_info;
 
-    GaussianConvolutionOperator() : op_info(), conv1d(op_info.K, op_info.coeff, op_info.expnt, 0, false) {}
+    GaussianConvolutionOperator() : op_info(), conv1d(op_info.K, op_info.coeff, op_info.expnt, 0, false) {
+      // startup(madness::World::get_default(), 0, nullptr, false);
+    }
 
     GaussianConvolutionOperator(const OperatorInfo<T>& op_info) : op_info(op_info),
-                                              conv1d(op_info.K, op_info.coeff, op_info.expnt, 0, false) {}
+                                              conv1d(op_info.K, op_info.coeff, op_info.expnt, 0, false) {
+      // startup(madness::World::get_default(), 0, nullptr, false);
+    }
 
     std::shared_ptr<const GaussianOperatorData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
       cachemutex.lock();
@@ -157,7 +171,7 @@ namespace mra {
       ops_data.fac = 1.0;
 
       cachemutex.lock();
-      if (_opcache.find(disp) != _opcache.end()) {
+      if (_opcache.find(disp) == _opcache.end()) {
         const auto result = std::make_shared<const GaussianOperatorData<T, NDIM>>(std::move(ops_data));
         _opcache.emplace(disp, std::move(result));
       }
