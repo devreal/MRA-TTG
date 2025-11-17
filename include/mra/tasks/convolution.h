@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/conv_mad.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -24,7 +25,7 @@ namespace mra{
   auto make_convolution(size_type N, size_type K,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> result,
-                        const mra::ConvolutionOperator<T, NDIM>& op,
+                        const mra::GaussianConvolutionOperator<T, NDIM>& op,
                         const T thresh,
                         const char* name = "convolution",
                         ProcMap procmap = {},
@@ -49,7 +50,7 @@ namespace mra{
       }
       else {
         auto in_node_view = in_node.coeffs().current_view();
-        std::shared_ptr<const mra::OperatorData<T, NDIM>> op_data = op.get_op(key);
+        std::shared_ptr<const mra::GaussianOperatorData<T, NDIM>> op_data = op.get_op(key.level(), key);
         T opnorm = op_data->norm * op_data->fac;
         T cnorm = normf(in_node_view);
         T tol = thresh*0.01;
@@ -82,16 +83,16 @@ namespace mra{
           T normr = 1.0;
           T norms = 1.0;
           T fac = op_data->fac;
-          std::array<bool, 2> at = {true, true}; // apply terms analogue in MADNESS
+          std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
           if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
           auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
           auto out_view = out.coeffs().current_view();
 
-          for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->normR;
-          for (size_type i = 0; i < NDIM; ++i) norms *= op_data->ops[i]->normS;
+          for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->Rnorm;
+          for (size_type i = 0; i < NDIM; ++i) norms *= op_data->ops[i]->Snorm;
 
-          std::cout << "For Key: " << key << " the operators being passed are " << op_data->ops[0]->R.current_view() << std::endl;
+          // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
           auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
           auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
