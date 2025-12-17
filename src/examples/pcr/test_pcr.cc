@@ -9,14 +9,18 @@ using namespace mra;
 
 
 template<typename T, mra::Dimension NDIM>
-void test_pcr(std::size_t N, std::size_t K, int num_batches, int max_level, int seed, int initial_level) {
+void test_pcr(std::size_t N, std::size_t K,
+              int num_batches, int max_level,
+              int seed, int initial_level,
+              T root_radius, T expnt,
+              T domain_size, bool print_dot)
+{
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
-  D[0].set_cube(-6.0,6.0);
+  D[0].set_cube(-domain_size, domain_size);
 
   if (seed > 0) {
     srand48(seed);
-    for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
   }
 
   auto pmap = make_procmap<NDIM>(N, num_batches);
@@ -28,27 +32,29 @@ void test_pcr(std::size_t N, std::size_t K, int num_batches, int max_level, int 
   ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
 
   // define N Gaussians
+  //std::cout << "Defining " << N << " Gaussians with initial level "
+  //          << initial_level << " and seed " << seed
+  //          << " in " << pmap.batch_manager()->num_batches() << " batches" << std::endl;
   auto gaussians = make_functionset<mra::Gaussian<T, NDIM>>(pmap.batch_manager());
   auto gaussians_view = gaussians->current_view(); // host view
   // T expnt = 1000.0;
-  for (int i = 0; i < gaussians->num_local_functions(); ++i) {
-    T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
+  for (int i = 0; i < gaussians->num_functions(); ++i) {
+    expnt = (seed > 0) ? (expnt + 1500*drand48()) : expnt;
     mra::Coordinate<T,NDIM> r;
     if (seed > 0) {
       for (size_t d=0; d<NDIM; d++) {
-        r[d] = T(-6.0) + T(12.0)*drand48();
+        r[d] = T(-1*(root_radius)) + T(root_radius)*drand48();
       }
     }
     gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
-    //std::cout << gaussians_view[i] << std::endl;
   }
 
   if (seed == 0) {
-    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500
-                             << " in " << gaussians->num_batches() << " batches, "
-                             << gaussians->num_local_functions() << " of "
-                             << N << " functions are local in "
-                             << gaussians->num_local_batches() << " local batches" << std::endl;
+    std::cout << N << " Gaussians with expnt " << 1500
+              << " in " << gaussians->num_batches() << " batches, "
+              << gaussians->num_local_functions() << " of "
+              << N << " functions are local in "
+              << gaussians->num_local_batches() << " local batches" << std::endl;
   }
 
   // put it into a buffer
@@ -83,9 +89,11 @@ void test_pcr(std::size_t N, std::size_t K, int num_batches, int max_level, int 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
   if (ttg::default_execution_context().rank() == 0) {
     // std::cout << "Is everything connected? " << connected << std::endl;
-    // std::cout << "==== begin dot ====\n";
-    // std::cout << ttg::Dot(true)(start.get()) << std::endl;
-    // std::cout << "====  end dot  ====\n";
+    if (print_dot) {
+      std::cout << "==== begin dot ====\n";
+      std::cout << ttg::Dot(true)(start.get()) << std::endl;
+      std::cout << "====  end dot  ====\n";
+    }
 
     beg = std::chrono::high_resolution_clock::now();
   }
@@ -118,9 +126,13 @@ int main(int argc, char **argv) {
   bool norand = opt.exists("-norand");
   int max_level = opt.parse("-l", -1);
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int initial_level = opt.parse("-i", 2);
+  int initial_level = opt.parse("-i", 0); // initial level for the Gaussian functions, default is using a heuristic
   int seed    = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
   int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
+  double root_radius = opt.parse("-r", 2.0); // radius of the root domain cube
+  double expnt = opt.parse("-e", 1500.0); // default: 1000.0
+  double domain_size = opt.parse("-d", 6.0); // size of the domain cube [-d,d]
+  bool print_dot = opt.exists("-dot");
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
@@ -131,7 +143,7 @@ int main(int argc, char **argv) {
    * with the first key it receives. We need to find a way to do that automatically outside of make_project.
    */
   for (int i = 0; i < nrep; ++i) {
-    test_pcr<double, 3>(N, K, num_batches, max_level, seed, initial_level);
+    test_pcr<double, 3>(N, K, num_batches, max_level, seed, initial_level, root_radius, expnt, domain_size, print_dot);
   }
 
   allocator_fini();
