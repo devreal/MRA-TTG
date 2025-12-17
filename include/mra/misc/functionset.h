@@ -59,7 +59,7 @@ namespace mra {
   public:
 
     FunctionSet(std::shared_ptr<BatchManager> batchman)
-    : m_tensor(accumulate_local_batch_sizes(batchman))
+    : m_tensor(batchman->num_functions())
     , m_batchman(std::move(batchman))
     { }
 
@@ -85,7 +85,6 @@ namespace mra {
      */
     template<Dimension NDIM>
     size_type num_functions(const Key<NDIM>& key) const {
-      // Default implementation returns 1 function per key
       return m_batchman->batch_size(key.batch());
     }
 

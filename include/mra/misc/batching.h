@@ -1,6 +1,7 @@
 #ifndef MRA_MISC_BATCHING_H
 #define MRA_MISC_BATCHING_H
 
+#include <algorithm>
 
 #include "mra/misc/key.h"
 
@@ -283,7 +284,7 @@ namespace mra {
           if (m_num_batches <= m_peinfo.num_pes()) {
             /* more processes than batches: one batch per process */
             int start_pe = batch;
-            int end_pe = std::min(start_pe, start_pe + 1);
+            int end_pe = start_pe + 1;
             return {start_pe, end_pe};
           }
           int pes_per_batch = compute_pes_per_batch();
@@ -313,7 +314,7 @@ namespace mra {
      */
     size_type batch_index(size_type func_idx) const {
       size_type batch_size = (m_num_funcs + m_num_batches - 1) / m_num_batches; // round up
-      return (func_idx + batch_size - 1) / batch_size;
+      return (func_idx) / batch_size;
     }
 
     /**
@@ -560,10 +561,11 @@ namespace mra {
     using BatchManager = DefaultBatchManager<ProcessInfo>;
     return BatchedPartitionKeymap<NDIM, BatchManager>(
                 make_batch_manager(num_functions,
-                                   num_batches > 0 ? num_batches
+                                   num_batches > 0 ? std::min(static_cast<size_type>(num_batches), num_functions)
                                                    : BatchManager::suggest_num_batches(num_functions),
                                    ProcessInfo(world),
-                                   num_batches > 0 ? BatchDistribution::BLOCK
+                                   (num_batches > world.size())
+                                                   ? BatchDistribution::BLOCK
                                                    : BatchManager::suggest_distribution(num_functions)),
                 target_level);
   }
