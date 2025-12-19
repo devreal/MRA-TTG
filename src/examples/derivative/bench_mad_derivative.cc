@@ -141,9 +141,8 @@ static T xbdy_dirichlet(const coordT &pt) {
 
 
 template<typename T>
-void test_derivative(World &world, std::size_t N, int K, int axis, T thresh,
-                     int max_level, int initial_level, int nrep, int seed,
-                     T verification_precision) {
+void test_derivative(World &world, std::size_t N, int K, int axis_a, int axis_b, T thresh,
+                     int max_level, int initial_level, int nrep, int seed) {
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
 
@@ -181,8 +180,15 @@ void test_derivative(World &world, std::size_t N, int K, int axis, T thresh,
       a = random_gaussians(N, world, seed);
     }
 
-    madness::Derivative<T, 3> dx1(world, axis, bc, xleft_d, xright_d, K);
-    auto diff = apply(world, dx1, a);
+    std::vector<real_function_3d> dudx1 = std::move(a);
+    for (int ax = axis_a;
+         (axis_a < axis_b) ? (ax <= axis_b) : (ax >= axis_b);
+         ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
+      madness::Derivative<T, 3> dx1(world, ax, bc, xleft_d, xright_d, K);
+      dudx1 = apply(world, dx1, dudx1);
+      //dudx1.truncate();
+    }
+
     end = std::chrono::high_resolution_clock::now();
     if (world.rank() == 0) {
       std::cout << "MAD Execution Time (milliseconds) : "
@@ -202,11 +208,11 @@ int main(int argc, char **argv) {
   std::size_t K = opt.parse("-K", 8);
   expnt = opt.parse("-e", 100.0); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int axis    = opt.parse("-a", 0);
+  int axis_a  = opt.parse("-a1", 0); // from axis 0
+  int axis_b  = opt.parse("-a2", 2); // to axis 2
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
-  int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
   int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
   int nrep = opt.parse("-n", 1); // number of repetitions
   int seed = opt.parse("-s", 0); // random seed
@@ -215,18 +221,17 @@ int main(int argc, char **argv) {
     std::cout << "Running MADNESS derivative benchmark with parameters: "
               << "N = " << N << ", K = " << K
               << ", expnt = " << expnt
-              << ", axis = " << axis
+              << ", axis = " << axis_a << "-" << axis_b
               << ", log_precision = " << log_precision
               << ", max_level = " << max_level
-              << ", verification_log_precision = " << verification_log_precision
               << ", initial_level = " << initial_level
               << std::endl;
   }
 
   startup(world, argc, argv);
 
-  test_derivative<double>(world, N, K, axis, std::pow(10, -log_precision), max_level, initial_level,
-                             nrep, seed, std::pow(10, -verification_log_precision));
+  test_derivative<double>(world, N, K, axis_a, axis_b, std::pow(10, -log_precision), max_level, initial_level,
+                             nrep, seed);
   finalize();
   return 0;
 }

@@ -14,9 +14,9 @@ static const int init_lev = 2;
 static double expnt = 1000.0;
 
 template<typename T, mra::Dimension NDIM>
-void test_derivative(std::size_t N, size_type K, Dimension axis, T precision,
+void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axis_b, T precision,
                      int max_level, int initial_level,
-                     T verification_precision, int num_batches) {
+                     int num_batches) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6,6);
@@ -41,15 +41,12 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision,
   auto gaussians = make_functionset<Gaussian<T, NDIM>>(pmap.batch_manager());
   auto gaussians_view = gaussians->current_view(); // host view
 
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
-
   for (int i = 0; i < gaussians->num_functions(); ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
       r[d] = 0.0;
     }
-    std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
+    //std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
     gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
@@ -62,15 +59,31 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision,
   auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))
   auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
-  // D(R(C(P)))
-  //auto extract_u = make_extract(reconstruct_result, umap);
-  auto derivative = make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
-                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap);
 
+  using derivative_type = decltype(make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis_a,
+                                      FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap));
+  std::array<derivative_type, NDIM> derivatives;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> deriv_out;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> deriv_in = reconstruct_result;
+
+  std::array<std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>>, NDIM> cmaps;
+  for (int ax = axis_a;
+       (axis_a < axis_b) ? (ax <= axis_b) : (ax >= axis_b);
+       ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out;
+    std::cout << "Computing derivative in axis " << ax << std::endl;
+    derivatives[ax] = make_derivative(gaussians, K, deriv_in, out, functiondata, db, g1, g2, ax,
+                                      FunctionData<T, NDIM>::BC_DIRICHLET,
+                                      FunctionData<T, NDIM>::BC_DIRICHLET,
+                                      std::string("derivative")+std::to_string(ax), pmap, dmap);
+    deriv_in = out;
+  }
+  /* the final edge output */
+  deriv_out = deriv_in;
   auto sink = ttg::make_tt([](const Key<3>& key, const FunctionsReconstructedNode<T, NDIM>& node){
       //std::cout << "Received derivative for key " << key << " with norm " << node.norm() << " and sum " << node.sum() << std::endl;
     },
-    ttg::edges(derivative_result), ttg::edges(), "sink");
+    ttg::edges(deriv_out), ttg::edges(), "sink");
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
@@ -111,12 +124,12 @@ int main(int argc, char **argv) {
   size_type K = opt.parse("-K", 8);
   expnt = opt.parse("-e", 100.0); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int axis    = opt.parse("-a", 0);
+  int axis_a  = opt.parse("-a1", 0); // from axis 0
+  int axis_b  = opt.parse("-a2", 2); // to axis 2
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
-  int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
-  int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
+  int initial_level = opt.parse("-i", 0); // initial level for the Gaussian functions
   int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
   int nrep = opt.parse("-n", 1); // number of repetitions
 
@@ -127,18 +140,16 @@ int main(int argc, char **argv) {
     std::cout << "Running MADNESS derivative test with parameters: "
               << "N = " << N << ", K = " << K
               << ", expnt = " << expnt
-              << ", axis = " << axis
+              << ", axis = " << axis_a << "-" << axis_b
               << ", log_precision = " << log_precision
               << ", max_level = " << max_level
-              << ", verification_log_precision = " << verification_log_precision
               << ", initial_level = " << initial_level
               << std::endl;
   }
 
   for (int i = 0; i < nrep; ++i) {
-    test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level,
-                              std::pow(10, -verification_log_precision), initial_level,
-                              num_batches);
+    test_derivative<double, 3>(N, K, axis_a, axis_b, std::pow(10, -log_precision), max_level,
+                              initial_level, num_batches);
   }
 
   ttg::finalize();
