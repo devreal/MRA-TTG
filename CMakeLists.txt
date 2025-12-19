@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.19)
 project(MRA-TTG LANGUAGES CXX)
 
+option(MRA_ENABLE_DEBUG "Whether to enable debug mode" OFF)
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 
 set(BUILD_TESTING OFF CACHE BOOL "Whether to build tests in this project and its subprojects")
@@ -9,6 +11,11 @@ set(CMAKE_CXX_STANDARD 20)
 
 # needed for atomicAdd_block
 set(CMAKE_CUDA_ARCHITECTURES 80)
+
+if (MRA_ENABLE_DEBUG)
+    message(STATUS "Enabling debug mode")
+    add_compile_definitions(MRA_CHECK_NORMS=1)
+endif()
 
 # whoever thought enabling OpenMP by default should be tarred and feathered!
 set(use_openmp OFF)

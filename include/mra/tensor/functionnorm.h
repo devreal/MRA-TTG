@@ -29,10 +29,12 @@ namespace mra {
       , m_initial({node.norms().empty(), nodes.norms().empty()...})
       , m_name(std::move(name))
       {
+        std::array<size_type, sizeof...(NodeTs)+1> counts = {node.count(), nodes.count()...};
 #ifndef MRA_ENABLE_HOST
-        m_norms = Tensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1, node.count()}, ttg::scope::Allocate);
+        m_norms = Tensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1,
+                                *std::max_element(counts.begin(), counts.end())}, ttg::scope::Allocate);
 #else
-        m_norms = Tensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1, node.count()}, ttg::scope::SyncIn);
+        m_norms = Tensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1, *std::max_element(counts.begin(), counts.end())}, ttg::scope::SyncIn);
 #endif // MRA_ENABLE_HOST
         for (int i = 0; i < m_nodes.size(); ++i) {
           auto& node = *m_nodes[i];
@@ -54,7 +56,7 @@ namespace mra {
         for (int i = 0; i < m_nodes.size(); ++i) {
           auto& node = *m_nodes[i];
           if (!node.empty()){
-            std::cout << "norm compute " << m_name << " " << i << " " << node.key() << std::endl;
+            //std::cout << "norm compute " << m_name << " " << i << " " << node.key() << std::endl;
             submit_simple_norm_kernel(node.key(), node.coeffs().current_view(), node.count(), m_norms.current_view()(i));
           }
         }
@@ -78,7 +80,7 @@ namespace mra {
           if (!m_initial[i]) {
             // verify the norms
             for (size_type j = 0; j < node.count(); ++j) {
-              std::cout << "norm verify " << m_name << " " << i << " " << node.key() << " expected " << norm_view(j) << " found " << node_norms(j) << std::endl;
+              //std::cout << "norm verify " << m_name << " " << i << " " << node.key() << " expected " << norm_view(j) << " found " << node_norms(j) << std::endl;
               if (std::abs(node_norms(j) - norm_view(j)) > 1e-15) {
                 std::cerr << m_name << ": failed to verify norm for function " << j << " of " << node.key()
                           << ": expected " << node_norms(j) << ", found " << norm_view(j) << std::endl;
@@ -88,7 +90,7 @@ namespace mra {
             }
           } else {
             // store the norm into the node
-            std::cout << "norm verify-set " << m_name << " " << i << " " << node.key() << " " << m_norms.view_on(ttg::device::Device::host())(i)(0) << std::endl;
+            //std::cout << "norm verify-set " << m_name << " " << i << " " << node.key() << " " << m_norms.view_on(ttg::device::Device::host())(i)(0) << std::endl;
             for (size_type j = 0; j < node.count(); ++j) {
               node_norms(j) = norm_view(j);
             }
