@@ -44,7 +44,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision,
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
 
-  for (int i = 0; i < gaussians->num_local_functions(); ++i) {
+  for (int i = 0; i < gaussians->num_functions(); ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
       r[d] = 0.0;
