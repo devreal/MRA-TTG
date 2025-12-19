@@ -8,6 +8,7 @@
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensoriter.h"
+#include "mra/misc/integer.h"
 
 namespace mra {
 
@@ -324,14 +325,14 @@ namespace mra {
 
 
 
-  template<typename T, Dimension NDIM>
+  template<typename T, Integer... Dims>
   class TensorView {
   public:
     using value_type = T;
     using const_value_type = std::add_const_t<value_type>;
-    SCOPE static constexpr Dimension ndim() { return NDIM; }
-    using dims_array_t = std::array<size_type, ndim()>;
+    using dims_tuple_t = std::tuple<Dims...>;
     SCOPE static constexpr bool is_tensor() { return true; }
+    SCOPE static constexpr Dimension ndim() { return std::tuple_size_v<dims_tuple_t>; }
 
   protected:
 
@@ -360,7 +361,8 @@ namespace mra {
       }
     }
 
-    SCOPE explicit TensorView(T *ptr, const dims_array_t& dims)
+    template<Integer... Dims>
+    SCOPE explicit TensorView(T *ptr, Dims... dims)
     : m_dims(dims)
     , m_ptr(ptr)
     { }
@@ -371,9 +373,9 @@ namespace mra {
     : TensorView(const_cast<T*>(ptr), std::forward<Dims>(dims)...) // remove const, we store a non-const pointer internally
     { }
 
-    template<typename S>
+    template<typename S, Integer... Dims>
     requires(!std::is_const_v<T> && std::is_same_v<S, T>)
-    SCOPE explicit TensorView(const S *ptr, const dims_array_t& dims)
+    SCOPE explicit TensorView(const S *ptr, Dims... dims)
     : TensorView(const_cast<T*>(ptr), dims) // remove const, we store a non-const pointer internally
     { }
 
@@ -392,7 +394,7 @@ namespace mra {
       return m_dims[d];
     }
 
-    SCOPE const dims_array_t& dims() const {
+    SCOPE const dims_tuple_t& dims() const {
       return m_dims;
     }
 
