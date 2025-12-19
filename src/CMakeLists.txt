@@ -13,6 +13,9 @@ target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
 add_executable(mad-pcr
                examples/pcr/test_pcr_madness.cc)
 target_link_libraries(mad-pcr PUBLIC MADchem)
+# disable PIE for madness executables because of the way MADNESS handles active messages
+set_property(TARGET mad-pcr PROPERTY POSITION_INDEPENDENT_CODE FALSE)
+target_link_options(mad-pcr PRIVATE "-Wl,-no_pie")
 target_include_directories(mad-pcr PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(mra-pcr-host-parsec
@@ -26,6 +29,8 @@ target_link_libraries(mra-deriv-host-parsec PUBLIC libmra-host-parsec)
 add_executable(mad-derivative
                examples/derivative/bench_mad_derivative.cc)
 target_link_libraries(mad-derivative PUBLIC MADchem)
+set_property(TARGET mad-derivative PROPERTY POSITION_INDEPENDENT_CODE FALSE)
+target_link_options(mad-derivative PRIVATE "-Wl,-no_pie")
 target_include_directories(mad-derivative PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(mra-unit-host-parsec
@@ -35,6 +40,8 @@ target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
 # Holding this off until BLAS in MADNESS works for our use case
 add_executable(mra-mad-deriv-host-parsec
                tests/mad_derivative_test.cc)
+# disable PIE for madness executables because of the way MADNESS handles active messages
+set_property(TARGET mra-mad-deriv-host-parsec PROPERTY POSITION_INDEPENDENT_CODE FALSE)
 target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
 
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
@@ -93,6 +100,8 @@ if (HAVE_CUDA)
 
   add_executable(mra-mad-deriv-device-cuda-parsec
                  tests/mad_derivative_test.cu)
+  # disable PIE for madness executables because of the way MADNESS handles active messages
+  set_property(TARGET mra-mad-deriv-device-cuda-parsec PROPERTY POSITION_INDEPENDENT_CODE FALSE)
   target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra libmra-cuda-parsec)
 
   if (TARGET Kokkos::kokkos)
@@ -132,6 +141,8 @@ if (HAVE_HIP)
 
   add_executable(mra-mad-deriv-device-hip-parsec
                  tests/mad_derivative_test.cu)
+  # disable PIE for madness executables because of the way MADNESS handles active messages
+  set_property(TARGET mra-mad-deriv-device-hip-parsec PROPERTY POSITION_INDEPENDENT_CODE FALSE)
   target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC MADworld MADtensor MADmra libmra-hip-parsec)
 
 endif (HAVE_HIP)
