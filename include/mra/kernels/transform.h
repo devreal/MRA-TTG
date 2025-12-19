@@ -90,9 +90,11 @@ namespace mra {
     TensorView<T, NDIM>& result,
     size_type axis) {
       if (axis == 0){
+        result = 0.0; // start from 0
         detail::inner(op, node, result, 0, axis);
       }
       else if (axis == node.ndim()-1){
+        result = 0.0; // start from 0
         detail::inner(node, op, result, axis, 0);
       }
       else {
