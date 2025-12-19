@@ -180,42 +180,45 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
     auto mad_norm = mad_coeff.coeff().normf();
     if (mra_coeff != mramap.end()) {
 
-      /* check the norm */
-      auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
-      T absdiff = std::abs(mad_norm - mra_norm);
-      if (mra_norm != 0.0) {
-        all_zero = false;
-      }
-      if (absdiff > precision) {
-        check = false;
-        //std::cout << mra_coeff->second.coeffs() << "\n with norm " << mra_norm << std::endl;
-        std::cout << std::scientific << "" << name << ": " << mra_coeff->first << " with norm " << mad_norm
-                  << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff
-                  << ", MAD has children " << mad_coeff.has_children()
-                  << ", MAD is leaf " << mad_coeff.is_leaf()
-                  << ", MRA is leaf " << mra_coeff->second.is_all_leaf()
-                  << ")" << std::endl;
-        //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
-      }
+      for (int fn = 0; fn < mra_coeff->second.coeffs().current_view().dim(0); ++fn) {
 
-      assert(mra_coeff->first == mra_coeff->second.key());
+        /* check the norm */
+        auto mra_view = mra_coeff->second.coeffs().current_view()(fn);
+        auto mra_norm = mra::normf(mra_view);
+        T absdiff = std::abs(mad_norm - mra_norm);
+        if (mra_norm != 0.0) {
+          all_zero = false;
+        }
+        if (absdiff > precision) {
+          check = false;
+          //std::cout << mra_coeff->second.coeffs() << "\n with norm " << mra_norm << std::endl;
+          std::cout << std::scientific << "" << name << ": " << mra_coeff->first << " with norm " << mad_norm
+                    << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff
+                    << ", MAD has children " << mad_coeff.has_children()
+                    << ", MAD is leaf " << mad_coeff.is_leaf()
+                    << ", MRA is leaf " << mra_coeff->second.is_all_leaf()
+                    << ")" << std::endl;
+          //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
+        }
 
-      /* check the individual coefficients if the norm is not 0 */
-      if (mad_norm != 0.0) {
-        auto mra_view = mra_coeff->second.coeffs().current_view()(0);
-        int K = mra_view.dim(0);
-        for (int i = 0; i < mra_view.dim(0); ++i) {
-          for (int j = 0; j < mra_view.dim(1); ++j) {
-            for (int k = 0; k < mra_view.dim(2); ++k) {
-              if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision) {
-                std::cout << "Mismatch for " << key << " at " << i << " " << j << " " << k << " : MRA "
-                          << mra_view(i, j, k) << " MADNESS " << mad_coeff.coeff()(i, j, k)
-                          << "(diff: " << std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) << ")" << std::endl;
+        assert(mra_coeff->first == mra_coeff->second.key());
 
-                std::cout << "MRA coeffs:\n" << mra_view << std::endl;
-                std::cout << "MADNESS coeffs:\n" << mad_coeff.coeff() << std::endl;
-                check = false;
-                throw std::runtime_error(name + ": mismatch in coefficients between MADNESS and MRA");
+        /* check the individual coefficients if the norm is not 0 */
+        if (mad_norm != 0.0) {
+          int K = mra_view.dim(0);
+          for (int i = 0; i < mra_view.dim(0); ++i) {
+            for (int j = 0; j < mra_view.dim(1); ++j) {
+              for (int k = 0; k < mra_view.dim(2); ++k) {
+                if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision) {
+                  std::cout << "Mismatch for " << key << " at " << i << " " << j << " " << k << " : MRA "
+                            << mra_view(i, j, k) << " MADNESS " << mad_coeff.coeff()(i, j, k)
+                            << "(diff: " << std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) << ")" << std::endl;
+
+                  std::cout << "MRA coeffs:\n" << mra_view << std::endl;
+                  std::cout << "MADNESS coeffs:\n" << mad_coeff.coeff() << std::endl;
+                  check = false;
+                  throw std::runtime_error(name + ": mismatch in coefficients between MADNESS and MRA");
+                }
               }
             }
           }
