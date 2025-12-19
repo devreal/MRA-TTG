@@ -392,7 +392,7 @@ int main(int argc, char **argv) {
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
-  int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
+  int verification_log_precision = opt.parse("-v", 10); // default: 1e-10
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
