@@ -240,7 +240,7 @@ namespace mra{
             const Tensor<T, 2>& phi= functiondata.get_phi();
             const Tensor<T, 1>& quad_x = functiondata.get_quad_x();
 
-            FunctionNorms<T, NDIM> norms(name, left, center, right);
+            FunctionNorms<T, NDIM> norms(name, result, left, center, right);
 
 #ifndef MRA_ENABLE_HOST
 
