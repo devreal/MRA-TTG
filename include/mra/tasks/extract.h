@@ -20,9 +20,13 @@
 namespace mra{
 
   template <Dimension NDIM, typename NodeT>
-  auto make_extract(ttg::Edge<Key<NDIM>, NodeT>& in, std::map<Key<NDIM>, NodeT>& map){
+  auto make_extract(ttg::Edge<Key<NDIM>, NodeT>& in, std::map<Key<NDIM>, NodeT>& map, std::string name="extract") {
+    /* TODO: need to bring together functions from different batches */
     auto func = [&map](const Key<NDIM>& key, NodeT&& node) {
       static std::mutex m;
+      if (key != node.key()) {
+        throw std::runtime_error("extract: key on input edge does not match node key");
+      }
       std::lock_guard<std::mutex> lock(m);
       map[key] = std::move(node);
     };

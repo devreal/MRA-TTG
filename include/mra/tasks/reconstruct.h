@@ -8,6 +8,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/functionset.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -19,9 +20,9 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, mra::Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_reconstruct(
-    const std::size_t N,
+    const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
@@ -31,10 +32,33 @@ namespace mra{
     DeviceMap devicemap = {})
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> S("S");  // passes scaling functions down
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> P("Primer"); // primer for root
 
-    auto do_reconstruct = [&, N, K, name](const mra::Key<NDIM>& key,
-                                    const mra::FunctionsCompressedNode<T, NDIM>& node,
-                                    const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
+    auto primer = [&, fns, name](const mra::Key<NDIM>& key,
+                                    const mra::FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
+      //std::cout << name << " primer " << key << std::endl;
+      if (key.level() == 0) {
+        /* root node: need to send an empty node as the parent to do_reconstruct */
+        size_type N = fns->num_functions(key);
+        auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
+        r_empty.set_all_leaf(false);
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::send<0>(key, std::move(r_empty));
+#else
+        ttg::send<0>(key, std::move(r_empty));
+#endif
+      }
+    };
+
+    auto p = ttg::make_tt(std::move(primer), ttg::edges(in), edges(P), std::string(name) + "-primer");
+
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) p->set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) p->set_devicemap(devicemap);
+
+    auto do_reconstruct = [&, fns, K, name](const mra::Key<NDIM>& key,
+                                            const mra::FunctionsCompressedNode<T, NDIM>& node,
+                                            const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
+      size_type N = fns->num_functions(key);
       const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*N;
       ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
       const auto& hg = functiondata.get_hg();
@@ -155,17 +179,22 @@ namespace mra{
     };
 
 
-    auto s = ttg::make_tt<Space>(std::move(do_reconstruct), ttg::edges(in, S), ttg::edges(S, out), name, {"input", "s"}, {"s", "output"});
+    auto s = ttg::make_tt<Space>(std::move(do_reconstruct),
+                                 ttg::edges(in, ttg::fuse(S, P)), // inputs
+                                 ttg::edges(S, out),              // outputs
+                                 name, {"input", "s/p"}, {"s", "output"});
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) s->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) s->set_devicemap(devicemap);
 
-    if (ttg::default_execution_context().rank() == 0) {
-      s->template in<1>()->send(mra::Key<NDIM>{0,{0}},
-                                mra::FunctionsReconstructedNode<T,NDIM>(mra::Key<NDIM>{0,{0}}, N)); // Prime the flow of scaling functions
-    }
+    /* assemble the Reconstruct TTG */
+    auto ins = std::make_tuple(s->template in<0>(), s->template in<0>());
+    auto outs = std::make_tuple(s->template out<0>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(2);
+    ops[0] = std::move(s);
+    ops[1] = std::move(p);
 
-    return s;
+    return ttg::make_ttg(std::move(ops), std::move(ins), std::move(outs), std::string(name) + " TTG");
   }
 } // namespace mra
 

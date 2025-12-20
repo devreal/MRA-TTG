@@ -7,53 +7,11 @@
 
 namespace mra {
 
-#if 0
-  /// A pmap that spatially decomposes the domain and by default slightly overdcomposes to attempt to load balance
-  template <Dimension NDIM>
-  class PartitionPmap {
-  public:
-    enum class Type { CYCLIC, BLOCK };
-  private:
-    int nproc;
-    Type type;
-    Level target_level;
-  public:
-    // Default is to try to distribute single chunks
-    // but the user can specify an oversubscribe factor
-    PartitionPmap(int factor = 1, Type type = Type::BLOCK, size_t nproc = ttg::default_execution_context()::size())
-    : nproc(nproc)
-    , type(type)
-    {
-      /* the minimum number of levels needed in 3D: (nproc*factor)**(1/8) */
-      target_level = std::ceil(std::pow(float(nproc * factor), 1.0/(1<<NDIM)));
-    }
-
-    /// Find the owner of a given key
-    HashValue operator()(const Key<NDIM>& key) const {
-      HashValue hash = 0;
-      auto compute_hash = [&](const Key<NDIM>& k) {
-        for (Dimension d = 0; d < NDIM; ++d) {
-          hash = (hash << NDIM) + k.translation(d);
-        }
-      };
-      if (key.level() <= target_level) {
-        return compute_hash(key) % nproc;
-      }
-      else {
-        /* find the parent at the target level and use the parent's process */
-        auto parent = key.parent(key.level() - target_level);
-        auto hash = compute_hash(parent);
-        if (type == Type::BLOCK) {
-          return hash / nproc; // cluster as many neighboring nodes as possible
-        } else {
-          return hash % nproc; // cycle through neighboring nodes
-        }
-      }
-    }
-  };
-#endif // 0
-
-  /// A pmap that spatially decomposes the domain and by default slightly overdcomposes to attempt to load balance
+  /**
+   * A pmap that spatially decomposes the domain and by default slightly overdcomposes to attempt to load balance
+   *
+   * This is the legacy keymap. For batching, use BatchedPartitionKeymap and make_procmap()/make_devicemap().
+   */
   template <Dimension NDIM>
   class PartitionKeymap {
   private:

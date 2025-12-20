@@ -17,12 +17,13 @@ namespace mra {
     template <Dimension NDIM>
     class Key {
     private:
+        Batch b;  // = 0; used for batching functions in the same union node
         Level n;  // = 0; cannot default initialize if want to be POD
         std::array<Translation,NDIM> l; // = {}; ditto
 
         /// Refreshes the hash value.  Note that the default std::hash does not mix enough
         SCOPE HashValue rehash() const {
-            HashValue hashvalue = n;
+            HashValue hashvalue = n ^ (static_cast<HashValue>(b)<<48);
             //for (Dimension d=0; d<NDIM; d++) mulhash(hashvalue,l[d]);
             for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | l[d];
             return hashvalue;
@@ -32,20 +33,22 @@ namespace mra {
         static constexpr int num_children() { return (1ul<<NDIM); }
 
         /// Default constructor is deliberately default so that is POD
-        SCOPE Key() = default;
+        constexpr SCOPE Key() = default;
 
         /// Copy constructor default is OK
-        SCOPE Key(const Key<NDIM>& key) = default;
+        constexpr SCOPE Key(const Key<NDIM>& key) = default;
 
         /// Move constructor default is OK
-        SCOPE Key(Key<NDIM>&& key) = default;
+        constexpr SCOPE Key(Key<NDIM>&& key) = default;
 
-        /// Construct from level and translation
-        SCOPE Key(Level n, const std::array<Translation,NDIM>& l) : n(n), l(l)
+        /// Construct from batch, level and translation
+        constexpr SCOPE Key(Batch b, Level n, const std::array<Translation,NDIM>& l)
+        : b(b), n(n), l(l)
         { }
 
-        /// Construct from level and translation=0
-        SCOPE Key(Level n) : n(n), l({0})
+        /// Construct from batch and level with translation=0
+        constexpr SCOPE Key(Batch b, Level n)
+        : b(b), n(n), l({0})
         { }
 
         /// Assignment default is OK
@@ -62,7 +65,7 @@ namespace mra {
         /// Less-than comparison
         SCOPE bool operator<(const Key<NDIM>& other) const {
           auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return std::tie(n, l[Is]...) < std::tie(other.n, other.l[Is]...);
+            return std::tie(b, n, l[Is]...) < std::tie(other.b, other.n, other.l[Is]...);
           };
           return compare(std::make_index_sequence<NDIM>{});
         }
@@ -70,7 +73,7 @@ namespace mra {
         /// Equality comparison
         SCOPE bool operator==(const Key<NDIM>& other) const {
           auto compare = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return n == other.n && ((l[Is] == other.l[Is]) && ...);
+            return b == other.b && n == other.n && ((l[Is] == other.l[Is]) && ...);
           };
           return compare(std::make_index_sequence<NDIM>{});
         }
@@ -90,6 +93,9 @@ namespace mra {
         /// Translation (each element 0, 1, ..., 2**level-1)
         SCOPE const std::array<Translation,NDIM>& translation() const {return l;}
 
+        /// Batch number (used for batching functions in the same union node)
+        SCOPE Batch batch() const {return b;}
+
         /// Parent key
 
         /// Default is the immediate parent (generation=1).  To get
@@ -103,7 +109,7 @@ namespace mra {
             generation = std::min(generation,n);
             std::array<Translation,NDIM> pl;
             for (Dimension i=0; i<NDIM; i++) pl[i] = (l[i] >> generation);
-            return Key<NDIM>(n-generation,pl);
+            return Key<NDIM>(b, n-generation, pl);
         }
 
         /// First child in lexical ordering of KeyChildren iteration
@@ -111,7 +117,7 @@ namespace mra {
             assert(n<MAX_LEVEL);
             std::array<Translation,NDIM> l = this->l;
             for (auto& x : l) x = 2*x;
-            return Key<NDIM>(n+1, l);
+            return Key<NDIM>(b, n+1, l);
         }
 
         /// Last child in lexical ordering of KeyChildren iteration
@@ -119,7 +125,7 @@ namespace mra {
             assert(n<MAX_LEVEL);
             std::array<Translation,NDIM> l = this->l;
             for (auto& x : l) x = 2*x + 1;
-            return Key<NDIM>(n+1, l);
+            return Key<NDIM>(b, n+1, l);
         }
 
         /// Used by iterator to increment child translation
@@ -143,7 +149,7 @@ namespace mra {
             assert(idx<num_children());
             std::array<Translation,NDIM> l = this->l;
             for (Dimension d = 0; d < NDIM; ++d) l[d] = 2*l[d] + ((idx & (1<<d)) ? 1 : 0);
-            return Key<NDIM>(n+1, l);
+            return Key<NDIM>(b, n+1, l);
         }
 
         SCOPE Key<NDIM> child_left(Dimension axis) const {
@@ -151,7 +157,7 @@ namespace mra {
             assert(axis < NDIM);
             std::array<Translation,NDIM> l = this->l;
             for (auto& x : l) x = 2*x;
-            return Key<NDIM>(n+1, l);
+            return Key<NDIM>(b, n+1, l);
         }
 
         SCOPE Key<NDIM> child_right(Dimension axis) const {
@@ -160,7 +166,7 @@ namespace mra {
             std::array<Translation,NDIM> l = this->l;
             for (auto& x : l) x = 2*x;
             l[axis]++;
-            return Key<NDIM>(n+1, l);
+            return Key<NDIM>(b, n+1, l);
         }
 
         SCOPE bool is_left_child(Dimension axis) const {
@@ -175,7 +181,7 @@ namespace mra {
 
         SCOPE Key<NDIM> neighbor(const Key<NDIM>& disp) const {
             std::array<Translation,NDIM> l = this->l + disp.l;
-            return Key<NDIM>(n, l);
+            return Key<NDIM>(b, n, l);
         }
 
         SCOPE Key<NDIM> neighbor(Dimension axis, int disp) const {
@@ -183,7 +189,7 @@ namespace mra {
                 (is_left_boundary(axis) && disp < 0)) return invalid();
             std::array<Translation,NDIM> l = this->l;
             l[axis] += disp;
-            return Key<NDIM>(n, l);
+            return Key<NDIM>(b, n, l);
         }
 
 
@@ -199,8 +205,8 @@ namespace mra {
             return is_left_boundary(axis) || is_right_boundary(axis);
         }
 
-        SCOPE constexpr static Key<NDIM> invalid() {
-            return Key<NDIM>(-1);
+        SCOPE constexpr Key<NDIM> invalid() const {
+            return Key<NDIM>(b, -1);
         }
 
         SCOPE constexpr bool is_invalid() const {
@@ -209,6 +215,12 @@ namespace mra {
 
         SCOPE constexpr bool is_valid() const {
             return n != -1;
+        }
+
+        SCOPE constexpr Key<NDIM> step(Dimension axis, int width) const {
+            std::array<Translation, NDIM> l = translation();
+            l[axis] += width;
+            return Key<NDIM>(batch(), level(), l);
         }
     };
 
@@ -244,7 +256,7 @@ namespace mra {
 
     template <Dimension NDIM>
     std::ostream& operator<<(std::ostream& s, const Key<NDIM>& key) {
-        s << "Key<" << int(NDIM) << ">(" << int(key.level()) << "," << key.translation() << ")";
+        s << "Key<" << int(NDIM) << ">[" << key.batch() << "](" << int(key.level()) << "," << key.translation() << ")";
         return s;
     }
 }

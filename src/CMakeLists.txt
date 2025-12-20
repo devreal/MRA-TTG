@@ -19,9 +19,14 @@ add_executable(mra-pcr-host-parsec
                examples/pcr/test_pcr.cc)
 target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
 
-add_executable(mra-derivative-host-parsec
-               examples/derivative/test_derivative.cc)
-target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)
+add_executable(mra-deriv-host-parsec
+               examples/derivative/bench_derivative.cc)
+target_link_libraries(mra-deriv-host-parsec PUBLIC libmra-host-parsec)
+
+add_executable(mad-derivative
+               examples/derivative/bench_mad_derivative.cc)
+target_link_libraries(mad-derivative PUBLIC MADchem)
+target_include_directories(mad-derivative PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(mra-unit-host-parsec
                examples/unit/test_unit.cc)
@@ -80,8 +85,8 @@ if (HAVE_CUDA)
   add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
   target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
-  add_executable(mra-derivative-device-cuda-parsec examples/derivative/test_derivative.cu)
-  target_link_libraries(mra-derivative-device-cuda-parsec PUBLIC libmra-cuda-parsec)
+  add_executable(mra-deriv-device-cuda-parsec examples/derivative/bench_derivative.cu)
+  target_link_libraries(mra-deriv-device-cuda-parsec PUBLIC libmra-cuda-parsec)
 
   add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
   target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
@@ -119,8 +124,8 @@ if (HAVE_HIP)
   add_executable(mra-pcr-device-hip-parsec examples/pcr/test_pcr.hip)
   target_link_libraries(mra-pcr-device-hip-parsec PUBLIC libmra-hip-parsec)
 
-  add_executable(mra-derivative-device-hip-parsec examples/derivative/test_derivative.hip)
-  target_link_libraries(mra-derivative-device-hip-parsec PUBLIC libmra-hip-parsec)
+  add_executable(mra-deriv-device-hip-parsec examples/derivative/bench_derivative.hip)
+  target_link_libraries(mra-deriv-device-hip-parsec PUBLIC libmra-hip-parsec)
 
   add_executable(mra-unit-device-hip-parsec examples/unit/test_unit.hip)
   target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)

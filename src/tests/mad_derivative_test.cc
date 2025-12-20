@@ -164,29 +164,65 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
   bool check = true;
   bool all_zero = true;
   const auto &coeffs = madfunc.get_impl()->get_coeffs();
+  /* iterate over MADNESS functions and try to find the corresponding MRA key */
   for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
     std::array<Translation,NDIM> l;
     for (int i=0; i<NDIM; ++i){
       l[i] = it->first.translation()[i];
     }
     auto mad_coeff = it->second;
-    Key<NDIM> key = Key<NDIM>(it->first.level(), l);
-    auto mra_coeff = mramap.find(key);
-    auto mad_norm = mad_coeff.coeff().svd_normf();
+    /* map the */
+    Key<NDIM> key = Key<NDIM>(0, it->first.level(), l);
+    auto mra_coeff = std::find_if(mramap.begin(), mramap.end(), [&](const auto& pair) {
+      auto pair_key = Key<NDIM>(0, pair.first.level(), pair.first.translation());
+      return pair_key == key;
+    });
+    auto mad_norm = mad_coeff.coeff().normf();
     if (mra_coeff != mramap.end()) {
-      auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
-      T absdiff = std::abs(mad_norm - mra_norm);
-      if (mra_norm != 0.0) {
-        all_zero = false;
-      }
-      if (absdiff > precision) {
-        check = false;
-        std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
-                  << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
-        //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
-      } else {
-        //std::cout << name << ": " << it->first << " with norm " << mad_norm
-        //          << " matches MRA norm " << mra_norm << std::endl;
+
+      for (int fn = 0; fn < mra_coeff->second.coeffs().current_view().dim(0); ++fn) {
+
+        /* check the norm */
+        auto mra_view = mra_coeff->second.coeffs().current_view()(fn);
+        auto mra_norm = mra::normf(mra_view);
+        T absdiff = std::abs(mad_norm - mra_norm);
+        if (mra_norm != 0.0) {
+          all_zero = false;
+        }
+        if (absdiff > precision) {
+          check = false;
+          //std::cout << mra_coeff->second.coeffs() << "\n with norm " << mra_norm << std::endl;
+          std::cout << std::scientific << "" << name << ": " << mra_coeff->first << " with norm " << mad_norm
+                    << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff
+                    << ", MAD has children " << mad_coeff.has_children()
+                    << ", MAD is leaf " << mad_coeff.is_leaf()
+                    << ", MRA is leaf " << mra_coeff->second.is_all_leaf()
+                    << ")" << std::endl;
+          //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
+        }
+
+        assert(mra_coeff->first == mra_coeff->second.key());
+
+        /* check the individual coefficients if the norm is not 0 */
+        if (mad_norm != 0.0) {
+          int K = mra_view.dim(0);
+          for (int i = 0; i < mra_view.dim(0); ++i) {
+            for (int j = 0; j < mra_view.dim(1); ++j) {
+              for (int k = 0; k < mra_view.dim(2); ++k) {
+                if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision) {
+                  std::cout << "Mismatch for " << key << " at " << i << " " << j << " " << k << " : MRA "
+                            << mra_view(i, j, k) << " MADNESS " << mad_coeff.coeff()(i, j, k)
+                            << "(diff: " << std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) << ")" << std::endl;
+
+                  std::cout << "MRA coeffs:\n" << mra_view << std::endl;
+                  std::cout << "MADNESS coeffs:\n" << mad_coeff.coeff() << std::endl;
+                  check = false;
+                  throw std::runtime_error(name + ": mismatch in coefficients between MADNESS and MRA");
+                }
+              }
+            }
+          }
+        }
       }
     } else {
       std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
@@ -216,7 +252,7 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
 }
 
 template<typename T, mra::Dimension NDIM>
-void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, int max_level,
+void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T precision, int max_level,
                      T verification_precision, int argc, char** argv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
@@ -225,6 +261,9 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
   T g2 = 0;
 
 
+  auto pmap = make_procmap<NDIM>(N, 1);
+  auto dmap = make_devicemap<NDIM>(pmap);
+
   std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
 
   srand48(5551212); // for reproducible results
@@ -232,40 +271,63 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, derivative_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result,
+                                                                      reconstruct_result,
+                                                                      derivative_result;
 
-  auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
+  auto gaussians = make_functionset<Gaussian<T, NDIM>>(pmap.batch_manager());
+  auto gaussians_view = gaussians->current_view(); // host view
 
+  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> project_result_map;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> umap;
   std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> cmap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> pmap; // results directly after project
 
-  for (int i = 0; i < N; ++i) {
+  for (int i = 0; i < gaussians->num_functions(); ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
       r[d] = 0.0;
     }
     std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
   // put it into a buffer
-  auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
-  auto start = make_start(project_control);
+  auto start = make_start(gaussians, project_control);
   // auto start_d = make_start(project_d_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto extract_project = make_extract(project_result, pmap);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
+  auto extract_p = make_extract(project_result, project_result_map, "extract_p");
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress");
+  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
   // D(R(C(P)))
-  auto extract_u = make_extract(reconstruct_result, umap);
-  auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
-                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
-  auto extract = make_extract(derivative_result, cmap);
+  auto extract_u = make_extract(reconstruct_result, umap, "extract_u");
+  using derivative_type = decltype(make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis_a,
+                                      FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap));
+  using extract_type = decltype(make_extract(derivative_result, cmap));
+  std::array<derivative_type, NDIM> derivatives;
+  std::array<extract_type, NDIM> extracts;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> deriv_out;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> deriv_in = reconstruct_result;
 
+  std::array<std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>>, NDIM> cmaps;
+  for (int ax = axis_a;
+       (axis_a < axis_b) ? (ax <= axis_b) : (ax >= axis_b);
+       ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out;
+    std::cout << "Computing derivative in axis " << ax << std::endl;
+    derivatives[ax] = make_derivative(gaussians, K, deriv_in, out, functiondata, db, g1, g2, ax,
+                                      FunctionData<T, NDIM>::BC_DIRICHLET,
+                                      FunctionData<T, NDIM>::BC_DIRICHLET,
+                                      std::string("derivative")+std::to_string(ax), pmap, dmap);
+    extracts[ax] = make_extract(out, cmaps[ax], std::string("extract_deriv")+std::to_string(ax));
+    deriv_in = out;
+  }
+  /* the final edge output */
+  deriv_out = deriv_in;
+
+  //auto extract = make_extract(deriv_out, cmap);
   auto connected = make_graph_executable(start.get());
   assert(connected);
 
@@ -277,20 +339,45 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
       // std::cout << "====  end dot  ====\n";
 
       beg = std::chrono::high_resolution_clock::now();
-      // This kicks off the entire computation
-      start->invoke(mra::Key<NDIM>(0, {0}));
   }
+
+  /* start executing */
   ttg::execute();
+
+  if (ttg::default_execution_context().rank() == 0) {
+      // This kicks off the entire computation
+      start->invoke();
+  }
   ttg::fence();
 
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   {
     auto u_result = compute_u_madness<T>(world, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(u_result, umap, "u_result", verification_precision);
+    compare_mra_madness<T, NDIM>(u_result, project_result_map, "p_result", /*std::numeric_limits<T>::epsilon()*/ 1.e-15);
+    compare_mra_madness<T, NDIM>(u_result, umap, "u_result", /*std::numeric_limits<T>::epsilon()*/ 1.e-15);
+    functionT dudx1;
+    functionT u = compute_u_madness<T>(world, K, precision, init_lev);
+    functionT xleft_d = factoryT(world).f(xbdy_dirichlet);
+    functionT xright_d = factoryT(world).f(xbdy_dirichlet);
 
-    auto deriv_result = compute_udx_madness<T>(world, axis, K, precision, init_lev);
-    compare_mra_madness<T, NDIM>(deriv_result, cmap, "deriv_result", verification_precision);
+    madness::BoundaryConditions<3> bc;
+    bc(0,0) = madness::BCType::BC_FREE;
+    bc(0,1) = madness::BCType::BC_FREE;
+    bc(1,0) = madness::BCType::BC_FREE;
+    bc(1,1) = madness::BCType::BC_FREE;
+    bc(2,0) = madness::BCType::BC_FREE;
+    bc(2,1) = madness::BCType::BC_FREE;
+
+    dudx1 = std::move(u);
+    for (int ax = axis_a;
+         (axis_a < axis_b) ? (ax <= axis_b) : (ax >= axis_b);
+         ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
+      madness::Derivative<T, 3> dx1(world, ax, bc, xleft_d, xright_d, K);
+      dudx1 = dx1(dudx1);
+      //dudx1.truncate();
+      compare_mra_madness<T, NDIM>(dudx1, cmaps[ax], std::string("deriv_result") + std::to_string(ax), verification_precision);
+    }
   }
   world.gop.fence();
 }
@@ -303,20 +390,25 @@ int main(int argc, char **argv) {
   size_type K = opt.parse("-K", 8);
   expnt = opt.parse("-e", 100.0); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int axis    = opt.parse("-a", 0);
+  int axis_a    = opt.parse("-a1", 0); // from axis 0
+  int axis_b    = opt.parse("-a2", 2); // to axis 2
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
-  int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
+  int verification_log_precision = opt.parse("-v", 10); // default: 1e-10
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
+
+  if (ttg::default_execution_context().size() > 1) {
+    throw std::runtime_error("MADNESS derivative test does not support distributed execution yet.");
+  }
 
   if (ttg::default_execution_context().rank() == 0) {
     std::cout << "Running MADNESS derivative test with parameters: "
               << "N = " << N << ", K = " << K
               << ", expnt = " << expnt
-              << ", axis = " << axis
+              << ", axes = [" << axis_a << ", " << axis_b << "]"
               << ", log_precision = " << log_precision
               << ", max_level = " << max_level
               << ", verification_log_precision = " << verification_log_precision
@@ -329,7 +421,7 @@ int main(int argc, char **argv) {
 #endif // TTG_PARSEC_IMPORTED
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
 
-  test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level,
+  test_derivative<double, 3>(N, K, axis_a, axis_b, std::pow(10, -log_precision), max_level,
                              std::pow(10, -verification_log_precision), argc, argv);
 
   madness::finalize();

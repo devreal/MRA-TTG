@@ -8,6 +8,7 @@
 #include "mra/kernels.h"
 #include "mra/tasks.h"
 
+#include "mra/misc/batching.h"
 #include "mra/misc/dims.h"
 #include "mra/misc/gl.h"
 #include "mra/misc/key.h"

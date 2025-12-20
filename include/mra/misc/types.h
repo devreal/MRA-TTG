@@ -33,8 +33,9 @@ constexpr const ttg::ExecutionSpace Space = ttg::ExecutionSpace::HIP;
 namespace mra {
 
     // Presently making all of these different to try to identify misuses
-    using Level = int16_t; //< Type of level in adaptive tree (>=0) .. 8 bit OK
+    using Level = int16_t; //< Type of level in adaptive tree (>=0) .. 16bit enough
     using Translation = uint32_t; //< Type of translation in adaptive tree (>=0)
+    using Batch = int16_t; //< Type of batch index in adaptive tree (>=0) .. 16bit enough
     using Dimension = uint32_t; //size_t; //< Number of dimension in function or tensor (>=1) .. 8 bit OK
     using HashValue = uint64_t; //< Type of hash value used by madness (unsigned)
 
@@ -52,7 +53,7 @@ namespace mra {
     /// A separate type facilitates template matching for NDIM (removing the constraint that Dimension=size_t)
     template <typename T, Dimension NDIM>
     class Coordinate {
-        std::array<T,NDIM> r;
+        std::array<T,NDIM> r = {0.0};
     public:
         SCOPE Coordinate() = default;
         template <typename arg0T, typename...argsT>

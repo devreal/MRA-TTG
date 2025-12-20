@@ -96,14 +96,11 @@ namespace mra {
       const int bc_left,
       const int bc_right)
     { // TODO: check for boundary conditions to return an invalid key
-      std::array<Translation, NDIM> l = key.translation();
-      l[axis] += step;
-      if (!enforce_bc(bc_left, bc_right, key.n, l[axis])){
+      auto res = key.step(axis, step);
+      if (!enforce_bc(bc_left, bc_right, key.level(), res.translation()[axis])){
         return Key<NDIM>::invalid();
       }
-      else{
-        return Key<NDIM>(key.n, l);
-      }
+      return res;
     }
     #endif
 
@@ -133,28 +130,34 @@ namespace mra {
       T* workspace)
     {
       SHARED TensorView<T, NDIM> tmp_result;
+      SHARED TensorView<T, NDIM> transform_result;
       if (is_team_lead()){
         tmp_result = tmp(0);
+        transform_result = tmp(1);
       }
       SYNCTHREADS();
 
       deriv = 0;
 
-      //std::cout << "INNER " << key << " axis " << axis << " deriv " << normf(deriv) << std::endl;
+      //std::cout << "DERIVATIVE " << key << " axis " << axis << std::endl;
 
       parent_to_child(D, left,   key.neighbor(axis, -1), node_left, left_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-      transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RPT), tmp, deriv, axis);
-      //std::cout << "INNER " << key << " axis " << axis  << " left " << left << " " << normf(node_left)<< " left_tmp " << normf(left_tmp) << " deriv " << normf(deriv) << std::endl;
+      transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RPT), tmp_result, transform_result, axis);
+      deriv += transform_result;
+      //std::cout << "DERIVATIVE " << key << " axis " << axis  << " left " << left << " " << normf(node_left)<< " left_tmp " << normf(left_tmp) << std::endl;
 
       parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-      transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp, deriv, axis);
-      //std::cout << "INNER " << key << " axis " << axis << " center " << center << " "
+      transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp_result, transform_result, axis);
+      deriv += transform_result;
+      //std::cout << "DERIVATIVE " << key << " axis " << axis << " center " << center << " "
       //          << normf(node_center) << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
 
       parent_to_child(D, right,  key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-      transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp, deriv, axis);
-      //std::cout << "INNER " << key << " axis " << axis << " right " << right << " "
-      //          << normf(node_right) << " right_tmp " << normf(right_tmp) << " deriv " << normf(deriv) << std::endl;
+      transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp_result, transform_result, axis);
+      deriv += transform_result;
+
+      //std::cout << "DERIVATIVE " << key << " axis " << axis << " right " << right << " neighbor " << key.neighbor(axis, 1) << " "
+      //          << normf(node_right) << " right_tmp " << normf(right_tmp) << std::endl;
 
       T scale = D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level()));
       T thresh = T(1e-12);
@@ -191,8 +194,10 @@ namespace mra {
       T* workspace)
     {
       SHARED TensorView<T, NDIM> tmp_result;
+      SHARED TensorView<T, NDIM> transform_result;
       if (is_team_lead()){
         tmp_result = tmp(0);
+        transform_result = tmp(1);
       }
       SYNCTHREADS();
 
@@ -204,18 +209,22 @@ namespace mra {
         parent_to_child(D, right, key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
         parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
 
-        transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp, deriv, axis);
+        transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp_result, transform_result, axis);
+        deriv += transform_result;
         //std::cout << "BOUNDARY " << key << " axis " << axis << " right_tmp " << normf(right_tmp) << " deriv " << normf(deriv) << std::endl;
-        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp, deriv, axis);
+        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp_result, transform_result, axis);
+        deriv += transform_result;
         //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
       }
       else {
         parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
         parent_to_child(D, left, key.neighbor(axis, -1), node_left, left_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
 
-        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_R0T), tmp, deriv, axis);
+        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_R0T), tmp_result, transform_result, axis);
+        deriv += transform_result;
         //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
-        transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_RPT), tmp, deriv, axis);
+        transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_RPT), tmp_result, transform_result, axis);
+        deriv += transform_result;
         //std::cout << "BOUNDARY " << key << " axis " << axis << " left_tmp " << normf(left_tmp) << " deriv " << normf(deriv) << std::endl;
       }
 

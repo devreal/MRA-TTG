@@ -67,7 +67,7 @@ namespace mra {
 
       // projection of a Gaussian onto double order polynomials
       const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) {
-        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         auto it = rnlpcache.find(key);
         if (it != rnlpcache.end()) {
           const auto& r = it->second;
@@ -127,7 +127,7 @@ namespace mra {
       Convolution& operator=(const Convolution&) = delete;
 
       const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) {
-        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = rnlijcache.find(key);
         cachemutex.unlock();
@@ -167,7 +167,7 @@ namespace mra {
       }
 
       std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) {
-        mra::Key<NDIM> key(n, std::array<Translation, NDIM>({lx}));
+        mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = nscache.find(key);
         cachemutex.unlock();

@@ -19,17 +19,39 @@
 
 namespace mra{
 
-  template <mra::Dimension NDIM>
-  auto make_start(const ttg::Edge<mra::Key<NDIM>, void>& ctl) {
-    auto func = [](const mra::Key<NDIM>& key) { ttg::sendk<0>(key); };
-    return ttg::make_tt<mra::Key<NDIM>>(func, ttg::edges(), edges(ctl), "start", {}, {"control"});
+  /**
+   * Make a start task that sends the keys of the batches to be projected
+   * to the control edge.
+   * This should be invoked only by Process 0 after the `ttg::execute()` was called
+   * and will take care of all batches in the FunctionSet.
+   *
+   * Example:
+   *
+   * ```
+   *   auto gaussians = ttg::make_functionset<Gaussian<T, NDIM>, NDIM>(pmap.batch_manager());
+   *   auto start = make_start(gaussians, project_control);
+   *   ttg::execute();
+   *   if (ttg::default_execution_context().rank() == 0) {
+   *     start->invoke();
+   *   }
+   * ```
+   */
+  template <mra::Dimension NDIM, typename Functions>
+  auto make_start(std::shared_ptr<Functions>& functions,
+                  ttg::Edge<mra::Key<NDIM>, void>& ctl) {
+    auto func = [functions]() {
+      for (Batch batch = 0; batch < functions->num_batches(); ++batch) {
+        ttg::sendk<0>(mra::Key<NDIM>(batch, 0));
+      }
+    };
+    return ttg::make_tt<void>(func, ttg::edges(), edges(ctl), "start", {}, {"control"});
   }
 
-  static std::mutex printer_guard;
   template <typename keyT, typename valueT>
   auto make_printer(const ttg::Edge<keyT, valueT>& in, const char* str = "", const bool doprint=true) {
     auto func = [str,doprint](const keyT& key, const valueT& value) -> TASKTYPE {
       if (doprint) {
+        static std::mutex printer_guard;
 #ifndef MRA_ENABLE_HOST
         /* pull the data back to the host */
         co_await ttg::device::select(value.coeffs().buffer());

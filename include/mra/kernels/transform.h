@@ -86,22 +86,24 @@ namespace mra {
   SCOPE void transform_dir(
     const TensorView<T, NDIM>& node,
     const TensorView<T, 2>& op,
-    TensorView<T, NDIM+1>& tmp,
+    TensorView<T, NDIM>& tmp,
     TensorView<T, NDIM>& result,
     size_type axis) {
       if (axis == 0){
+        result = 0.0; // start from 0
         detail::inner(op, node, result, 0, axis);
       }
       else if (axis == node.ndim()-1){
+        result = 0.0; // start from 0
         detail::inner(node, op, result, axis, 0);
       }
       else {
-        auto inner_result = tmp(0);
-        auto cycle_result = tmp(1);
-        inner_result = 0.0; // reset result of inner
-        detail::inner(node, op, inner_result, axis, 0);
-        detail::cycledim(inner_result, cycle_result, 1, axis, -1);
-        result += cycle_result;
+        tmp = 0.0; // start from 0
+        //std::cout << "transform_dir axis " << axis << " node " << node << std::endl;
+        detail::inner(node, op, tmp, axis, 0);
+        //std::cout << "transform_dir axis " << axis << " inner_result " << tmp << std::endl;
+        detail::cycledim(tmp, result, 1, axis, -1);
+        //std::cout << "transform_dir axis " << axis << " result " << result << std::endl;
       }
     }
 
