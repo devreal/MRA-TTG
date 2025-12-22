@@ -175,8 +175,18 @@ namespace mra {
     template<typename T>
     concept tensor_view = mra::detail::is_tensorview_v<T>;
 
+    template<typename T, Dimension NDIM>
+    concept tensor_view_nd = mra::detail::is_tensorview_v<T> && (T::ndim() == NDIM);
+
     template<typename T>
-    concept tensor_view_2d = tensor_view<T> && (T::ndim() == 2);
+    concept tensor_view_1d = tensor_view_nd<T, 1>;
+
+    template<typename T>
+    concept tensor_view_2d = tensor_view_nd<T, 2>;
+
+    template<typename T>
+    concept tensor_view_3d = tensor_view_nd<T, 3>;
+
   } // namespace concepts
 
 

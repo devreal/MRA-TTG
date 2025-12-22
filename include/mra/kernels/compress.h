@@ -25,14 +25,14 @@ namespace mra {
 
   namespace detail {
 
-    template<typename T, Dimension NDIM, concepts::tensor_view InViewsT>
+    template<typename T, Dimension NDIM, concepts::tensor_view_nd<NDIM> InViewsT>
     DEVSCOPE void compress_kernel_impl(
       Key<NDIM> key,
       size_type K,
-      concepts::tensor_view auto& p,
-      concepts::tensor_view auto& d,
+      concepts::tensor_view_nd<NDIM> auto& p,
+      concepts::tensor_view_nd<NDIM> auto& d,
       const concepts::tensor_view_2d auto& hgT,
-      concepts::tensor_view auto& s,
+      concepts::tensor_view_nd<NDIM> auto& s,
       T* workspace,
       T* d_sumsq,
       const std::array<InViewsT, Key<NDIM>::num_children()>& in_views)
@@ -102,13 +102,13 @@ namespace mra {
     }
   } // namespace detail
 
-  template<typename T, Dimension NDIM, concepts::tensor_view InViewsT>
+  template<typename T, Dimension NDIM, concepts::tensor_view_nd<NDIM+1> InViewsT>
   void submit_compress_kernel(
     const Key<NDIM>& key,
     size_type N,
     size_type K,
-    concepts::tensor_view auto& p_view,
-    concepts::tensor_view auto& result_view,
+    concepts::tensor_view_nd<NDIM+1> auto& p_view,
+    concepts::tensor_view_nd<NDIM+1> auto& result_view,
     const concepts::tensor_view_2d auto& hgT_view,
     T* tmp,
     T* d_sumsq,
