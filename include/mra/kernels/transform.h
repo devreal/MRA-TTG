@@ -61,15 +61,16 @@ namespace mra {
   }
 #endif // defined(MRA_ENABLE_CUDA)
 
-  template <Dimension NDIM, typename T>
+  template <typename T>
   SCOPE void transform(
-    const TensorView<T, NDIM>& t,
-    const TensorView<T, 2>& c,
-    TensorView<T, NDIM>& result,
-    T* workspace) {
+    const concepts::tensor_view auto& t,
+    const concepts::tensor_view_2d auto& c,
+    concepts::tensor_view auto& result,
+    T* workspace)
+  {
     if (transform_shared(t, c, result, workspace)) return;
-    const T* pc = c.data();
-    T *t0=workspace, *t1=result.data();
+    const auto* pc = c.data();
+    T* t0=workspace, *t1=result.data();
     if (t.ndim() & 0x1) std::swap(t0,t1);
     const size_type dimj = c.dim(1);
     size_type dimi = 1;
@@ -82,13 +83,13 @@ namespace mra {
     /* no need to synchronize here, mTxmq synchronizes */
   }
 
-  template <typename T, Dimension NDIM>
   SCOPE void transform_dir(
-    const TensorView<T, NDIM>& node,
-    const TensorView<T, 2>& op,
-    TensorView<T, NDIM>& tmp,
-    TensorView<T, NDIM>& result,
-    size_type axis) {
+    const concepts::tensor_view auto& node,
+    const concepts::tensor_view_2d auto& op,
+    concepts::tensor_view auto& tmp,
+    concepts::tensor_view auto& result,
+    size_type axis)
+  {
       if (axis == 0){
         result = 0.0; // start from 0
         detail::inner(op, node, result, 0, axis);

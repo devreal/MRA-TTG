@@ -41,7 +41,7 @@ namespace mra {
       if (key.level() != 0) tmp_node(child_slice) = from_parent;
 
       //unfilter<T,K,NDIM>(node.get().coeffs, s);
-      transform<NDIM>(tmp_node, hg, s, workspace);
+      transform(tmp_node, hg, s, workspace);
 
       /* extract all r from s
       * NOTE: we could do this on 1<<NDIM blocks but the benefits would likely be small */

@@ -78,7 +78,7 @@ namespace mra {
         cnodeR(child_slice) = in;
       }
 
-      transform<NDIM>(cnodeR, hgT, cnodeD, workspace);
+      transform(cnodeR, hgT, cnodeD, workspace);
       if (keyA.level() > 0) {
         auto child_slice = get_child_slice<NDIM>(target, K, 0);
         nodeR = cnodeD(child_slice);

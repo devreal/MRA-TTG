@@ -156,15 +156,39 @@ namespace mra {
   template<typename T, Dimension NDIM>
   class TensorView;
 
-  template<typename TensorViewT>
+  namespace detail {
+
+    /**
+     * Type trait to check for TensorView types
+     */
+    template<typename T>
+    struct is_tensorview  : std::false_type { };
+
+    template<typename T, Dimension NDIM>
+    struct is_tensorview<TensorView<T, NDIM>> : std::true_type { };
+
+    template<typename T>
+    constexpr bool is_tensorview_v = is_tensorview<std::decay_t<T>>::value;
+  } // namespace detail
+
+  namespace concepts {
+    template<typename T>
+    concept tensor_view = mra::detail::is_tensorview_v<T>;
+
+    template<typename T>
+    concept tensor_view_2d = tensor_view<T> && (T::ndim() == 2);
+  } // namespace concepts
+
+
+  template<concepts::tensor_view TV>
   class TensorSlice {
 
   public:
-    using view_type = TensorViewT;
+    using view_type = TV;
     using value_type = typename view_type::value_type;
     using const_value_type = typename view_type::const_value_type;
 
-    SCOPE static constexpr Dimension ndim() { return TensorViewT::ndim(); }
+    SCOPE static constexpr Dimension ndim() { return TV::ndim(); }
 
     SCOPE static constexpr bool is_tensor() { return true; }
 
@@ -288,7 +312,7 @@ namespace mra {
     /// Fill with scalar
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    template <typename X=TensorSlice<TensorViewT>>
+    template <typename X=TensorSlice<TV>>
     typename std::enable_if<!std::is_const_v<TensorSlice>,X&>::type
     SCOPE operator=(const value_type& value) {
       foreach_idx(*this, [&](size_type i){ this->operator[](i) = value; });
@@ -298,7 +322,7 @@ namespace mra {
     /// Scale by scalar
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    template <typename X=TensorSlice<TensorViewT>>
+    template <typename X=TensorSlice<TV>>
     typename std::enable_if<!std::is_const_v<TensorSlice>,X&>::type
     SCOPE operator*=(const value_type& value) {
       foreach_idx(*this, [&](size_type i){ this->operator[](i) *= value; });
@@ -308,7 +332,7 @@ namespace mra {
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    typename std::enable_if<!std::is_const_v<TensorViewT>,TensorSlice&>::type
+    typename std::enable_if<!std::is_const_v<TV>,TensorSlice&>::type
     SCOPE operator=(const TensorSlice& other) {
       foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
       return *this;
@@ -318,8 +342,7 @@ namespace mra {
     /// Defined below once we know TensorView
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    std::enable_if_t<!std::is_const_v<TensorViewT>, TensorSlice&>
-    SCOPE operator=(const TensorViewT& view);
+    SCOPE TensorSlice& operator=(const TV& view);
   };
 
 
@@ -610,14 +633,16 @@ namespace mra {
     T *m_ptr; // may be const or non-const
   };
 
-  template<typename TensorViewT>
-  std::enable_if_t<!std::is_const_v<TensorViewT>, TensorSlice<TensorViewT>&>
-  SCOPE TensorSlice<TensorViewT>::operator=(
-    const TensorViewT& view)
+
+  template<concepts::tensor_view TV>
+  SCOPE TensorSlice<TV>& TensorSlice<TV>::operator=(
+    const TV& view)
   {
     foreach_idx(*this, [&](size_type i){ this->operator[](i) = view[i]; });
     return *this;
   }
+
+
 
 } // namespace mra
 

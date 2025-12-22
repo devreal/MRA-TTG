@@ -80,7 +80,7 @@ namespace mra {
         T fac = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5),T(NDIM*(1+key.level()))));
         values *= fac;
         // Inlined: filter<T,K,NDIM>(values,r);
-        transform<NDIM>(values, hgT, r1, workspace);
+        transform(values, hgT, r1, workspace);
 
         auto child_slice = get_child_slice<NDIM>(key, K, 0);
         auto r_slice = r1(child_slice);
