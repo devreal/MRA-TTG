@@ -11,9 +11,9 @@ namespace mra {
   namespace detail {
     template <typename T, Dimension NDIM>
     DEVSCOPE void gaxpy_kernel_impl(
-      const TensorView<T, NDIM>& nodeA,
-      const TensorView<T, NDIM>& nodeB,
-      TensorView<T, NDIM>& nodeR,
+      const concepts::TensorView<NDIM> auto& nodeA,
+      const concepts::TensorView<NDIM> auto& nodeB,
+      concepts::TensorView<NDIM> auto& nodeR,
       const T scalarA,
       const T scalarB)
     {
@@ -25,13 +25,13 @@ namespace mra {
     template <typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void gaxpy_kernel(
-      const TensorView<T, NDIM+1> nodeA_view,
-      const TensorView<T, NDIM+1> nodeB_view,
-      TensorView<T, NDIM+1> nodeR_view,
+      const Key<NDIM> key,
+      const concepts::TensorView<NDIM+1> auto nodeA_view,
+      const concepts::TensorView<NDIM+1> auto nodeB_view,
+      concepts::TensorView<NDIM+1> auto nodeR_view,
       const T scalarA,
       const T scalarB,
-      size_type N,
-      const Key<NDIM> key)
+      size_type N)
     {
       SHARED TensorView<T, NDIM> nodeA, nodeB, nodeR;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
@@ -50,9 +50,9 @@ namespace mra {
   template <typename T, Dimension NDIM>
   void submit_gaxpy_kernel(
     const Key<NDIM>& key,
-    const TensorView<T, NDIM+1>& funcA,
-    const TensorView<T, NDIM+1>& funcB,
-    TensorView<T, NDIM+1>& funcR,
+    const concepts::TensorView<NDIM+1> auto& funcA,
+    const concepts::TensorView<NDIM+1> auto& funcB,
+    concepts::TensorView<NDIM+1> auto& funcR,
     const T scalarA,
     const T scalarB,
     size_type N,
@@ -62,7 +62,7 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(2*K);
 
     CALL_KERNEL(detail::gaxpy_kernel, N, thread_dims, 0, stream,
-      (funcA, funcB, funcR, scalarA, scalarB, N, key));
+      (key, funcA, funcB, funcR, scalarA, scalarB, N));
     checkSubmit();
   }
 

@@ -63,9 +63,9 @@ namespace mra {
 
   template <typename T>
   SCOPE void transform(
-    const concepts::tensor_view auto& t,
-    const concepts::tensor_view_2d auto& c,
-    concepts::tensor_view auto& result,
+    const concepts::TensorView auto& t,
+    const concepts::TensorView<2> auto& c,
+    concepts::TensorView auto& result,
     T* workspace)
   {
     if (transform_shared(t, c, result, workspace)) return;
@@ -84,10 +84,10 @@ namespace mra {
   }
 
   SCOPE void transform_dir(
-    const concepts::tensor_view auto& node,
-    const concepts::tensor_view_2d auto& op,
-    concepts::tensor_view auto& tmp,
-    concepts::tensor_view auto& result,
+    const concepts::TensorView auto& node,
+    const concepts::TensorView<2> auto& op,
+    concepts::TensorView auto& tmp,
+    concepts::TensorView auto& result,
     size_type axis)
   {
       if (axis == 0){
@@ -108,22 +108,23 @@ namespace mra {
       }
     }
 
-  template <typename T, Dimension NDIM, std::size_t ARRDIM = NDIM>
   SCOPE void general_transform(
-    const TensorView<T, NDIM>& t,
-    const std::array<TensorView<T, 2>, ARRDIM>& c,
-    TensorView<T, NDIM>& result_in,
-    TensorView<T, NDIM>& result_tmp_in)
+    const concepts::TensorView auto& t,
+    const concepts::TensorViewArray<2> auto& c,
+    concepts::TensorView auto& result_in,
+    concepts::TensorView auto& result_tmp_in)
     {
       /* create our own tensor views pointing to the input
        * data so we don't have to modify the input views */
-      SHARED TensorView<T, NDIM> result, result_tmp;
+      using result_view_type = std::decay_t<decltype(result_in)>;
+      constexpr const mra::Dimension ndim = result_view_type::ndim();
+      SHARED result_view_type result, result_tmp;
       if (is_team_lead()) {
-        result = TensorView<T, NDIM>(result_in.data(), result_in.dims());
-        result_tmp = TensorView<T, NDIM>(result_tmp_in.data(), result_tmp_in.dims());
+        result = result_view_type(result_in.data(), result_in.dims());
+        result_tmp = result_view_type(result_tmp_in.data(), result_tmp_in.dims());
       }
       SYNCTHREADS();
-      if constexpr (NDIM % 2) {
+      if constexpr (ndim % 2) {
         // make sure result and result_tmp
         // end up pointing to the same memory
         if (is_team_lead()) {
@@ -132,7 +133,7 @@ namespace mra {
         SYNCTHREADS();
       }
       result = t; // prime result
-      for (size_type i = 0; i < NDIM; ++i){
+      for (size_type i = 0; i < ndim; ++i){
         // inner accumulates but we're passing
         // TODO: make accumulation optional?
         result_tmp = 0;

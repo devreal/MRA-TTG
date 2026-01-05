@@ -27,13 +27,13 @@ namespace mra {
     DEVSCOPE void reconstruct_kernel_impl(
       Key<NDIM> key,
       size_type K,
-      const TensorView<T, NDIM>& node,
-      const TensorView<T, 2>& hg,
-      const TensorView<T, NDIM>& from_parent,
-      TensorView<T, NDIM>& s,
-      TensorView<T, NDIM>& tmp_node,
+      const concepts::TensorView<NDIM> auto& node,
+      const concepts::TensorView<2> auto& hg,
+      const concepts::TensorView<NDIM> auto& from_parent,
+      concepts::TensorView<NDIM> auto& s,
+      concepts::TensorView<NDIM> auto& tmp_node,
       T* workspace,
-      std::array<TensorView<T, NDIM>, Key<NDIM>::num_children()>& r_arr)
+      concepts::TensorViewArray<NDIM, Key<NDIM>::num_children()> auto& r_arr)
     {
       s = 0.0;
       tmp_node = node;
@@ -61,11 +61,11 @@ namespace mra {
       Key<NDIM> key,
       size_type N,
       size_type K,
-      TensorView<T, NDIM+1> node_view,
+      concepts::TensorView<NDIM+1> auto node_view,
       T* tmp_ptr,
-      const TensorView<T, 2> hg,
-      const TensorView<T, NDIM+1> from_parent_view,
-      std::array<TensorView<T, NDIM+1>, Key<NDIM>::num_children()> r_arr)
+      const concepts::TensorView<2> auto hg,
+      const concepts::TensorView<NDIM+1> auto from_parent_view,
+      concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr)
     {
       const bool is_t0 = (0 == thread_id());
 
@@ -103,10 +103,10 @@ namespace mra {
     const Key<NDIM>& key,
     size_type N,
     size_type K,
-    TensorView<T, NDIM+1>& node,
-    const TensorView<T, 2>& hg,
-    const TensorView<T, NDIM+1>& from_parent,
-    const std::array<TensorView<T, NDIM+1>, mra::Key<NDIM>::num_children()>& r_arr,
+    concepts::TensorView<NDIM+1> auto& node,
+    const concepts::TensorView<2> auto& hg,
+    const concepts::TensorView<NDIM+1> auto& from_parent,
+    const concepts::TensorViewArray<NDIM+1, mra::Key<NDIM>::num_children()> auto& r_arr,
     T* tmp,
     ttg::device::Stream stream)
   {

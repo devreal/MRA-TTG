@@ -169,28 +169,47 @@ namespace mra {
 
     template<typename T>
     constexpr bool is_tensorview_v = is_tensorview<std::decay_t<T>>::value;
+
+    /**
+     * Type trait to check whether a type is a std::array.
+     */
+    template<typename T>
+    struct is_std_array : std::false_type { };
+
+    template<typename T, std::size_t N>
+    struct is_std_array<std::array<T, N>> : std::true_type { };
+
+    template<typename T>
+    constexpr bool is_std_array_v = is_std_array<std::decay_t<T>>::value;
+
+    template<typename T>
+    struct tensor_view_ndim;
+
+    template<typename T, Dimension NDIM>
+    struct tensor_view_ndim<TensorView<T, NDIM>> : std::integral_constant<Dimension, NDIM> { };
+
+    template<typename T>
+    constexpr Dimension tensor_view_ndim_v = tensor_view_ndim<std::decay_t<T>>::value;
   } // namespace detail
 
   namespace concepts {
-    template<typename T>
-    concept tensor_view = mra::detail::is_tensorview_v<T>;
+    /**
+     * Concept for a TensorView with NDIM dimensions.
+     * The NDIM argument is optional to enforce a specific number of dimensions.
+     */
+    template<typename T, Dimension NDIM = T::ndim()>
+    concept TensorView = mra::detail::is_tensorview_v<T> && (detail::tensor_view_ndim_v<T> == NDIM);
 
-    template<typename T, Dimension NDIM>
-    concept tensor_view_nd = mra::detail::is_tensorview_v<T> && (T::ndim() == NDIM);
-
-    template<typename T>
-    concept tensor_view_1d = tensor_view_nd<T, 1>;
-
-    template<typename T>
-    concept tensor_view_2d = tensor_view_nd<T, 2>;
-
-    template<typename T>
-    concept tensor_view_3d = tensor_view_nd<T, 3>;
+    /**
+     * Concept for an array of TensorViews with NDIM dimensions and size N.
+     */
+    template<typename T, Dimension NDIM = T::value_type::ndim(), std::size_t N = std::tuple_size_v<T>>
+    concept TensorViewArray = mra::detail::is_std_array_v<T> && TensorView<typename T::value_type, NDIM> && (T::value_type::ndim() == NDIM);
 
   } // namespace concepts
 
 
-  template<concepts::tensor_view TV>
+  template<concepts::TensorView TV>
   class TensorSlice {
 
   public:
@@ -644,7 +663,7 @@ namespace mra {
   };
 
 
-  template<concepts::tensor_view TV>
+  template<concepts::TensorView TV>
   SCOPE TensorSlice<TV>& TensorSlice<TV>::operator=(
     const TV& view)
   {

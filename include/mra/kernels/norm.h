@@ -10,7 +10,7 @@ namespace mra {
   namespace detail {
     template <typename T, Dimension NDIM>
     DEVSCOPE void norm_kernel_impl(
-      const TensorView<T, NDIM>& n,
+      const concepts::TensorView<NDIM> auto& n,
       T* result_norm,
       const std::array<T, Key<NDIM>::num_children()>& child_norms,
       size_type blockid,
@@ -30,7 +30,7 @@ namespace mra {
     template <typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void norm_kernel(
-      const TensorView<T, NDIM+1> node,
+      const concepts::TensorView<NDIM+1> auto node,
       T* result_norms,
       std::array<const T*, Key<NDIM>::num_children()> child_norms,
       size_type N,
@@ -60,8 +60,8 @@ namespace mra {
     const Key<NDIM>& key,
     size_type N,
     size_type K,
-    const TensorView<T, NDIM+1>& in,
-    TensorView<T, 1>& result_norms,
+    const concepts::TensorView<NDIM+1> auto& in,
+    concepts::TensorView<1> auto& result_norms,
     std::array<const T*, Key<NDIM>::num_children()>& child_norms,
     ttg::device::Stream stream)
   {

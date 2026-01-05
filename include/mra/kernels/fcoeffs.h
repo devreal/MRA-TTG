@@ -36,18 +36,18 @@ namespace mra {
       size_type K,
       size_type fnid,
       /* temporaries */
-      TensorView<T, NDIM>& values,
-      TensorView<T, NDIM>& r0,
-      TensorView<T, NDIM>& r1,
-      TensorView<T, NDIM>& child_values,
-      TensorView<T, 2   >& x_vec,
-      TensorView<T, 2   >& x,
+      concepts::TensorView<NDIM> auto& values,
+      concepts::TensorView<NDIM> auto& r0,
+      concepts::TensorView<NDIM> auto& r1,
+      concepts::TensorView<NDIM> auto& child_values,
+      concepts::TensorView<2> auto& x_vec,
+      concepts::TensorView<2> auto& x,
       T* workspace, /* variable size so pointer only */
       /* constants */
-      const TensorView<T, 2>& phibar,
-      const TensorView<T, 2>& hgT,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& hgT,
       /* result */
-      TensorView<T, NDIM>&  coeffs,
+      concepts::TensorView<NDIM> auto& coeffs,
       bool *is_leaf,
       T thresh)
     {
@@ -113,9 +113,9 @@ namespace mra {
       Key<NDIM> key,
       size_type K,
       T* tmp,
-      const TensorView<T, 2> phibar_view,
-      const TensorView<T, 2> hgT_view,
-      TensorView<T, NDIM+1>  coeffs_view,
+      const concepts::TensorView<2> auto& phibar_view,
+      const concepts::TensorView<2> auto& hgT_view,
+      concepts::TensorView<NDIM+1> auto& coeffs_view,
       bool *is_leaf,
       T thresh)
     {
@@ -164,9 +164,9 @@ namespace mra {
       const mra::Key<NDIM>& key,
       size_type K,
       T* tmp,
-      const mra::TensorView<T, 2>& phibar_view,
-      const mra::TensorView<T, 2>& hgT_view,
-      mra::TensorView<T, NDIM+1>& coeffs_view,
+      const concepts::TensorView<2> auto& phibar_view,
+      const concepts::TensorView<2> auto& hgT_view,
+      concepts::TensorView<NDIM+1> auto& coeffs_view,
       bool* is_leaf_scratch,
       T thresh,
       ttg::device::Stream stream)

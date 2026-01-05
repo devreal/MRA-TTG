@@ -25,22 +25,22 @@ namespace mra {
 
   namespace detail {
 
-    template<typename T, Dimension NDIM, concepts::tensor_view_nd<NDIM> InViewsT>
+    template<typename T, Dimension NDIM>
     DEVSCOPE void compress_kernel_impl(
       Key<NDIM> key,
       size_type K,
-      concepts::tensor_view_nd<NDIM> auto& p,
-      concepts::tensor_view_nd<NDIM> auto& d,
-      const concepts::tensor_view_2d auto& hgT,
-      concepts::tensor_view_nd<NDIM> auto& s,
+      concepts::TensorView<NDIM> auto& p,
+      concepts::TensorView<NDIM> auto& d,
+      const concepts::TensorView<2> auto& hgT,
+      concepts::TensorView<NDIM> auto& s,
       T* workspace,
       T* d_sumsq,
-      const std::array<InViewsT, Key<NDIM>::num_children()>& in_views)
+      const concepts::TensorViewArray<NDIM, Key<NDIM>::num_children()> auto& in_views)
     {
 
       for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
         auto child_slice = get_child_slice<NDIM>(key, K, i);
-        const InViewsT& in = in_views[i];
+        const auto& in = in_views[i];
         s(child_slice) = in;
       }
 
@@ -57,18 +57,18 @@ namespace mra {
       sumabssq(d, d_sumsq);
     }
 
-    template<typename T, Dimension NDIM, concepts::tensor_view InViewsT>
+    template<typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
       size_type N,
       size_type K,
-      concepts::tensor_view auto p_in,
-      concepts::tensor_view auto result_in,
-      const concepts::tensor_view_2d auto hgT,
+      concepts::TensorView<NDIM+1> auto p_in,
+      concepts::TensorView<NDIM+1> auto result_in,
+      const concepts::TensorView<2> auto hgT,
       T* tmp,
       T* d_sumsq,
-      const std::array<InViewsT, Key<NDIM>::num_children()> in_views)
+      const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto in_views)
     {
       const bool is_t0 = (0 == thread_id());
       const size_type K2NDIM    = std::pow(  K,NDIM);
@@ -102,17 +102,17 @@ namespace mra {
     }
   } // namespace detail
 
-  template<typename T, Dimension NDIM, concepts::tensor_view_nd<NDIM+1> InViewsT>
+  template<typename T, Dimension NDIM>
   void submit_compress_kernel(
     const Key<NDIM>& key,
     size_type N,
     size_type K,
-    concepts::tensor_view_nd<NDIM+1> auto& p_view,
-    concepts::tensor_view_nd<NDIM+1> auto& result_view,
-    const concepts::tensor_view_2d auto& hgT_view,
+    concepts::TensorView<NDIM+1> auto& p_view,
+    concepts::TensorView<NDIM+1> auto& result_view,
+    const concepts::TensorView<2> auto& hgT_view,
     T* tmp,
     T* d_sumsq,
-    const std::array<InViewsT, Key<NDIM>::num_children()>& in_views,
+    const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& in_views,
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);

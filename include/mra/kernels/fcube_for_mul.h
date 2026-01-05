@@ -56,7 +56,8 @@ namespace mra {
     const TensorView<T, 1>& quad_x,
     const size_type K)
   {
-    T scale = std::pow(2.0, T(np-nc));
+    //using T = typename std::decay_t<decltype(phi)>::value_type;
+    T scale = std::pow(2.0, (np-nc));
 
     /**
      * The first K threads compute.
@@ -100,11 +101,11 @@ namespace mra {
     const Domain<NDIM>& D,
     const Key<NDIM>& child,
     const Key<NDIM>& parent,
-    const TensorView<T,NDIM>& coeffs,
-    TensorView<T, NDIM>& result_values,
-    const TensorView<T, 2>& phi_old,
-    const TensorView<T, 2>& phibar,
-    const TensorView<T, 1>& quad_x,
+    const concepts::TensorView<NDIM> auto& coeffs,
+    concepts::TensorView<NDIM> auto& result_values,
+    const concepts::TensorView<2> auto& phi_old,
+    const concepts::TensorView<2> auto& phibar,
+    const concepts::TensorView<1> auto& quad_x,
     const size_type K,
     T* workspace)
   {

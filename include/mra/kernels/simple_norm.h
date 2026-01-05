@@ -10,7 +10,7 @@ namespace mra {
   namespace detail {
     template <typename T, Dimension NDIM>
     DEVSCOPE void simple_norm_kernel_impl(
-      const TensorView<T, NDIM>& n,
+      const concepts::TensorView<NDIM> auto& n,
       T* result_norm)
     {
       const bool is_t0 = (0 == thread_id());
@@ -24,8 +24,8 @@ namespace mra {
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void simple_norm_kernel(
       Key<NDIM> key,
-      const TensorView<T, NDIM+1> node,
-      TensorView<T, 1> result_norms,
+      const concepts::TensorView<NDIM+1> auto& node,
+      concepts::TensorView<1> auto& result_norms,
       size_type N)
     {
       const bool is_t0 = (0 == thread_id());
@@ -44,9 +44,9 @@ namespace mra {
   template <typename T, Dimension NDIM>
   void submit_simple_norm_kernel(
     Key<NDIM> key,
-    const TensorView<T, NDIM+1>& in,
+    const concepts::TensorView<NDIM+1> auto& in,
     size_type N,
-    TensorView<T, 1> result_norms)
+    concepts::TensorView<1> auto& result_norms)
   {
     /* simple norm calculation can use as many threads as are available */
     CALL_KERNEL(detail::simple_norm_kernel, N, MAX_THREADS_PER_BLOCK, 0, ttg::device::current_stream(),
