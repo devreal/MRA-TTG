@@ -37,7 +37,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distancesq(const Coordinate<T,1>& p, const TensorView<T,1>& q, T* rsq, size_type N) {
+    SCOPE void distancesq(const Coordinate<T,1>& p, const concepts::TensorView<1> auto& q, T* rsq, size_type N) {
         const T x = p(0);
 #ifdef HAVE_DEVICE_ARCH
         for (size_type i = thread_id(); i < N; i += block_size()) {
@@ -54,7 +54,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distancesq(const Coordinate<T,2>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distancesq(const Coordinate<T,2>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
 #ifdef HAVE_DEVICE_ARCH
@@ -74,7 +74,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distancesq(const Coordinate<T,3>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distancesq(const Coordinate<T,3>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
         const T z = p(2);
@@ -97,7 +97,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distance(const Coordinate<T,1>& p, const TensorView<T,1>& q, T* rsq, size_type N) {
+    SCOPE void distance(const Coordinate<T,1>& p, const concepts::TensorView<1> auto& q, T* rsq, size_type N) {
         const T x = p(0);
 #ifdef HAVE_DEVICE_ARCH
         for (size_type i = thread_id(); i < N; i += block_size()) {
@@ -114,7 +114,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distance(const Coordinate<T,2>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distance(const Coordinate<T,2>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
 #ifdef HAVE_DEVICE_ARCH
@@ -134,7 +134,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distance(const Coordinate<T,3>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distance(const Coordinate<T,3>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
         const T z = p(2);
@@ -204,8 +204,8 @@ namespace mra {
       }
     }
 
-    template <typename T, Dimension NDIM, typename accumulatorT>
-    SCOPE void sumabssq(const TensorView<T, NDIM>& a, accumulatorT* sum) {
+    template <typename accumulatorT>
+    SCOPE void sumabssq(const concepts::TensorView auto& a, accumulatorT* sum) {
       accumulatorT s = 0.0;
       /* every thread computes a partial sum */
       foreach_idx(a, [&](size_type i) mutable {
@@ -217,8 +217,8 @@ namespace mra {
 
 
     /// Compute Frobenius norm ... still needs specializing for complex
-    template <typename T, Dimension NDIM, typename accumulatorT = std::decay_t<T>>
-    SCOPE accumulatorT normf(const TensorView<T, NDIM>& a) {
+    SCOPE auto normf(const concepts::TensorView auto& a) {
+      using accumulatorT = typename std::decay_t<decltype(a)>::value_type;
 #ifdef HAVE_DEVICE_ARCH
       __shared__ accumulatorT sum;
 #else  // HAVE_DEVICE_ARCH

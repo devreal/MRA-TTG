@@ -109,7 +109,7 @@ namespace mra {
     fcoeffs_kernel(
       const Domain<NDIM>& D,
       const T* gldata,
-      const TensorView<Fn, 1> fns,
+      const DenseTensorView<Fn, 1> fns,
       Key<NDIM> key,
       size_type K,
       T* tmp,
@@ -120,8 +120,8 @@ namespace mra {
       T thresh)
     {
       /* set up temporaries once in each block */
-      SHARED TensorView<T, NDIM> values, r0, r1, child_values, coeffs;
-      SHARED TensorView<T, 2   > x_vec, x;
+      SHARED DenseTensorView<T, NDIM> values, r0, r1, child_values, coeffs;
+      SHARED DenseTensorView<T, 2   > x_vec, x;
       SHARED T* workspace;
       size_type N = fns.dim(0);
 
@@ -129,12 +129,12 @@ namespace mra {
         const size_type K2NDIM    = std::pow(K, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
         T* block_tmp = &tmp[blockIdx.x*fcoeffs_tmp_size<NDIM>(K)];
-        values       = TensorView<T, NDIM>(&block_tmp[0], 2*K);
-        r0           = TensorView<T, NDIM>(&block_tmp[TWOK2NDIM], K);
-        r1           = TensorView<T, NDIM>(&block_tmp[TWOK2NDIM+K2NDIM], 2*K);
-        child_values = TensorView<T, NDIM>(&block_tmp[2*TWOK2NDIM+K2NDIM], K);
-        x_vec        = TensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+2*K2NDIM], NDIM, K2NDIM);
-        x            = TensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM], NDIM, K);
+        values       = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
+        r0           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM], K);
+        r1           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM+K2NDIM], 2*K);
+        child_values = DenseTensorView<T, NDIM>(&block_tmp[2*TWOK2NDIM+K2NDIM], K);
+        x_vec        = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+2*K2NDIM], NDIM, K2NDIM);
+        x            = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM], NDIM, K);
         workspace    = &block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM+NDIM*K];
       }
 
@@ -160,7 +160,7 @@ namespace mra {
   void submit_fcoeffs_kernel(
       const mra::Domain<NDIM>& D,
       const T* gldata,
-      const TensorView<Fn, 1>& fns,
+      const DenseTensorView<Fn, 1>& fns,
       const mra::Key<NDIM>& key,
       size_type K,
       T* tmp,

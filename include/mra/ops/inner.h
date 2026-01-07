@@ -12,15 +12,15 @@ namespace mra{
 
   namespace detail{
 
-    template <typename T, Dimension NDIM1, Dimension NDIM2>
+    template<concepts::TensorView TV1, concepts::TensorView TV2>
     SCOPE void inner(
-      const TensorView<T, NDIM1>& left,
-      const TensorView<T, NDIM2>& right,
-      TensorView<T, NDIM1+NDIM2-2>& result,
+      const TV1& left,
+      const TV2& right,
+      concepts::TensorView<TV1::ndim()+TV2::ndim()-2> auto& result,
       long k0 = -1,
       long k1 = 0)
     {
-
+      using T = typename std::decay_t<decltype(left)>::value_type;
       if (k0 < 0) k0 += left.ndim();
       if (k1 < 0) k1 += right.ndim();
 

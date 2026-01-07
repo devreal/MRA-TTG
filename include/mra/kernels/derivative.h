@@ -129,8 +129,8 @@ namespace mra {
       size_type K,
       T* workspace)
     {
-      SHARED TensorView<T, NDIM> tmp_result;
-      SHARED TensorView<T, NDIM> transform_result;
+      SHARED DenseTensorView<T, NDIM> tmp_result;
+      SHARED DenseTensorView<T, NDIM> transform_result;
       if (is_team_lead()){
         tmp_result = tmp(0);
         transform_result = tmp(1);
@@ -193,8 +193,8 @@ namespace mra {
       size_type K,
       T* workspace)
     {
-      SHARED TensorView<T, NDIM> tmp_result;
-      SHARED TensorView<T, NDIM> transform_result;
+      SHARED DenseTensorView<T, NDIM> tmp_result;
+      SHARED DenseTensorView<T, NDIM> transform_result;
       if (is_team_lead()){
         tmp_result = tmp(0);
         transform_result = tmp(1);
@@ -260,18 +260,18 @@ namespace mra {
       {
         // if we reached here, all checks have passed, and we do the transform to compute the derivative
         // for a given axis by calling either derivative_inner() or derivative_boundary()
-        SHARED TensorView<T, NDIM> left_tmp, center_tmp, right_tmp;
-        SHARED TensorView<T, NDIM+1> tmp_result;
+        SHARED DenseTensorView<T, NDIM> left_tmp, center_tmp, right_tmp;
+        SHARED DenseTensorView<T, NDIM+1> tmp_result;
         SHARED T* workspace;
 
         size_type blockId = blockIdx.x;
         T* block_tmp_ptr = &tmp[blockId*derivative_tmp_size<NDIM>(K)];
         const size_type K2NDIM = std::pow(K, NDIM);
         if(is_team_lead()){
-          tmp_result = TensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
-          left_tmp   = TensorView<T, NDIM>(&block_tmp_ptr[2*K2NDIM], K);
-          center_tmp = TensorView<T, NDIM>(&block_tmp_ptr[3*K2NDIM], K);
-          right_tmp  = TensorView<T, NDIM>(&block_tmp_ptr[4*K2NDIM], K);
+          tmp_result = DenseTensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
+          left_tmp   = DenseTensorView<T, NDIM>(&block_tmp_ptr[2*K2NDIM], K);
+          center_tmp = DenseTensorView<T, NDIM>(&block_tmp_ptr[3*K2NDIM], K);
+          right_tmp  = DenseTensorView<T, NDIM>(&block_tmp_ptr[4*K2NDIM], K);
           workspace = &block_tmp_ptr[5*K2NDIM];
         }
         SYNCTHREADS();
@@ -318,7 +318,7 @@ namespace mra {
       static_assert(node_center.ndim() == NDIM+1, "node_center must be of dimension NDIM+1");
       static_assert(node_right.ndim() == NDIM+1, "node_right must be of dimension NDIM+1");
 
-      SHARED TensorView<T, NDIM> node_left_view, node_center_view, node_right_view, deriv_view;
+      SHARED DenseTensorView<T, NDIM> node_left_view, node_center_view, node_right_view, deriv_view;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
         if (is_team_lead()) {
           node_left_view = node_left(blockid);
@@ -380,14 +380,14 @@ namespace mra {
     const Key<3>& left,
     const Key<3>& center,
     const Key<3>& right,
-    const TensorView<double, 3+1>& node_left,
-    const TensorView<double, 3+1>& node_center,
-    const TensorView<double, 3+1>& node_right,
-    const TensorView<double, 3>& operators,
-    TensorView<double, 3+1>& deriv,
-    const TensorView<double, 2>& phi,
-    const TensorView<double, 2>& phibar,
-    const TensorView<double, 1>& quad_x,
+    const SparseTensorView<double, 3+1>& node_left,
+    const SparseTensorView<double, 3+1>& node_center,
+    const SparseTensorView<double, 3+1>& node_right,
+    const SparseTensorView<double, 3>& operators,
+    SparseTensorView<double, 3+1>& deriv,
+    const SparseTensorView<double, 2>& phi,
+    const SparseTensorView<double, 2>& phibar,
+    const SparseTensorView<double, 1>& quad_x,
     double* tmp,
     size_type N,
     size_type K,

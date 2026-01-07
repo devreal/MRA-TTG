@@ -38,7 +38,6 @@ namespace mra{
     /* create a non-owning buffer for domain and capture it */
     auto fn = [&, K, max_level, thresh, gl = mra::GLbuffer<T>(), fns, name]
               (const mra::Key<NDIM>& key) -> TASKTYPE {
-      using tensor_type = typename mra::Tensor<T, NDIM+1>;
       using key_type = typename mra::Key<NDIM>;
       using node_type = typename mra::FunctionsReconstructedNode<T, NDIM>;
       using function_type = typename FunctionSetT::function_type;
@@ -88,7 +87,7 @@ namespace mra{
            */
           // allocate tensor
           result = node_type(key, N, K, ttg::scope::Allocate);
-          tensor_type& coeffs = result.coeffs();
+          auto& coeffs = result.coeffs();
 
           // compute the norm of functions
           auto result_norms = FunctionNorms(name, result);

@@ -64,7 +64,7 @@ namespace mra {
         /**
          * Evaluate function at N points x and store result in \c values
          */
-        SCOPE void operator()(const TensorView<T,2>& x, T* values, size_type N) const {
+        SCOPE void operator()(const concepts::TensorView<2> auto& x, T* values, size_type N) const {
             assert(x.dim(0) == NDIM);
             assert(x.dim(1) == N);
             distancesq(m_origin, x, values, N);
@@ -155,7 +155,7 @@ namespace mra {
         /**
          * Evaluate function at N points x and store result in \c values
          */
-        SCOPE void operator()(const TensorView<T,2>& x, T* values, size_type N) const {
+        SCOPE void operator()(const concepts::TensorView<2> auto& x, T* values, size_type N) const {
             assert(x.dim(0) == NDIM);
             assert(x.dim(1) == N);
             distancesq(origin, x, values, N);

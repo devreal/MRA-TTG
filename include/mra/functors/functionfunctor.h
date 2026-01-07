@@ -42,12 +42,14 @@ namespace mra {
      */
 
     /// Evaluate at points formed by tensor product of npt points in each dimension
-    template <typename functorT, typename T> SCOPE void eval_cube(const functorT& f, const TensorView<T,1>& x, TensorView<T,1>& values) {
+    template <typename functorT> SCOPE void eval_cube(const functorT& f, const concepts::TensorView<1> auto& x, concepts::TensorView<1> auto& values) {
+        using T = typename std::decay_t<decltype(values)>::value_type;
         for (size_type i=0; i<x.dim(0); i++) values(i) = f(Coordinate<T,1>{x(0,i)});
     }
 
     /// Evaluate at points formed by tensor product of npt points in each dimension
-    template <typename functorT, typename T> SCOPE void eval_cube(const functorT& f, const TensorView<T,2>& x, TensorView<T,2>& values) {
+    template <typename functorT> SCOPE void eval_cube(const functorT& f, const concepts::TensorView<2> auto& x, concepts::TensorView<2> auto& values) {
+        using T = typename std::decay_t<decltype(values)>::value_type;
         for (size_type i=0; i<x.dim(0); i++) {
             for (size_type j=0; j<x.dim(1); j++) {
                 values(i,j) = f(Coordinate<T,2>{x(0,i),x(1,j)});
@@ -56,7 +58,8 @@ namespace mra {
     }
 
     /// Evaluate at points formed by tensor product of K points in each dimension
-    template <typename functorT, typename T> SCOPE void eval_cube(const functorT& f, const TensorView<T,3>& x, TensorView<T,3>& values) {
+    template <typename functorT> SCOPE void eval_cube(const functorT& f, const concepts::TensorView<3> auto& x, concepts::TensorView<3> auto& values) {
+        using T = typename std::decay_t<decltype(values)>::value_type;
         for (size_type i=0; i<x.dim(0); i++) {
             for (size_type j=0; j<x.dim(1); j++) {
                 for (size_type k=0; k<x.dim(2); k++) {
@@ -67,22 +70,22 @@ namespace mra {
     }
 
     /// Evaluate at points formed by tensor product of K points in each dimension using vectorized form
-    template <typename functorT, typename T> SCOPE void eval_cube_vec(const functorT& f, const TensorView<T,1>& x, T* values) {
+    template <typename functorT, typename T> SCOPE void eval_cube_vec(const functorT& f, const concepts::TensorView<1> auto& x, T* values) {
         for (size_type i=0; i<x.dim(0); i++) {
             values[i] = f(x(0,i));
         }
     }
 
     /// Evaluate at points formed by tensor product of K points in each dimension using vectorized form
-    template <typename functorT, typename T, size_type K2NDIM> SCOPE void eval_cube_vec(const functorT& f, const TensorView<T,2>& x, T* values) {
+    template <typename functorT, typename T> SCOPE void eval_cube_vec(const functorT& f, const concepts::TensorView<2> auto& x, T* values) {
         for (size_type i=0; i<x.dim(0); i++) {
             values[i] = f(x(0,i),x(1,i));
         }
     }
 
     /// Evaluate at points formed by tensor product of K points in each dimension using vectorized form
-    template <typename functorT, typename T, size_type K2NDIM> SCOPE void eval_cube_vec(const functorT& f, const TensorView<T,3>& x, T* values) {
-        for (size_type i=0; i<K2NDIM; i++) {
+    template <typename functorT, typename T> SCOPE void eval_cube_vec(const functorT& f, const concepts::TensorView<3> auto& x, T* values) {
+        for (size_type i=0; i<x.dim(0); i++) {
             values[i] = f(x(0,i),x(1,i),x(2,i));
         }
     }

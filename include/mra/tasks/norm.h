@@ -25,12 +25,12 @@ namespace mra{
   auto make_norm(const std::shared_ptr<FunctionSetT>& fns,
                  size_type K,
                  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
-                 ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> result,
+                 ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> result,
                  const char* name = "norm",
                  ProcMap procmap = {},
                  DeviceMap devicemap = {}) {
     static_assert(NDIM == 3); // TODO: worth fixing?
-    using norm_tensor_type = mra::Tensor<T, 1>;
+    using norm_tensor_type = mra::DenseTensor<T, 1>;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> node_e;
     ttg::Edge<mra::Key<NDIM>, norm_tensor_type> norm_e0, norm_e1, norm_e2, norm_e3, norm_e4, norm_e5, norm_e6, norm_e7;
     static constexpr const int num_children = mra::Key<NDIM>::num_children();
@@ -128,9 +128,9 @@ namespace mra{
           //std::cout << name << "-dispatch " << key << " sending empty norms to child " << childidx << " " << child << std::endl;
           // pass up a null tensor
 #ifndef MRA_ENABLE_HOST
-          sends.push_back(select_send_up(child, mra::Tensor<T, 1>(), std::make_index_sequence<num_children>{}, "dispatch"));
+          sends.push_back(select_send_up(child, mra::DenseTensor<T, 1>(), std::make_index_sequence<num_children>{}, "dispatch"));
 #else  // MRA_ENABLE_HOST
-          select_send_up(child, mra::Tensor<T, 1>(), std::make_index_sequence<num_children>{}, "dispatch");
+          select_send_up(child, mra::DenseTensor<T, 1>(), std::make_index_sequence<num_children>{}, "dispatch");
 #endif // MRA_ENABLE_HOST
         } else {
           /* if not all children are leafs the norm task will receive norms from somewhere

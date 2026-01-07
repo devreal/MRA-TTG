@@ -29,7 +29,7 @@ void test_pcr(std::size_t N, std::size_t K,
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_reconstruct_result, gaxpy_result;
-  ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
+  ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_result;
 
   // define N Gaussians
   //std::cout << "Defining " << N << " Gaussians with initial level "
@@ -73,7 +73,7 @@ void test_pcr(std::size_t N, std::size_t K,
   // | C(R(C(P))) - C(P) |
   auto norm  = make_norm(gaussians, K, gaxpy_result, norm_result, "norm", pmap, dmap);
   // final check
-  auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
+  auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& norms){
     // TODO: check for the norm within machine precision
     auto norms_view = norms.current_view();
     for (size_type i = 0; i < norms_view.size(); ++i) {

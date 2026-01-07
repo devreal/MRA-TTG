@@ -235,10 +235,10 @@ namespace mra{
             mra::FunctionsReconstructedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
             result.set_all_leaf(true);
             auto tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*N, TempScope);
-            const Tensor<T, 2+1>& operators = functiondata.get_operators();
-            const Tensor<T, 2>& phibar= functiondata.get_phibar();
-            const Tensor<T, 2>& phi= functiondata.get_phi();
-            const Tensor<T, 1>& quad_x = functiondata.get_quad_x();
+            const DenseTensor<T, 2+1>& operators = functiondata.get_operators();
+            const DenseTensor<T, 2>& phibar= functiondata.get_phibar();
+            const DenseTensor<T, 2>& phi= functiondata.get_phi();
+            const DenseTensor<T, 1>& quad_x = functiondata.get_quad_x();
 
             FunctionNorms<T, NDIM> norms(name, result, left, center, right);
 

@@ -1,0 +1,855 @@
+#ifndef MRA_TENSOR_SPARSITY_H
+#define MRA_TENSOR_SPARSITY_H
+
+#include "mra/misc/types.h"
+
+namespace mra {
+
+
+  namespace detail {
+
+    template<typename T>
+    std::size_t align_to_type(std::size_t size) {
+      std::size_t mask = alignof(T) - 1;
+      return size + (-size & mask);
+    }
+
+  } // namespace detail
+
+  /**
+   * Traits for sparsity information of a tensor.
+   */
+  template<typename T>
+  struct sparsity_traits {};
+
+  /**
+   * View for sparsity information of a tensor where the first dimension is sparse.
+   * A TensorView can derive from this class to manage sparsity information contained
+   * in the memory of the Tensor. This is useful for on-device representations of sparse tensors
+   * and for transferring sparsity information between hosts.
+   *
+   * The derived class must implement:
+   *  std::size_t dim(Dimension d) const; // returns the size of dimension d
+   *  std::size_t ndim() const; // returns the number of dimensions
+   *  std::array<std::size_t, N> dims() const; // returns sizes of all dimensions
+   *  ValueType* storage(); // returns pointer to the beginning of the allocated storage
+   *  const ValueType* storage() const; // returns pointer to the beginning of the allocated storage
+   */
+  template<typename Derived, typename ValueType>
+  struct SparseArrayBase {
+
+    using value_type = ValueType;
+
+  private:
+    using unit_type = std::uint8_t;
+
+  private:
+
+    SCOPE void* storage() {
+      return static_cast<Derived*>(this)->storage();
+    }
+
+    SCOPE const void* storage() const {
+      return static_cast<const Derived*>(this)->storage();
+    }
+
+    SCOPE unit_type* sparsity_data() {
+      return static_cast<unit_type*>(storage());
+    }
+
+    SCOPE const unit_type* sparsity_data() const {
+      return static_cast<const unit_type*>(storage());
+    }
+
+    enum class SparsityState : unit_type { NONZERO = 1, ALLOCATED = 2, SPARSE = 0 };
+
+    /**
+     * Returns the size of the sparse dimension (dimension 0).
+     */
+    SCOPE std::size_t count() const {
+      return static_cast<const Derived*>(this)->dim(0);
+    }
+
+    /**
+     * Returns the number of value_type entries needed to store the sparsity data.
+     */
+    SCOPE std::size_t value_count() const {
+      return detail::align_to_type<value_type>(count()) / sizeof(value_type);
+    }
+
+
+  public:
+
+
+    class sparsity_iterator {
+      const unit_type* m_start = nullptr;
+      const unit_type* m_pos   = nullptr;
+      SparsityState m_type;
+
+    public:
+      sparsity_iterator(const unit_type* data, SparsityState type)
+      : m_start(data)
+      , m_pos(data)
+      , m_type(type)
+      { }
+
+      sparsity_iterator& operator++() {
+        while (!(*(++m_pos) & m_type))
+        { }
+        return *this;
+      }
+
+      size_type operator*() const {
+        return (m_pos - m_start); // return the index
+      }
+
+      bool operator!=(const sparsity_iterator& other) const {
+        return m_pos != other.m_pos;
+      }
+    }; // class sparsity_iterator
+
+
+    SparseArrayBase() = default;
+
+    /**
+     * Returns the offset to the data portion of the tensor.
+     */
+    SCOPE std::size_t data_offset() const {
+      return detail::align_to_type<value_type>(count());
+    }
+
+    /**
+     * Returns pointer to the data portion of the tensor.
+     */
+    SCOPE value_type* data() {
+      return static_cast<value_type*>(storage()) + value_count();
+    }
+
+    /**
+     * Returns pointer to the data portion of the tensor.
+     */
+    SCOPE const value_type* data() const {
+      return static_cast<const value_type*>(storage()) + value_count();
+    }
+
+    /**
+     * Returns true if the i'th element in the sparse dimension is non-zero.
+     */
+    SCOPE bool is_nonzero(std::size_t i) const {
+      const unit_type byte = sparsity_data()[i];
+      return byte & static_cast<unit_type>(SparsityState::NONZERO);
+    }
+
+    SCOPE bool is_zero(std::size_t i) const {
+      const unit_type byte = sparsity_data()[i];
+      return (byte & static_cast<unit_type>(SparsityState::NONZERO)) == 0;
+    }
+
+    /**
+     * Sets the i'th entry in the sparse dimension to non-zero.
+     */
+    SCOPE void set_nonzero(std::size_t i) {
+      unit_type& byte = sparsity_data()[i];
+      byte |= static_cast<unit_type>(SparsityState::NONZERO);
+    }
+
+    /**
+     * Sets the i'th entry in the sparse dimension to zero.
+     */
+    SCOPE void set_zero(std::size_t i) {
+      unit_type& byte = sparsity_data()[i];
+      byte &= ~static_cast<unit_type>(SparsityState::NONZERO);
+    }
+
+    SCOPE void set_nonzero_all() {
+      const std::size_t n = count();
+      for (std::size_t i = 0; i < n; ++i) {
+        set_nonzero(i);
+      }
+    }
+
+    SCOPE void set_zero_all() {
+      const std::size_t n = count();
+      for (std::size_t i = 0; i < n; ++i) {
+        set_zero(i);
+      }
+    }
+
+    /**
+     * Mark the given id as unallocated and zero.
+     */
+    void remove(size_type id) {
+      sparsity_data()[id] = SparsityState::SPARSE;
+    }
+
+    SCOPE std::size_t count_nonzero() const {
+      const std::size_t n = count();
+      std::size_t count = 0;
+      for (std::size_t i = 0; i < n; ++i) {
+        if (is_nonzero(i)) {
+          ++count;
+        }
+      }
+      return count;
+    }
+
+    /**
+     * Returns true if the i'th entry in the sparse dimension is allocated (non-zero or zero).
+     */
+    SCOPE bool is_allocated(std::size_t i) const {
+      const unit_type byte = sparsity_data()[i];
+      return byte & static_cast<unit_type>(SparsityState::ALLOCATED);
+    }
+
+    SCOPE void set_allocated(std::size_t i) {
+      unit_type& byte = sparsity_data()[i];
+      byte |= static_cast<unit_type>(SparsityState::ALLOCATED);
+    }
+
+    SCOPE void set_deallocated(std::size_t i) {
+      unit_type& byte = sparsity_data()[i];
+      byte &= ~static_cast<unit_type>(SparsityState::ALLOCATED);
+    }
+
+    SCOPE void set_deallocated_all() {
+      const std::size_t n = static_cast<const Derived*>(this)->dim(0);
+      for (std::size_t i = 0; i < n; ++i) {
+        set_deallocated(i);
+      }
+    }
+
+    SCOPE void set_allocated_all() {
+      const std::size_t n = static_cast<const Derived*>(this)->dim(0);
+      for (std::size_t i = 0; i < n; ++i) {
+        set_allocated(i);
+      }
+    }
+
+    SCOPE std::size_t count_allocated() const {
+      const std::size_t n = static_cast<const Derived*>(this)->dim(0);
+      std::size_t count = 0;
+      for (std::size_t i = 0; i < n; ++i) {
+        if (is_allocated(i)) {
+          ++count;
+        }
+      }
+      return count;
+    }
+
+    /**
+     * Returns the offset in the data portion corresponding to the i'th element.
+     */
+    SCOPE std::size_t offset_of(std::size_t i) const {
+      std::size_t offset = 0;
+      /* count the size of each non-zero tensor in the 1:NDIM-1 dimensions */
+      std::size_t data_size = static_cast<const Derived*>(this)->dim(1);
+      auto dims = static_cast<const Derived*>(this)->dims();
+      for (std::size_t i = 2; i < static_cast<const Derived*>(this)->ndim(); ++i) {
+        data_size *= dims[i];
+      }
+      for (std::size_t j = 0; j < i; ++j) {
+        if (is_allocated(j)) {
+          offset += data_size;
+        }
+      }
+      return offset;
+    }
+
+
+    void apply_sparsity(const SparseArrayBase& s) {
+      assert(count() == s.count());
+      std::memcpy(storage(), s.storage(), s.count());
+    }
+
+    template<typename SparsityT>
+    void apply_sparsity(const SparsityT s) {
+      assert(count() == s.size());
+      for (size_type i = 0; i < count(); ++i) {
+        if (s.is_nonzero(i)) {
+          set_nonzero(i);
+        } else {
+          remove(i);
+        }
+      }
+    }
+
+    /* form the union with the given SparseArrayBase */
+    void union_sparsity(const SparseArrayBase& s) {
+      assert(count() == s.count());
+      for (size_type i = 0; i < count(); ++i) {
+        if (s.is_nonzero(i)) {
+          set_nonzero(i);
+        }
+      }
+    }
+
+    /* form the union with the given sparsity */
+    template<typename SparsityT>
+    void union_sparsity(const SparsityT& s) {
+      assert(count() == s.size());
+      for (auto iter = s.begin_nonzero(); iter != s.end_nonzero(); ++iter) {
+        set_nonzero(*iter);
+      }
+    }
+
+    /* form the intersection with the given sparsity array */
+    void intersect_sparsity(const SparseArrayBase& s) {
+      assert(count() == s.count());
+      for (size_type i = 0; i < count(); ++i) {
+        if (!s.is_nonzero(i)) {
+          remove(i);
+        }
+      }
+    }
+
+    /* form the intersection with the given sparsity */
+    template<typename SparsityT>
+    void intersect_sparsity(const SparsityT& s) {
+      assert(count() == s.count());
+      size_type i = 0;
+      for (auto iter = s.begin_nonzero(); iter != s.end_nonzero(); ++iter, ++i) {
+        while (i < *iter) {
+          remove(i++);
+        }
+      }
+      while (i < count()) {
+        remove(i++);
+      }
+    }
+
+    using iterator = sparsity_iterator;
+
+    iterator begin_nonzero() {
+      return iterator(sparsity_data(), SparsityState::NONZERO);
+    }
+
+    iterator end_nonzero() {
+      return iterator(sparsity_data() + count(), SparsityState::NONZERO);
+    }
+
+    iterator begin_allocated() {
+      return iterator(sparsity_data(), SparsityState::ALLOCATED);
+    }
+
+    iterator end_allocated() {
+      return iterator(sparsity_data() + count(), SparsityState::ALLOCATED);
+    }
+  };
+
+
+  template<typename Derived, typename ValueType>
+  struct sparsity_traits<SparseArrayBase<Derived, ValueType>> {
+    using derived_type = Derived;
+    using value_type = ValueType;
+    template<typename T, typename U>
+    using sparsity_type = SparseArrayBase<T, U>;
+    static constexpr bool is_sparse() { return true; }
+    /**
+     * Whether the sparsity information is stored inline with the data.
+     * If true, query the space_required() function to get the additional space needed.
+     */
+    static constexpr bool inline_storage() { return true; }
+    /**
+     * Whether the sparsity information allocates additional storage.
+     */
+    static constexpr bool allocates_storage() { return false; }
+    /**
+     * How much additional space (in units of size_type) is required to store the sparsity information.
+     */
+    template<std::size_t NDIM>
+    static size_type required_space(const std::array<size_type, NDIM>& dims) {
+      // worst case: every entry is its own range
+      return detail::align_to_type<value_type>(dims[0]) / sizeof(value_type);
+    }
+  };
+
+
+
+  /**
+   * Encoding of sparsity information using ranges.
+   *
+   * This encoding is more efficient than SparseArrayBase but is less flexible
+   * with a higher cost for updates. Also does not support concurrent updates on the device.
+   *
+   * \tparam ValueT The type of the values used by the owning container.
+   *                Sparsity will ensure proper alignment for this type but will
+   *                repurpose the memory to the type needed to encode sparsity.
+   */
+  template<typename Derived, typename ValueT>
+  struct RangeSparsityBase {
+    using value_type = std::decay_t<ValueT>;
+
+  private:
+
+    struct Range {
+      ssize_type from = -1; // inclusive
+      ssize_type to   = -1; // inclusive
+
+      Range() = default;
+
+      Range(size_type i)
+      : from(i)
+      , to(i)
+      { }
+
+      void add(size_type i) {
+        if (from == -1) {
+          from = i;
+          to   = i;
+        } else {
+          to = i;
+        }
+      }
+
+      bool is_contiguous(size_type i) const {
+        return to == i-1 || from == i+1;
+      }
+
+      bool contains(size_type i) const {
+        return from <= i && i <= to;
+      }
+
+      template <typename Archive>
+      void serialize(Archive &ar) {
+        ar & from & to;
+      }
+
+      template <typename Archive>
+      void serialize(Archive &ar, const unsigned int) {
+        serialize(ar);
+      }
+
+    }; // class Range
+
+    class sparsity_iterator {
+      using iter_type = typename std::vector<Range>::iterator;
+      iter_type m_iter, m_end;
+      size_type m_id = 0;
+
+    public:
+      sparsity_iterator(const iter_type& ranges_iter, const iter_type& ranges_end)
+      : m_iter(ranges_iter)
+      , m_end(ranges_end)
+      {
+        if (m_iter != m_end) {
+          m_id = m_iter->from;
+        }
+      }
+
+      sparsity_iterator& operator++() {
+        if (m_iter->to == m_id) {
+          ++m_iter;
+          if (m_iter != m_end) {
+            m_id = m_iter->from;
+          }
+        } else {
+          ++m_id;
+        }
+        return *this;
+      }
+
+      bool operator!=(const sparsity_iterator& other) const {
+        return m_iter != other.m_iter || m_id != other.m_id;
+      }
+
+      size_type operator*() const {
+        return m_id;
+      }
+    }; // class sparsity_iterator
+
+    std::vector<Range> m_non_zero_ranges;   // ranges of non-zero entries
+    std::vector<Range> m_allocated_ranges;  // ranges of allocated entries
+
+    void add(size_type id, std::vector<Range>& ranges) {
+      for (auto it = ranges.begin(); it != ranges.end(); ++it) {
+        if (it->contains(id)) {
+          return;
+        }
+        if (it->from > id) {
+          auto next = ++it;
+          auto prev = --it;
+          if (next != ranges.end() && next->from == id+1) {
+            next->from = id;
+          } else if (it != ranges.begin() && prev->to == id-1) {
+            prev->to = id;
+          } else {
+            ranges.insert(it, Range(id));
+          }
+          return;
+        }
+      }
+      // add to the end
+      ranges.push_back(Range(id));
+    }
+
+    void remove(size_type id, std::vector<Range>& ranges) {
+      for (auto it = ranges.begin(); it != ranges.end(); ++it) {
+        if (it->contains(id)) {
+          if (it->from == it->to) {
+            /* remove entire range */
+            ranges.erase(it);
+          } else if (it->from == id) {
+            /* remove from beginning of range */
+            it->from++;
+          } else if (it->to == id) {
+            /* remove from end of range */
+            it->to--;
+          } else {
+            /* split the range */
+            auto next = ++it;
+            it->to = id-1;
+            ranges.insert(next, Range(id+1, it->to));
+          }
+        }
+        return;
+      }
+    }
+
+    bool contains(size_type id, const std::vector<Range>& ranges) const {
+      for (const auto& r : ranges) {
+        if (r.contains(id)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * Returns the size of the sparse dimension (dimension 0).
+     */
+    SCOPE std::size_t count() const {
+      return static_cast<const Derived*>(this)->dim(0);
+    }
+
+  public:
+
+    constexpr RangeSparsityBase() = default;
+
+    /* pointer is ignored, the sparsity information manages its own memory */
+    template<typename T>
+    RangeSparsityBase(T* ptr)
+    { }
+
+    /* copy construction allocates memory */
+    RangeSparsityBase(const RangeSparsityBase&) = delete;
+
+    /* move construction */
+    RangeSparsityBase(RangeSparsityBase&& other) = default;
+
+    RangeSparsityBase& operator=(RangeSparsityBase&& other) = default;
+
+    RangeSparsityBase& operator=(const RangeSparsityBase& other) = delete;
+
+    ~RangeSparsityBase() = default;
+
+    /* returns true if value is not zero */
+    bool is_nonzero(size_type id) const {
+      return contains(id, m_non_zero_ranges);
+    }
+
+    /**
+     * Returns true if the given id is allocated.
+     */
+    bool is_allocated(size_type id) const {
+      return contains(id, m_allocated_ranges);
+    }
+
+    /**
+     * The number of non-zero entries.
+     */
+    size_type count_nonzero() const {
+      size_type res = 0;
+      for (const auto& r : m_non_zero_ranges) {
+        res += r.to - r.from + 1;
+      }
+      return res;
+    }
+
+    /**
+     * The offset of a given id, i.e., the sum of
+     * all non-zero entries before the given id.
+     */
+    size_type offset(size_type id) const {
+      size_type offset = 0;
+      for (const auto& r : m_allocated_ranges) {
+        if (r.to < id) {
+          offset += r.to - r.from + 1;
+        } else {
+          return offset + id - r.from;
+        }
+      }
+      return offset;
+    }
+
+    /**
+     * Mark the given id as allocated and non-zero.
+     */
+    void set_nonzero(size_type id) {
+      add(id, m_non_zero_ranges);
+      // if it's nonzero it's also allocated
+      add(id, m_allocated_ranges);
+    }
+
+    /**
+     * Mark the given id as allocated only, if it was allocated before.
+     * Otherwise the id is marked as unallocated and zero.
+     */
+    void set_allocated(size_type id) {
+      add(id, m_allocated_ranges);
+    }
+
+    void set_all_zero() {
+      m_non_zero_ranges.clear();
+      m_allocated_ranges.clear();
+    }
+
+    /**
+     * Mark all ids as allocated and non-zeros
+     */
+    void set_all_nonzero() {
+      m_non_zero_ranges.clear();
+      m_non_zero_ranges.push_back(Range(0, count()));
+      m_allocated_ranges.clear();
+      m_allocated_ranges.push_back(Range(0, count()));
+    }
+
+    /**
+     * Mark all ids as allocated only.
+     */
+    void set_all_allocated() {
+      m_allocated_ranges.clear();
+      m_allocated_ranges.push_back(Range(0, count()));
+    }
+
+    /**
+     * Mark the given id as and zero. It will still be marked as allocated.
+     */
+    void set_zero(size_type id) {
+      remove(id, m_non_zero_ranges);
+    }
+
+    /**
+     * Remove the id from the sparsity information.
+     * Marks it both zero and not allocated.
+     */
+    void remove(size_type id) {
+      remove(id, m_non_zero_ranges);
+      remove(id, m_allocated_ranges);
+    }
+
+    /* apply sparsity information from input
+     * the count must be the same on both sparsity objects
+     * and both sparsity objects must point to the same memory space */
+    template<typename Derived_, typename Value_>
+    void apply_sparsity(const SparseArrayBase<Derived_, Value_>& s) {
+      m_non_zero_ranges.clear();
+      m_allocated_ranges.clear();
+      Range ra  = {-1, -1}; // range for allocated entries
+      Range rnz = {-1, -1}; // range for nonzero entries
+      auto add_to_range = [&](size_type i, Range& r, std::vector<Range>& ranges) {
+        if (r.is_contiguous(i)) {
+          r.add(i);
+        } else {
+          if (r.from != -1) {
+            ranges.push_back(r);
+          }
+          r = Range(i);
+        }
+      };
+      /* iterate over all entries and form the ranges for non-zero and allocated elements */
+      for (size_type i = 0; i < count(); ++i) {
+        if (s.is_nonzero(i)) {
+          add_to_range(i, rnz, m_non_zero_ranges);
+          add_to_range(i, ra,  m_allocated_ranges);
+        } else if (s.is_allocated(i)) {
+          add_to_range(i, ra,  m_allocated_ranges);
+        }
+      }
+    }
+
+
+    template <typename Archive>
+    void serialize(Archive &ar) {
+      ar & m_non_zero_ranges & m_allocated_ranges;
+    }
+
+    template <typename Archive>
+    void serialize(Archive &ar, const unsigned int) {
+      serialize(ar);
+    }
+
+    using iterator = sparsity_iterator;
+
+    iterator begin_nonzero() const {
+      return iterator(m_non_zero_ranges.begin(), m_non_zero_ranges.end());
+    }
+
+    iterator end_nonzero() const {
+      return iterator(m_non_zero_ranges.end(), m_non_zero_ranges.end());
+    }
+
+    iterator begin_allocated() const {
+      return iterator(m_allocated_ranges.begin(), m_allocated_ranges.end());
+    }
+
+    iterator end_allocated() const {
+      return iterator(m_allocated_ranges.end(), m_allocated_ranges.end());
+    }
+  };
+
+
+  template<typename Derived, typename ValueType>
+  struct sparsity_traits<RangeSparsityBase<Derived, ValueType>> {
+    using derived_type = Derived;
+    using value_type = ValueType;
+    template<typename T, typename U>
+    using sparsity_type = RangeSparsityBase<T, U>;
+    static constexpr bool is_sparse() { return true; }
+    /**
+     * Whether the sparsity information is stored inline with the data.
+     * If true, query the space_required() function to get the additional space needed.
+     */
+    static constexpr bool inline_storage() { return false; }
+    /**
+     * Whether the sparsity information allocates additional storage.
+     */
+    static constexpr bool allocates_storage() { return true; }
+
+    /**
+     * How much additional space (in units of size_type) is required to store the sparsity information.
+     */
+    template<std::size_t NDIM>
+    static size_type required_space(const std::array<size_type, NDIM>&) {
+      // worst case: every entry is its own range
+      return 0;
+    }
+  };
+
+
+
+  /**
+   * Sparsity information for a dense tensor.
+   */
+
+  /**
+   * View for sparsity information of a dense tensor.
+   */
+  template<typename Derived, typename ValueType>
+  struct DenseViewBase {
+
+    using value_type = ValueType;
+
+
+  private:
+    const size_type dim0() {
+      return static_cast<Derived*>(this)->dim(0);
+    }
+
+    const size_type dim0() const {
+      return static_cast<const Derived*>(this)->dim(0);
+    }
+
+  public:
+
+
+    constexpr DenseViewBase() = default;
+
+    /**
+     * Returns the offset to the data portion of the tensor.
+     */
+    SCOPE constexpr std::size_t data_offset() const {
+      return 0;
+    }
+
+
+    /**
+     * Returns true if the i'th element in the sparse dimension is non-zero.
+     */
+    SCOPE bool is_nonzero(std::size_t i) const {
+      return dim0() > 0;
+    }
+
+    /**
+     * Returns true if the i'th element in the sparse dimension is non-zero.
+     */
+    SCOPE bool is_zero(std::size_t i) const {
+      return dim0() == 0;
+    }
+
+
+    SCOPE std::size_t count_nonzero() const {
+      return dim0();
+    }
+
+    /**
+     * Returns true if the i'th entry in the sparse dimension is allocated (non-zero or zero).
+     */
+    SCOPE bool is_allocated(std::size_t i) const {
+      return dim0() > 0;
+    }
+
+    SCOPE std::size_t count_allocated() const {
+      return dim0();
+    }
+
+    /**
+     * Returns the offset in the data portion corresponding to the i'th element.
+     */
+    SCOPE std::size_t offset_of(std::size_t i) const {
+      if (dim0() == 0) {
+        return 0;
+      }
+      /* count the size of each non-zero tensor in the 1:NDIM-1 dimensions */
+      std::size_t data_size = static_cast<const Derived*>(this)->dim(1);
+      auto dims = static_cast<const Derived*>(this)->dims();
+      for (std::size_t i = 2; i < static_cast<const Derived*>(this)->ndim(); ++i) {
+        data_size *= dims[i];
+      }
+      return i*data_size;
+    }
+
+    SCOPE value_type* data() {
+      return static_cast<Derived*>(this)->storage();
+    }
+
+    SCOPE const value_type* data() const {
+      return static_cast<const Derived*>(this)->storage();
+    }
+  };
+
+
+  template<typename Derived, typename ValueType>
+  struct sparsity_traits<DenseViewBase<Derived, ValueType>> {
+    using derived_type = Derived;
+    using value_type = ValueType;
+    template<typename T, typename U>
+    using sparsity_type = DenseViewBase<T, U>;
+    static constexpr bool is_sparse() { return false; }
+    /**
+     * Whether the sparsity information is stored inline with the data.
+     * If true, query the space_required() function to get the additional space needed.
+     */
+    static constexpr bool inline_storage() { return false; }
+    /**
+     * Whether the sparsity information allocates additional storage.
+     */
+    static constexpr bool allocates_storage() { return false; }
+    /**
+     * How much additional space (in units of size_type) is required to store the sparsity information.
+     */
+    template<std::size_t NDIM>
+    static constexpr size_type required_space(const std::array<size_type, NDIM>&) {
+      return 0;
+    }
+  };
+
+
+  /**
+   * Traits for sparsity views.
+   */
+  template<typename T>
+  constexpr bool is_sparsity_view_v = sparsity_traits<std::decay_t<T>>::is_sparse();
+
+} // namespace mra
+
+#endif // MRA_TENSOR_SPARSITY_H

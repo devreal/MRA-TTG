@@ -12,9 +12,9 @@ namespace mra{
 
     template <typename T, Dimension NDIM>
     SCOPE void outer(
-      const TensorView<T, NDIM>& left,
-      const TensorView<T, NDIM>& right,
-      TensorView<T, NDIM>& result)
+      const concepts::TensorView<NDIM> auto& left,
+      const concepts::TensorView<NDIM> auto& right,
+      concepts::TensorView<NDIM> auto& result)
     {
       static_assert(result.ndim() <= NDIM, "too many dimensions in the result");
       static_assert(left.ndim() + right.ndim() == result.ndim(),

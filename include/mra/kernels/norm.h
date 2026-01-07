@@ -39,7 +39,7 @@ namespace mra {
     {
       const bool is_t0 = (0 == thread_id());
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
-      SHARED TensorView<T, NDIM> n;
+      SHARED DenseTensorView<T, NDIM> n;
       SHARED std::array<T, Key<NDIM>::num_children()> block_child_norms;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
         if (is_t0) {

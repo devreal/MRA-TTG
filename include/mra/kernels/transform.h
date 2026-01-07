@@ -17,9 +17,9 @@ namespace mra {
 #if defined(MRA_CUDA_ENABLE_SHARED_TRANSFORM) && defined(MRA_ENABLE_CUDA) && defined(MRA_HAVE_CUBLASDX)
   template <Dimension NDIM, typename T>
   SCOPE bool transform_shared(
-    const TensorView<T, NDIM>& t,
-    const TensorView<T, 2>& c,
-    TensorView<T, NDIM>& result,
+    const concepts::TensorView<NDIM> auto& t,
+    const concepts::TensorView<2> auto& c,
+    concepts::TensorView<NDIM> auto& result,
     T* workspace)
   {
     if ((2*t.size() + c.size() + result.size()) > mTxmq_shmem_size<T>(c.dim(0))) {
@@ -51,11 +51,11 @@ namespace mra {
     return true;
   }
 #else // defined(MRA_ENABLE_CUDA)
-  template <Dimension NDIM, typename T>
+  template <typename T>
   SCOPE bool transform_shared(
-    const TensorView<T, NDIM>& t,
-    const TensorView<T, 2>& c,
-    TensorView<T, NDIM>& result,
+    const concepts::TensorView auto& t,
+    const concepts::TensorView<2> auto& c,
+    concepts::TensorView auto& result,
     T* workspace) {
       return false;
   }
@@ -68,6 +68,8 @@ namespace mra {
     concepts::TensorView auto& result,
     T* workspace)
   {
+    static_assert(std::decay_t<decltype(t)>::ndim() == std::decay_t<decltype(result)>::ndim(),
+                  "Input and output tensor views must have the same number of dimensions.");
     if (transform_shared(t, c, result, workspace)) return;
     const auto* pc = c.data();
     T* t0=workspace, *t1=result.data();

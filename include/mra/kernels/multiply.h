@@ -74,7 +74,7 @@ namespace mra {
       // compress the result(r1 which is NDIM+1 tensorview) and store scaling functions to nodeR
       for (int i = 0; i<target.num_children(); ++i) {
         auto child_slice = get_child_slice<NDIM>(target, K, i);
-        const TensorView<T, NDIM>& in = r1(i);
+        const auto& in = r1(i);
         cnodeR(child_slice) = in;
       }
 
@@ -104,8 +104,8 @@ namespace mra {
       size_type N,
       size_type K)
     {
-      SHARED TensorView<T, NDIM> nodeA, nodeB, nodeR, cnodesR, cnodesD;
-      SHARED TensorView<T, NDIM+1> cnodesA, cnodesB, r1;
+      SHARED DenseTensorView<T, NDIM> nodeA, nodeB, nodeR, cnodesR, cnodesD;
+      SHARED DenseTensorView<T, NDIM+1> cnodesA, cnodesB, r1;
       SHARED T* workspace;
       size_type blockId = blockIdx.x;
       if (is_team_lead()){
@@ -113,11 +113,11 @@ namespace mra {
         const size_type TWO2NDIM = std::pow(2, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
         T* block_tmp = &tmp[blockId*multiply_tmp_size<NDIM>(K)];
-        r1        = TensorView<T, NDIM+1>(&block_tmp[        0], TWO2NDIM, K, K, K);
-        cnodesA   = TensorView<T, NDIM+1>(&block_tmp[ 8*K2NDIM], TWO2NDIM, K, K, K);
-        cnodesB   = TensorView<T, NDIM+1>(&block_tmp[16*K2NDIM], TWO2NDIM, K, K, K);
-        cnodesR   = TensorView<T, NDIM>(&block_tmp  [24*K2NDIM], 2*K, 2*K, 2*K);
-        cnodesD   = TensorView<T, NDIM>(&block_tmp  [32*K2NDIM + TWOK2NDIM], 2*K, 2*K, 2*K);
+        r1        = DenseTensorView<T, NDIM+1>(&block_tmp[        0], TWO2NDIM, K, K, K);
+        cnodesA   = DenseTensorView<T, NDIM+1>(&block_tmp[ 8*K2NDIM], TWO2NDIM, K, K, K);
+        cnodesB   = DenseTensorView<T, NDIM+1>(&block_tmp[16*K2NDIM], TWO2NDIM, K, K, K);
+        cnodesR   = DenseTensorView<T, NDIM>(&block_tmp  [24*K2NDIM], 2*K, 2*K, 2*K);
+        cnodesD   = DenseTensorView<T, NDIM>(&block_tmp  [32*K2NDIM + TWOK2NDIM], 2*K, 2*K, 2*K);
         workspace = &block_tmp[32*K2NDIM + 2*TWOK2NDIM];
       }
 
@@ -167,14 +167,14 @@ namespace mra {
     const Domain<3>& D,
     const Key<3>& keyA,
     const Key<3>& keyB,
-    const TensorView<double, 3+1>& funcA,
-    const TensorView<double, 3+1>& funcB,
-    TensorView<double, 3+1>& funcR,
-    const TensorView<double, 2>& hgT,
-    const TensorView<double, 2>& phi,
-    const TensorView<double, 2>& phiT,
-    const TensorView<double, 2>& phibar,
-    const TensorView<double, 1>& quad_x,
+    const SparseTensorView<double, 3+1>& funcA,
+    const SparseTensorView<double, 3+1>& funcB,
+    SparseTensorView<double, 3+1>& funcR,
+    const SparseTensorView<double, 2>& hgT,
+    const SparseTensorView<double, 2>& phi,
+    const SparseTensorView<double, 2>& phiT,
+    const SparseTensorView<double, 2>& phibar,
+    const SparseTensorView<double, 1>& quad_x,
     size_type N,
     size_type K,
     double* tmp,

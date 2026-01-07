@@ -11,16 +11,54 @@
 
 #include "mra/misc/allocator.h"
 #include "mra/tensor/tensorview.h"
+#include "mra/tensor/sparsity.h"
 
 namespace mra {
 
-  template<typename T, Dimension NDIM, class Allocator = DeviceAllocator<T>>
-  class Tensor : public ttg::TTValue<Tensor<T, NDIM, Allocator>> {
+  namespace detail {
+
+    template<template<typename, typename> typename Sparsity>
+    struct is_tensor_compatible_sparsity;
+
+    template<>
+    struct is_tensor_compatible_sparsity<RangeSparsityBase> : std::true_type { };
+
+    template<>
+    struct is_tensor_compatible_sparsity<DenseViewBase> : std::true_type { };
+
+    template<template<typename, typename> typename Sparsity>
+    concept TensorCompatibleSparsity = is_tensor_compatible_sparsity<Sparsity>::value;
+
+
+    template<typename ValueType, mra::Dimension NDIM, template<typename, typename> typename Sparsity>
+    struct make_tensorview {
+      using type = TensorView<ValueType, NDIM, Sparsity>;
+    };
+
+    /**
+     * Change range-based sparsity to sparsity array for tensorview.
+     */
+    template<typename ValueType, mra::Dimension NDIM>
+    struct make_tensorview<ValueType, NDIM, RangeSparsityBase> {
+      using type = TensorView<ValueType, NDIM, SparseArrayBase>;
+    };
+
+    template<typename ValueType, mra::Dimension NDIM, template<typename, typename> typename Sparsity>
+    using make_tensorview_t = typename make_tensorview<ValueType, NDIM, Sparsity>::type;
+
+  } // namespace detail
+
+  template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, class Allocator = DeviceAllocator<T>>
+  requires detail::TensorCompatibleSparsity<Sparsity>
+  class Tensor : public ttg::TTValue<Tensor<T, NDIM, Sparsity, Allocator>>,
+                 protected Sparsity<Tensor<T, NDIM, Sparsity, Allocator>, T> {
   public:
     using value_type = std::decay_t<T>;
     using allocator_type = Allocator;
-    using view_type = TensorView<value_type, NDIM>;
-    using const_view_type = std::add_const_t<TensorView<value_type, NDIM>>;
+    using sparsity_type = Sparsity<Tensor<T, NDIM, Sparsity, Allocator>, T>;
+    using view_type = detail::make_tensorview_t<value_type, NDIM, Sparsity>;
+    using view_sparsity_type = typename view_type::sparsity_type;
+    using const_view_type = std::add_const_t<view_type>;
     using buffer_type = ttg::Buffer<value_type, allocator_type>;
 
     static constexpr bool is_tensor() { return true; };
@@ -33,13 +71,21 @@ namespace mra {
     //friend madness::archive::ArchiveSerializeImpl<Archive, Tensor>;
 
   private:
-    using ttvalue_type = ttg::TTValue<Tensor<T, NDIM, Allocator>>;
+    using ttvalue_type = ttg::TTValue<Tensor>;
     dims_array_t m_dims = {0};
     buffer_type  m_buffer;
 
+    std::size_t buffer_size() const {
+      if constexpr (sparsity_traits<view_sparsity_type>::inline_storage()) {
+        return size() + sparsity_traits<view_sparsity_type>::required_space(m_dims);
+      } else {
+        return size();
+      }
+    }
+
     // (Re)allocate the tensor memory
     void realloc() {
-      m_buffer.reset(size());
+      m_buffer.reset(buffer_size());
     }
 
     template<std::size_t... Is>
@@ -54,14 +100,14 @@ namespace mra {
     explicit Tensor(size_type dim, ttg::scope scope = ttg::scope::SyncIn)
     : ttvalue_type()
     , m_dims(create_dims_array(dim, std::make_index_sequence<NDIM>{}))
-    , m_buffer(size())
+    , m_buffer(buffer_size())
     { }
 
     template<typename... Dims, typename = std::enable_if_t<(sizeof...(Dims) > 1)>>
     Tensor(Dims... dims)
     : ttvalue_type()
     , m_dims({static_cast<size_type>(dims)...})
-    , m_buffer(size())
+    , m_buffer(buffer_size())
     {
       static_assert(sizeof...(Dims) == NDIM,
                     "Number of arguments does not match number of Dimensions.");
@@ -70,7 +116,7 @@ namespace mra {
     Tensor(const std::array<size_type, NDIM>& dims, ttg::scope scope = ttg::scope::SyncIn)
     : ttvalue_type()
     , m_dims(dims)
-    , m_buffer(size(), scope)
+    , m_buffer(buffer_size(), scope)
     {
       // TODO: make this static_assert (clang 14 doesn't get it)
       assert(dims.size() == NDIM);
@@ -78,16 +124,16 @@ namespace mra {
     }
 
 
-    Tensor(Tensor<T, NDIM, Allocator>&& other) = default;
+    Tensor(Tensor&& other) = default;
 
-    Tensor& operator=(Tensor<T, NDIM, Allocator>&& other) = default;
+    Tensor& operator=(Tensor&& other) = default;
 
     /* Disable copy construction.
      * There is no way we can copy data from anywhere else but the host memory space
      * so let's not even try. */
-    Tensor(const Tensor<T, NDIM, Allocator>& other) = delete;
+    Tensor(const Tensor& other) = delete;
 
-    Tensor& operator=(const Tensor<T, NDIM, Allocator>& other) = delete;
+    Tensor& operator=(const Tensor& other) = delete;
 
     size_type size() const {
       return std::reduce(&m_dims[0], &m_dims[ndim()], 1, std::multiplies<size_type>{});
@@ -107,14 +153,6 @@ namespace mra {
 
     const auto& buffer() const {
       return m_buffer;
-    }
-
-    value_type* data() {
-      return m_buffer.host_ptr();
-    }
-
-    const value_type* data() const {
-      return m_buffer.host_ptr();
     }
 
     /* returns a view for the current memory space
@@ -142,7 +180,7 @@ namespace mra {
     }
 
     bool empty() const {
-      return m_buffer.empty();
+      return size() == 0;
     }
 
     template <typename Archive>
@@ -154,15 +192,30 @@ namespace mra {
     void serialize(Archive &ar, const unsigned int) {
       serialize(ar);
     }
+
+    /**
+     * Update sparsity information from another sparsity object.
+     */
+    template<typename S>
+    void update_sparsity_info(S&& sparsity_info) {
+      sparsity_type::apply_sparsity(std::forward<S>(sparsity_info));
+    }
+
+    const sparsity_type& sparsity() const {
+      return *this;
+    }
   };
 
-  template <typename T, Dimension NDIM>
   std::ostream&
-  operator<<(std::ostream& s, const TensorView<T, NDIM>& t) {
+  operator<<(std::ostream& s, const concepts::TensorView auto& t) {
     if (t.size() == 0) {
       s << "[empty tensor]\n";
       return s;
     }
+
+    using view_type = std::decay_t<decltype(t)>;
+    using T = typename view_type::value_type;
+    constexpr const Dimension NDIM = view_type::ndim();
 
     const Dimension ndim = t.ndim();
 
@@ -214,6 +267,13 @@ namespace mra {
     s << t.current_view();
     return s;
   }
+
+  template<typename T, mra::Dimension NDIM, class Allocator = DeviceAllocator<T>>
+  using DenseTensor = Tensor<T, NDIM, DenseViewBase, Allocator>;
+
+  template<typename T, mra::Dimension NDIM, class Allocator = DeviceAllocator<T>>
+  using SparseTensor = Tensor<T, NDIM, RangeSparsityBase, Allocator>;
+
 } // namespace mra
 
 #endif // MRA_TENSOR_H

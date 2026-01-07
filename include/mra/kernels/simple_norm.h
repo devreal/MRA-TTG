@@ -29,7 +29,7 @@ namespace mra {
       size_type N)
     {
       const bool is_t0 = (0 == thread_id());
-      SHARED TensorView<T, NDIM> n;
+      SHARED DenseTensorView<T, NDIM> n;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
         if (is_t0) {
           n = node(blockid);

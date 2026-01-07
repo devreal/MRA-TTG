@@ -70,17 +70,17 @@ namespace mra {
       const bool is_t0 = (0 == thread_id());
 
       /* pick the r's for this function */
-      SHARED std::array<TensorView<T, NDIM>, Key<NDIM>::num_children()> block_r_arr;
-      SHARED TensorView<T, NDIM> s, tmp_node;
+      SHARED std::array<decltype(r_arr[0](0)), Key<NDIM>::num_children()> block_r_arr;
+      SHARED DenseTensorView<T, NDIM> s, tmp_node;
       SHARED T* workspace;
-      SHARED TensorView<T, NDIM> node, from_parent;
+      SHARED DenseTensorView<T, NDIM> node, from_parent;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp_ptr[blockId*reconstruct_tmp_size<NDIM>(K)];
       if (is_t0) {
         const size_type TWOK2NDIM = std::pow(2*K,NDIM);
-        s           = TensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
-        tmp_node    = TensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
+        s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
+        tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
         workspace   = &block_tmp_ptr[2*TWOK2NDIM];
       }
 
@@ -125,10 +125,10 @@ namespace mra {
     const Key<3>& key,
     size_type N,
     size_type K,
-    TensorView<double, 3+1>& node,
-    const TensorView<double, 2>& hg,
-    const TensorView<double, 3+1>& from_parent,
-    const std::array<TensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,
+    SparseTensorView<double, 3+1>& node,
+    const SparseTensorView<double, 2>& hg,
+    const SparseTensorView<double, 3+1>& from_parent,
+    const std::array<SparseTensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,
     double* tmp,
     ttg::device::Stream stream);
 

@@ -12,18 +12,19 @@
 namespace mra {
 
     namespace detail {
+
       template<typename T, Dimension NDIM>
       class FunctionNodeBase {
       public: // temporarily make everything public while we figure out what we are doing
         static constexpr Dimension ndim() { return NDIM; }
         using key_type = Key<NDIM>;
         using value_type = T;
-        using tensor_type = Tensor<value_type,NDIM+1>;
-        using view_type   = TensorView<value_type, NDIM>;
-        using const_view_type   = TensorView<const value_type, NDIM>;
-        static constexpr bool is_function_node = true;
-        using norm_tensor_type = Tensor<value_type, 1>;
-        using norm_tensor_view_type = TensorView<const value_type, NDIM>;
+        using tensor_type = SparseTensor<value_type,NDIM+1>;
+        using view_type   = SparseTensorView<value_type, NDIM>;
+        using const_view_type   = SparseTensorView<const value_type, NDIM>;
+        using norm_tensor_type = DenseTensor<value_type, 1>;
+        using norm_tensor_view_type = DenseTensorView<const value_type, NDIM>;
+        using sparsity_type = typename tensor_type::sparsity_type;
 
       protected:
         key_type m_key; //< Key associated with this node to facilitate computation from otherwise unknown parent/child
@@ -163,6 +164,10 @@ namespace mra {
           return m_coeffs.buffer();
         }
 
+        const auto& sparsity() const {
+          return m_coeffs.sparsity();
+        }
+
         template <typename Archive>
         void serialize(Archive& ar) {
           ar& this->m_key;
@@ -184,15 +189,14 @@ namespace mra {
     class FunctionsReconstructedNode : public ttg::TTValue<FunctionsReconstructedNode<T, NDIM>>,
                                        public detail::FunctionNodeBase<T, NDIM> {
       public:
+        using base_type = detail::FunctionNodeBase<T, NDIM>;
         using key_type = Key<NDIM>;
         using value_type = T;
-        using tensor_type = Tensor<T,NDIM+1>;
-        using view_type   = TensorView<T, NDIM>;
-        using const_view_type   = TensorView<const T, NDIM>;
-        static constexpr bool is_function_node = true;
-        using norm_tensor_type = Tensor<T, 1>;
-        using norm_tensor_view_type = TensorView<const T, NDIM>;
-        using base_type = detail::FunctionNodeBase<T, NDIM>;
+        using tensor_type = typename base_type::tensor_type;
+        using view_type   = typename base_type::view_type;
+        using const_view_type   = typename base_type::const_view_type;
+        using norm_tensor_type = typename base_type::norm_tensor_type;
+        using norm_tensor_view_type = typename base_type::norm_tensor_view_type;
         constexpr static Dimension ndim() { return NDIM; }
 
       private:
@@ -322,13 +326,12 @@ namespace mra {
     class FunctionsCompressedNode : public ttg::TTValue<FunctionsCompressedNode<T, NDIM>>,
                                     public detail::FunctionNodeBase<T, NDIM> {
       public: // temporarily make everything public while we figure out what we are doing
-        static constexpr bool is_function_node = true;
-        using key_type          = Key<NDIM>;
-        using view_type         = TensorView<T, NDIM>;
-        using const_view_type   = TensorView<const T, NDIM>;
-        using norm_tensor_type = Tensor<T, 1>;
-        using norm_tensor_view_type = TensorView<const T, NDIM>;
         using base_type = detail::FunctionNodeBase<T, NDIM>;
+        using key_type          = Key<NDIM>;
+        using view_type         = typename base_type::view_type;
+        using const_view_type   = typename base_type::const_view_type;
+        using norm_tensor_type  = typename base_type::norm_tensor_type;
+        using norm_tensor_view_type = typename base_type::norm_tensor_view_type;
 
       private:
         std::vector<std::array<bool, Key<NDIM>::num_children()>> m_is_child_leafs; //< True if that child is leaf on tree
