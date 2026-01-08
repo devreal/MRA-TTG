@@ -31,19 +31,19 @@ void test_coeffs(int argc, char** argv) {
   // mra::ConvolutionOperator<double, 3> op(K, npt, conv);
   // std::shared_ptr<const mra::OperatorData<double, 3>> op_data = op.get_op(mra::Key<3>(1, {0, 0, 0}));
 
-  mra::OperatorInfo op_info(K, expnt, coeff);
-  mra::GaussianConvolutionOperator<double, 3> op(op_info);
-  std::shared_ptr<const mra::GaussianOperatorData<double, 3>> op_data = op.get_op(1, mra::Key<3>(1, {0, 0, 0}));
-
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
+
+  mra::OperatorInfo op_info(K, expnt, coeff);
+  mra::GaussianConvolutionOperator<double, 3> op(op_info);
+  std::shared_ptr<const mra::GaussianOperatorData<double, 3>> op_data = op.get_op(7, mra::Key<3>(7, {64, 64, 64}));
 
   madness::GaussianConvolution1D<double> conv1d(K, coeff, expnt, 0, false);
   const madness::Tensor<double>& rnlp1_mad = conv1d.rnlp(2, 1);
   madness::Tensor<double> rnlij1_mad = conv1d.rnlij(0, -1);
   const madness::Tensor<double>& rnlp2_mad = conv1d.rnlp(2, -1);
   madness::Tensor<double> rnlij2_mad = conv1d.rnlij(2, -1);
-  const madness::ConvolutionData1D<double>* cd_mad = conv1d.nonstandard(1, 0);
+  const madness::ConvolutionData1D<double>* cd_mad = conv1d.nonstandard(7, 64);
 
 
   std::cout << "MRA op_R:\n" << op_data->ops[0]->R.current_view() << std::endl << "with norm " << op_data->ops[0]->Rnorm << std::endl;
