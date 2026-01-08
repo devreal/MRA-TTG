@@ -49,8 +49,9 @@ namespace mra{
         send_out(key, in_node);
       }
       else {
+        // for fixed distance, the 2nd arg to get_op needs to be mra::Key<NDIM>(key.level(), {0, 0, 0})
         auto in_node_view = in_node.coeffs().current_view();
-        std::shared_ptr<const mra::GaussianOperatorData<T, NDIM>> op_data = op.get_op(key.level(), key);
+        std::shared_ptr<const mra::GaussianOperatorData<T, NDIM>> op_data = op.get_op(key.level(), mra::Key<NDIM>(key.level(), {0, 0, 0}));
         T opnorm = op_data->norm * op_data->fac;
         T cnorm = normf(in_node_view);
         T tol = thresh*0.01;
@@ -84,7 +85,7 @@ namespace mra{
           T norms = 1.0;
           T fac = op_data->fac;
           std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
-          if (key.level() == 0) at[1] = false; // do not apply S at level 0
+          // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
           auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
           auto out_view = out.coeffs().current_view();
