@@ -19,6 +19,8 @@ namespace mra {
   struct ConvolutionData {
     Tensor<T, 2> R, S;
     T normR, normS;
+
+    ConvolutionData() : R(), S(), normR(0.0), normS(0.0) {}
   };
 
   /// Nonstandard form of the operator
@@ -269,62 +271,71 @@ namespace mra {
           return r;
         }
 
-        Tensor<T, 2> tmp(2*K, 2*K);
-        const Tensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
-        const Tensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
-        const Tensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
+        if (!issmall(n, lx)) {
+          Tensor<T, 2> R, S, work;
+          Tensor<T, 2> tmp(2*K, 2*K);
+          const Tensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
+          const Tensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
+          const Tensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
 
-        auto tmp_view = tmp.current_view();
-        auto rm_view = rm.current_view();
-        auto r0_view = r0.current_view();
-        auto rp_view = rp.current_view();
+          auto tmp_view = tmp.current_view();
+          auto rm_view = rm.current_view();
+          auto r0_view = r0.current_view();
+          auto rp_view = rp.current_view();
 
-        std::array<Slice,2> slice = {Slice(0, K), Slice(0, K)};
-        tmp_view(slice) = r0_view;
-        slice = {Slice(0, K), Slice(K, 2*K)};
-        tmp_view(slice) = rm_view;
-        slice = {Slice(K, 2*K), Slice(0, K)};
-        tmp_view(slice) = rp_view;
-        slice = {Slice(K, 2*K), Slice(K, 2*K)};
-        tmp_view(slice) = r0_view;
+          std::array<Slice,2> slice = {Slice(0, K), Slice(0, K)};
+          tmp_view(slice) = r0_view;
+          slice = {Slice(0, K), Slice(K, 2*K)};
+          tmp_view(slice) = rm_view;
+          slice = {Slice(K, 2*K), Slice(0, K)};
+          tmp_view(slice) = rp_view;
+          slice = {Slice(K, 2*K), Slice(K, 2*K)};
+          tmp_view(slice) = r0_view;
 
-        const auto& hgT = functiondata.get_hgT();
-        auto hgT_view = hgT.current_view();
-        Tensor<T, 2> R(2*K, 2*K), work(2*K, 2*K);
-        auto R_view = R.current_view();
-        transform(tmp_view, hgT_view, R_view, work.data());
-        Tensor<T, 2> S(K, K);
-        auto S_view = S.current_view();
-        slice = {Slice(0, K), Slice(0, K)};
-        S_view(slice) = R_view(slice);
+          const auto& hgT = functiondata.get_hgT();
+          auto hgT_view = hgT.current_view();
+          R = Tensor<T, 2>(2*K, 2*K);
+          S = Tensor<T, 2>(K, K);
+          work = Tensor<T, 2>(2*K, 2*K);
+          auto R_view = R.current_view();
+          auto S_view = S.current_view();
 
-        // transpose
-        for (size_type i = 0; i < 2*K; ++i) {
-          for (size_type j = i+1; j < 2*K; ++j) {
-            std::swap(R_view(i, j), R_view(j, i));
+          transform(tmp_view, hgT_view, R_view, work.data());
+          slice = {Slice(0, K), Slice(0, K)};
+          S_view(slice) = R_view(slice);
+
+          // transpose
+          for (size_type i = 0; i < 2*K; ++i) {
+            for (size_type j = i+1; j < 2*K; ++j) {
+              std::swap(R_view(i, j), R_view(j, i));
+            }
           }
-        }
 
-        for (size_type i = 0; i < K; ++i) {
-          for (size_type j = i+1; j < K; ++j) {
-            std::swap(S_view(i, j), S_view(j, i));
+          for (size_type i = 0; i < K; ++i) {
+            for (size_type j = i+1; j < K; ++j) {
+              std::swap(S_view(i, j), S_view(j, i));
+            }
           }
-        }
-        auto obj = ConvolutionData<T>();
-        obj.R = std::move(R);
-        obj.S = std::move(S);
-        obj.normR = normf(obj.R.current_view());
-        obj.normS = normf(obj.S.current_view());
+          auto obj = ConvolutionData<T>();
+          obj.R = std::move(R);
+          obj.S = std::move(S);
+          obj.normR = normf(obj.R.current_view());
+          obj.normS = normf(obj.S.current_view());
 
-        cachemutex.lock();
-        if (nscache.find(key) == nscache.end()) {
-          auto obj_ptr = std::make_shared<const ConvolutionData<T>>(std::move(obj));
-          nscache.emplace(key, std::move(obj_ptr));
+          cachemutex.lock();
+          if (nscache.find(key) == nscache.end()) {
+            auto obj_ptr = std::make_shared<const ConvolutionData<T>>(std::move(obj));
+            nscache.emplace(key, std::move(obj_ptr));
+          }
+          it = nscache.find(key);
+          cachemutex.unlock();
+          const auto& r = it->second;
+          return r;
         }
-        it = nscache.find(key);
-        cachemutex.unlock();
-        const auto& r = it->second;
-        return r;
+
+        auto empty = ConvolutionData<T>();
+        return std::make_shared<const ConvolutionData<T>>(std::move(empty));
+
       }
     };
 
