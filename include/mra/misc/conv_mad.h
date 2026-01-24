@@ -20,10 +20,10 @@ namespace mra {
       madness::startup(world, 0, nullptr, false);
     }
     OperatorInfo() : K(8), expnt(1500), coeff(1) {
-      init_madness();
+      // init_madness();
     }
     OperatorInfo(size_type K, T expnt, T coeff) : K(K), expnt(expnt), coeff(coeff) {
-      init_madness();
+      // init_madness();
     }
   };
 
@@ -39,6 +39,17 @@ namespace mra {
                                 Rs(), Ss(),
                                 Rnorm(0.0), Snorm(0.0),
                                 Rnormf(0.0), Snormf(0.0), NSnormf(0.0) {}
+    GaussianConvolutionData(Tensor<T, 2>&& R_, Tensor<T, 2>&& S_,
+                              Tensor<T, 2>&& RU_, Tensor<T, 2>&& RVT_,
+                              Tensor<T, 2>&& SU_, Tensor<T, 2>&& SVT_,
+                              Tensor<T, 1>&& Rs_, Tensor<T, 1>&& Ss_,
+                              T Rnorm_, T Snorm_, T Rnormf_, T Snormf_, T NSnormf_)
+      : R(std::move(R_)), S(std::move(S_)),
+        RU(std::move(RU_)), RVT(std::move(RVT_)),
+        SU(std::move(SU_)), SVT(std::move(SVT_)),
+        Rs(std::move(Rs_)), Ss(std::move(Ss_)),
+        Rnorm(Rnorm_), Snorm(Snorm_),
+        Rnormf(Rnormf_), Snormf(Snormf_), NSnormf(NSnormf_) {}
     GaussianConvolutionData(const GaussianConvolutionData&) = default;
     GaussianConvolutionData(GaussianConvolutionData&&) = default;
     ~GaussianConvolutionData() = default;
@@ -111,64 +122,84 @@ namespace mra {
       // call madness nonstandard function to populate GaussianConvolutionData for each dimension
       std::array<std::shared_ptr<const GaussianConvolutionData<T>>, NDIM> ops;
 
+      const madness::ConvolutionData1D<T>* cd_mad[NDIM];
       for (size_type i = 0; i < NDIM; ++i) {
-        const madness::ConvolutionData1D<T>* cd_mad = conv1d.nonstandard(n, disp.translation()[i]);
-        GaussianConvolutionData<T>  op_data;
-        op_data.Rnorm = cd_mad->Rnorm;
-        op_data.Snorm = cd_mad->Tnorm;
-        op_data.Rnormf = cd_mad->Rnormf;
-        op_data.Snormf = cd_mad->Tnormf;
-        op_data.NSnormf = cd_mad->NSnormf;
+        cd_mad[i] = conv1d.nonstandard(n, disp.translation()[i]);
+        if (!(cd_mad[i]->R.size() == 0 && cd_mad[i]->T.size() == 0)) {
+          GaussianConvolutionData<T>  op_data;
+          // op_data.Rnorm = cd_mad[i]->Rnorm;
+          // op_data.Snorm = cd_mad[i]->Tnorm;
+          // op_data.Rnormf = cd_mad[i]->Rnormf;
+          // op_data.Snormf = cd_mad[i]->Tnormf;
+          // op_data.NSnormf = cd_mad[i]->NSnormf;
 
-        op_data.R    = Tensor<T, 2>(2 * op_info.K, 2 * op_info.K);
-        op_data.RU   = Tensor<T, 2>(2 * op_info.K, 2 * op_info.K);
-        op_data.RVT  = Tensor<T, 2>(2 * op_info.K, 2 * op_info.K);
-        op_data.S    = Tensor<T, 2>(op_info.K, op_info.K);
-        op_data.SU   = Tensor<T, 2>(op_info.K, op_info.K);
-        op_data.SVT  = Tensor<T, 2>(op_info.K, op_info.K);
-        op_data.Rs   = Tensor<T, 1>(2 * op_info.K);
-        op_data.Ss   = Tensor<T, 1>(op_info.K);
+          // op_data.R    = Tensor<T, 2>(2 * op_info.K, 2 * op_info.K);
+          // op_data.RU   = Tensor<T, 2>(2 * op_info.K, 2 * op_info.K);
+          // op_data.RVT  = Tensor<T, 2>(2 * op_info.K, 2 * op_info.K);
+          // op_data.S    = Tensor<T, 2>(op_info.K, op_info.K);
+          // op_data.SU   = Tensor<T, 2>(op_info.K, op_info.K);
+          // op_data.SVT  = Tensor<T, 2>(op_info.K, op_info.K);
+          // op_data.Rs   = Tensor<T, 1>(2 * op_info.K);
+          // op_data.Ss   = Tensor<T, 1>(op_info.K);
 
-        auto R_view = op_data.R.current_view();
-        auto RU_view = op_data.RU.current_view();
-        auto RVT_view = op_data.RVT.current_view();
-        auto S_view = op_data.S.current_view();
-        auto SU_view = op_data.SU.current_view();
-        auto SVT_view = op_data.SVT.current_view();
-        auto Rs_view = op_data.Rs.current_view();
-        auto Ss_view = op_data.Ss.current_view();
+          Tensor<T, 2> R(2 * op_info.K, 2 * op_info.K),
+                        RU(2 * op_info.K, 2 * op_info.K),
+                        RVT(2 * op_info.K, 2 * op_info.K),
+                        S(op_info.K, op_info.K),
+                        SU(op_info.K, op_info.K),
+                        SVT(op_info.K, op_info.K);
+          Tensor<T, 1> Rs(2 * op_info.K), Ss(op_info.K);
+          auto R_view = R.current_view();
+          auto RU_view = RU.current_view();
+          auto RVT_view = RVT.current_view();
+          auto S_view = S.current_view();
+          auto SU_view = SU.current_view();
+          auto SVT_view = SVT.current_view();
+          auto Rs_view = Rs.current_view();
+          auto Ss_view = Ss.current_view();
 
-        for (size_type j=0; j<2*op_info.K; ++j){
-          for (size_type k=0; k<2*op_info.K; ++k){
-            R_view(j,k) = static_cast<T>(cd_mad->R(j,k));
-            RU_view(j,k) = static_cast<T>(cd_mad->RU(j,k));
-            RVT_view(j,k) = static_cast<T>(cd_mad->RVT(j,k));
+          for (size_type j=0; j<2*op_info.K; ++j){
+            for (size_type k=0; k<2*op_info.K; ++k){
+              R_view(j,k) = static_cast<T>(cd_mad[i]->R(j,k));
+              RU_view(j,k) = static_cast<T>(cd_mad[i]->RU(j,k));
+              RVT_view(j,k) = static_cast<T>(cd_mad[i]->RVT(j,k));
+            }
           }
-        }
 
-        for (size_type j=0; j<op_info.K; ++j){
-          for (size_type k=0; k<op_info.K; ++k){
-            S_view(j,k) = static_cast<T>(cd_mad->T(j,k));
-            SU_view(j,k) = static_cast<T>(cd_mad->TU(j,k));
-            SVT_view(j,k) = static_cast<T>(cd_mad->TVT(j,k));
+          for (size_type j=0; j<op_info.K; ++j){
+            for (size_type k=0; k<op_info.K; ++k){
+              S_view(j,k) = static_cast<T>(cd_mad[i]->T(j,k));
+              SU_view(j,k) = static_cast<T>(cd_mad[i]->TU(j,k));
+              SVT_view(j,k) = static_cast<T>(cd_mad[i]->TVT(j,k));
+            }
           }
-        }
 
-        for (size_type j=0; j<2*op_info.K; ++j){
-          Rs_view(j) = static_cast<T>(cd_mad->Rs[j]);
-        }
+          for (size_type j=0; j<2*op_info.K; ++j){
+            Rs_view(j) = static_cast<T>(cd_mad[i]->Rs[j]);
+          }
 
-        for (size_type j=0; j<op_info.K; ++j){
-          Ss_view(j) = static_cast<T>(cd_mad->Ts[j]);
+          for (size_type j=0; j<op_info.K; ++j){
+            Ss_view(j) = static_cast<T>(cd_mad[i]->Ts[j]);
+          }
+          ops[i] = std::make_shared<const GaussianConvolutionData<T>>(std::move(R), std::move(S),
+                                                                      std::move(RU), std::move(RVT),
+                                                                      std::move(SU), std::move(SVT),
+                                                                      std::move(Rs), std::move(Ss),
+                                                                      static_cast<T>(cd_mad[i]->Rnorm),
+                                                                      static_cast<T>(cd_mad[i]->Tnorm),
+                                                                      static_cast<T>(cd_mad[i]->Rnormf),
+                                                                      static_cast<T>(cd_mad[i]->Tnormf),
+                                                                      static_cast<T>(cd_mad[i]->NSnormf));
         }
-        ops[i] = std::make_shared<const GaussianConvolutionData<T>>(std::move(op_data));
+        else {
+          ops[i] = std::make_shared<const GaussianConvolutionData<T>>();
+        }
       }
-
-      T norm = norm_ns(n, ops);
-      GaussianOperatorData<T, NDIM> ops_data;
-      ops_data.ops = ops;
-      ops_data.norm = norm;
-      ops_data.fac = 1.0;
+        T norm = norm_ns(n, ops);
+        GaussianOperatorData<T, NDIM> ops_data;
+        ops_data.ops = ops;
+        ops_data.norm = norm;
+        ops_data.fac = 1.0;
 
       cachemutex.lock();
       if (_opcache.find(disp) == _opcache.end()) {
