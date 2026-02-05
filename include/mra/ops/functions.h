@@ -204,6 +204,22 @@ namespace mra {
       }
     }
 
+    /**
+     * Accumulator type for sum of squares function.
+     * Maps float to double for higher accuracy.
+     */
+    template<typename T>
+    struct accumulator_type {
+      using type = std::decay_t<T>;
+    };
+    template<>
+    struct accumulator_type<float> {
+      using type = double;
+    };
+
+    template<typename T>
+    using accumulator_type_t = typename accumulator_type<T>::type;
+
     template <typename accumulatorT>
     SCOPE void sumabssq(const concepts::TensorView auto& a, accumulatorT* sum) {
       accumulatorT s = 0.0;
@@ -218,7 +234,7 @@ namespace mra {
 
     /// Compute Frobenius norm ... still needs specializing for complex
     SCOPE auto normf(const concepts::TensorView auto& a) {
-      using accumulatorT = typename std::decay_t<decltype(a)>::value_type;
+      using accumulatorT = accumulator_type_t<typename std::decay_t<decltype(a)>::value_type>;
 #ifdef HAVE_DEVICE_ARCH
       __shared__ accumulatorT sum;
 #else  // HAVE_DEVICE_ARCH

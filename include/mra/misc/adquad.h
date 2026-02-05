@@ -11,7 +11,7 @@ namespace mra {
 
     template <typename functorT, typename T>
     void do_adq(const T lo, const T hi, const functorT& func,
-                int n, const T* x, const T* w, Tensor<T, 1>& adq_val){
+                int n, const T* x, const T* w, DenseTensor<T, 1>& adq_val){
       T range = hi - lo;
       for (int i = 0; i < n; ++i) adq_val += func(lo + range * x[i]) * w[i];
       adq_val *= range;
@@ -19,11 +19,11 @@ namespace mra {
 
     template <typename functorT, typename T>
     void adq1(const T lo, const T hi, const functorT& func,
-              const T thresh, int n, int level, const T* x, const T* w, Tensor<T, 1>& adq){
+              const T thresh, int n, int level, const T* x, const T* w, DenseTensor<T, 1>& adq){
       static const int MAX_LEVEL = 14;
       T d = (hi - lo) / 2;
 
-      Tensor<T, 1> full(adq), half(adq);
+      DenseTensor<T, 1> full(adq), half(adq);
       full.fill(0.0);
       half.fill(0.0);
       do_adq(lo, hi, func, n, x, w, full);
@@ -46,7 +46,7 @@ namespace mra {
 
     template <typename functorT, typename T>
     void adq(const T lo, const T hi, const functorT& func,
-             const T thresh, Tensor<T, 1> result){
+             const T thresh, DenseTensor<T, 1> result){
       const int n = 20;
       T x[n], w[n];
       GLget(&x, &w, n);

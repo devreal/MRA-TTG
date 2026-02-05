@@ -20,7 +20,7 @@ void test_coeffs(int argc, char** argv) {
 
 
   mra::Convolution<double, 3> conv(K, npt, coeff, expnt, functiondata);
-  const mra::Tensor<double, 2>& rnlij = conv.make_rnlij(2, 1);
+  const mra::DenseTensor<double, 2>& rnlij = conv.make_rnlij(2, 1);
   auto rnlij_view = rnlij.current_view();
 
   // mra::ConvolutionOperator<double, 3> op(K, npt, coeff, expnt, functiondata);

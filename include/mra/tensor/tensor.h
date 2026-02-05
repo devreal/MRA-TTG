@@ -12,6 +12,7 @@
 #include "mra/misc/allocator.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/sparsity.h"
+#include "mra/tensor/sparsityinfo.h"
 
 namespace mra {
 
@@ -61,8 +62,6 @@ namespace mra {
     using const_view_type = std::add_const_t<view_type>;
     using buffer_type = ttg::Buffer<value_type, allocator_type>;
 
-    static constexpr bool is_tensor() { return true; };
-
     static constexpr Dimension ndim() { return NDIM; }
 
     using dims_array_t = std::array<size_type, ndim()>;
@@ -99,6 +98,7 @@ namespace mra {
     /* generic */
     explicit Tensor(size_type dim, ttg::scope scope = ttg::scope::SyncIn)
     : ttvalue_type()
+    , sparsity_type()
     , m_dims(create_dims_array(dim, std::make_index_sequence<NDIM>{}))
     , m_buffer(buffer_size())
     { }
@@ -106,21 +106,40 @@ namespace mra {
     template<typename... Dims, typename = std::enable_if_t<(sizeof...(Dims) > 1)>>
     Tensor(Dims... dims)
     : ttvalue_type()
+    , sparsity_type()
     , m_dims({static_cast<size_type>(dims)...})
     , m_buffer(buffer_size())
     {
+
       static_assert(sizeof...(Dims) == NDIM,
                     "Number of arguments does not match number of Dimensions.");
     }
 
     Tensor(const std::array<size_type, NDIM>& dims, ttg::scope scope = ttg::scope::SyncIn)
     : ttvalue_type()
+    , sparsity_type()
     , m_dims(dims)
     , m_buffer(buffer_size(), scope)
     {
       // TODO: make this static_assert (clang 14 doesn't get it)
       assert(dims.size() == NDIM);
                     //"Number of arguments does not match number of Dimensions.");
+    }
+
+    Tensor(const SparsityInfo& sparsity_info,
+           size_type K,
+           ttg::scope scope = ttg::scope::SyncIn)
+    : ttvalue_type()
+    , sparsity_type()
+    , m_buffer(buffer_size(), scope)
+    {
+      // set dimensions
+      m_dims[0] = sparsity_info.dim(0);
+      for (Dimension d = 1; d < NDIM; ++d) {
+        m_dims[d] = K;
+      }
+
+      this->apply_sparsity(sparsity_info);
     }
 
 
@@ -206,6 +225,20 @@ namespace mra {
     }
   };
 
+  namespace concepts {
+    template<typename T>
+    struct is_tensor : std::false_type { };
+
+    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, class Allocator>
+    struct is_tensor<Tensor<T, NDIM, Sparsity, Allocator>> : std::true_type { };
+
+    template<typename T>
+    constexpr bool is_tensor_v = is_tensor<std::decay_t<T>>::value;
+
+    template<typename T>
+    concept Tensor = is_tensor_v<T>;
+  } // namespace concepts
+
   std::ostream&
   operator<<(std::ostream& s, const concepts::TensorView auto& t) {
     if (t.size() == 0) {
@@ -260,10 +293,9 @@ namespace mra {
     return s;
   }
 
-  template <typename tensorT>
-  requires(tensorT::is_tensor())
   std::ostream&
-  operator<<(std::ostream& s, const tensorT& t) {
+  operator<<(std::ostream& s, const concepts::Tensor auto& t) {
+    assert(t.buffer().is_current_on(ttg::device::Host()));
     s << t.current_view();
     return s;
   }

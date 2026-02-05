@@ -11335,7 +11335,7 @@ namespace mra{
       }
 
       template <typename T>
-      void autocorr_get(size_type K, mra::TensorView<T, 3>& cread){
+      void autocorr_get(size_type K, mra::DenseTensorView<T, 3>& cread){
 
         int it=0;
         while(1){
@@ -11359,7 +11359,7 @@ namespace mra{
         }
       }
 
-      template void autocorr_get<double>(size_type K, TensorView<double, 3>& cread);
-      template void autocorr_get<float>(size_type K, TensorView<float, 3>& cread);
+      template void autocorr_get<double>(size_type K, DenseTensorView<double, 3>& cread);
+      template void autocorr_get<float>(size_type K, DenseTensorView<float, 3>& cread);
   }
 }

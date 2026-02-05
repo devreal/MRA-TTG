@@ -11,9 +11,9 @@ int main(int argc, char **argv) {
 
   { // block needed for the destructors to be called before finalize
 
-  using matrix_type = mra::Tensor<double, 2>;
+  using matrix_type = mra::DenseTensor<double, 2>;
   using matrixview_type = typename matrix_type::view_type;
-  using tensor_type = mra::Tensor<double, 3>;
+  using tensor_type = mra::DenseTensor<double, 3>;
   using tensorview_type = typename tensor_type::view_type;
 
   matrix_type m1 = matrix_type(2, 2); // 2x2 matrix

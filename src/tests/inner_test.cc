@@ -15,13 +15,13 @@ int main(int argc, char **argv) {
 
   {
     bool passed = true;
-    madness::Tensor<double> nA(K, K, K), nB(K, K, K);
+    madness::DenseTensor<double> nA(K, K, K), nB(K, K, K);
 
-    mra::Tensor<double, 3> nodeA(K), nodeB(K);
-    mra::Tensor<double, 4> nodeC(K);
-    mra::TensorView<double, 3> nodeAv = nodeA.current_view();
-    mra::TensorView<double, 3> nodeBv = nodeB.current_view();
-    mra::TensorView<double, 4> nodeCv = nodeC.current_view();
+    mra::DenseTensor<double, 3> nodeA(K), nodeB(K);
+    mra::DenseTensor<double, 4> nodeC(K);
+    mra::DenseTensorView<double, 3> nodeAv = nodeA.current_view();
+    mra::DenseTensorView<double, 3> nodeBv = nodeB.current_view();
+    mra::DenseTensorView<double, 4> nodeCv = nodeC.current_view();
 
     /* set up tensors */
     for (int i=0; i<K; ++i){

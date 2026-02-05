@@ -13,6 +13,15 @@ namespace mra {
 
     namespace detail {
 
+      /**
+       * Notes on Sparsity in the functionnode:
+       * - The FunctionNodes store data in Tensors, that in turn encode sparsity.
+       * - We need to split the tensor allocation from the construction of the sparsity of the node
+       *   so that we can gather the sparsity information and then allocate the underlying tensor memory.
+       * - The sparsity should be gathered in a separate object and passed to the functionnode/tensor
+       *   constructor and allocate() function to apply it there. The fallback will be the DenseSparsity.
+       */
+
       template<typename T, Dimension NDIM>
       class FunctionNodeBase {
       public: // temporarily make everything public while we figure out what we are doing
@@ -22,6 +31,8 @@ namespace mra {
         using tensor_type = SparseTensor<value_type,NDIM+1>;
         using view_type   = SparseTensorView<value_type, NDIM>;
         using const_view_type   = SparseTensorView<const value_type, NDIM>;
+        using subview_type   = DenseTensorView<value_type, NDIM>;
+        using const_subview_type  = DenseTensorView<const value_type, NDIM>;
         using norm_tensor_type = DenseTensor<value_type, 1>;
         using norm_tensor_view_type = DenseTensorView<const value_type, NDIM>;
         using sparsity_type = typename tensor_type::sparsity_type;
@@ -82,6 +93,24 @@ namespace mra {
 #endif
         }
 
+
+        /**
+         * Allocate space for coefficients using K.
+         * The node must be empty before and will not be empty afterwards.
+         */
+        void allocate(const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn) {
+          if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
+          if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
+
+#ifndef MRA_ENABLE_HOST
+          /**
+           * Currently needed to ensure the buffer is allocated on the host.
+           */
+          scope = ttg::scope::SyncIn;
+#endif // MRA_ENABLE_HOST
+          m_coeffs = tensor_type(sparsity, K, scope);
+        }
+
         /* with C++23 we could the following:
         auto& coeffs(this FunctionsReconstructedNode&& self) {
           return self.m_coeffs;
@@ -95,11 +124,11 @@ namespace mra {
           return m_coeffs;
         }
 
-        view_type coeffs_view(size_type i){
+        subview_type coeffs_view(size_type i){
           return m_coeffs.current_view()(i);
         }
 
-        const view_type coeffs_view(size_type i) const {
+        const_subview_type coeffs_view(size_type i) const {
           return m_coeffs.current_view()(i);
         }
 
@@ -243,6 +272,8 @@ namespace mra {
         FunctionsReconstructedNode& operator=(FunctionsReconstructedNode&& other) = default;
         FunctionsReconstructedNode& operator=(const FunctionsReconstructedNode& other) = delete;
 
+
+#if 0
         /**
          * Allocate space for coefficients using K.
          * The node must be empty before and will not be empty afterwards.
@@ -250,6 +281,12 @@ namespace mra {
         void allocate(size_type K, ttg::scope scope = ttg::scope::SyncIn) {
           base_type::allocate(K, scope);
         }
+
+        void allocate(const SparsityInfo& sparsity, ttg::scope scope = ttg::scope::SyncIn) {
+          this->apply_sparsity(sparsity);
+          base_type::allocate(sparsity.dim(0), scope);
+        }
+#endif // 0
 
         bool has_children(size_type i) const {
           return !m_metadata[i].is_leaf;
@@ -261,6 +298,11 @@ namespace mra {
             result |= has_children(i);
           }
           return result;
+        }
+
+
+        void set_leaf(size_type i, bool val) {
+          m_metadata[i].is_leaf = val;
         }
 
         void set_all_leaf(bool val) {

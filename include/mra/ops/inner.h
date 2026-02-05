@@ -20,7 +20,6 @@ namespace mra{
       long k0 = -1,
       long k1 = 0)
     {
-      using T = typename std::decay_t<decltype(left)>::value_type;
       if (k0 < 0) k0 += left.ndim();
       if (k1 < 0) k1 += right.ndim();
 
@@ -60,9 +59,12 @@ namespace mra{
 
       // TODO: use more than the first slice of threads in z here
       if (threadIdx.z == 0) {
+        using ResultT = typename std::decay_t<decltype(result)>::value_type;
+        using LeftT  = typename std::decay_t<decltype(left)>::value_type;
+        using RightT = typename std::decay_t<decltype(right)>::value_type;
         size_type dimj = left.dim(k0);
         auto iter1 = right.unary_iterator(IterLevel::Vector, false, k1);
-        T* ptr = result.data();
+        ResultT* ptr = result.data();
         auto iter0 = left.unary_iterator(IterLevel::Vector, false, k0);
         //std::cout << "INNER " << " k0=" << k0 << " k1=" << k1
         //          << " dimj=" << dimj
@@ -74,17 +76,17 @@ namespace mra{
         for (auto iter0 = left.unary_iterator(IterLevel::Vector, false, k0);
              iter0.data() != nullptr;
              ++iter0, ptr += iter1.size()) {
-          const T* __restrict__ xp0 = iter0.data();
+          const LeftT* __restrict__ xp0 = iter0.data();
           ssize_type s0 = iter0.s0();
-          T *__restrict__ res = ptr;
+          ResultT *__restrict__ res = ptr;
           iter1.reset();
           for (iter1 += thread_id();
                iter1.data() != nullptr;
                iter1 += blockDim.x*blockDim.y, res += blockDim.x*blockDim.y) {
-            const T* __restrict__ p0 = xp0;
-            const T* __restrict__ p1 = iter1.data();
+            const LeftT* __restrict__ p0 = xp0;
+            const RightT* __restrict__ p1 = iter1.data();
             ssize_type s1 = iter1.s0();
-            T sum = 0;
+            ResultT sum = 0;
             //std::cout << "INNER SUM p0 " << p0 - left.data()
             //          << " s0 " << s0 <<  " p1 " << p1 - right.data()
             //          << " s1 " << s1

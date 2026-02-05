@@ -14,6 +14,33 @@ namespace mra {
       return size + (-size & mask);
     }
 
+
+
+    enum class SparsityState : std::uint8_t { NONZERO = 1, ALLOCATED = 2, SPARSE = 0 };
+
+    inline bool operator&(SparsityState a, SparsityState b) {
+      return (static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b)) != 0;
+    }
+
+    inline bool operator|(SparsityState a, SparsityState b) {
+      return (static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b)) != 0;
+    }
+
+    inline SparsityState operator|=(SparsityState a, SparsityState b) {
+      return static_cast<SparsityState>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
+    }
+
+    inline SparsityState operator&=(SparsityState a, SparsityState b) {
+      return static_cast<SparsityState>(static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b));
+    }
+
+    /**
+     * TODO: is that actually a good idea?
+     */
+    inline SparsityState operator~(SparsityState a) {
+      return static_cast<SparsityState>(~static_cast<std::uint8_t>(a));
+    }
+
   } // namespace detail
 
   /**
@@ -41,9 +68,9 @@ namespace mra {
     using value_type = ValueType;
 
   private:
-    using unit_type = std::uint8_t;
 
-  private:
+    using unit_type = detail::SparsityState;
+
 
     SCOPE void* storage() {
       return static_cast<Derived*>(this)->storage();
@@ -60,8 +87,6 @@ namespace mra {
     SCOPE const unit_type* sparsity_data() const {
       return static_cast<const unit_type*>(storage());
     }
-
-    enum class SparsityState : unit_type { NONZERO = 1, ALLOCATED = 2, SPARSE = 0 };
 
     /**
      * Returns the size of the sparse dimension (dimension 0).
@@ -84,10 +109,10 @@ namespace mra {
     class sparsity_iterator {
       const unit_type* m_start = nullptr;
       const unit_type* m_pos   = nullptr;
-      SparsityState m_type;
+      detail::SparsityState m_type;
 
     public:
-      sparsity_iterator(const unit_type* data, SparsityState type)
+      sparsity_iterator(const unit_type* data, detail::SparsityState type)
       : m_start(data)
       , m_pos(data)
       , m_type(type)
@@ -137,12 +162,12 @@ namespace mra {
      */
     SCOPE bool is_nonzero(std::size_t i) const {
       const unit_type byte = sparsity_data()[i];
-      return byte & static_cast<unit_type>(SparsityState::NONZERO);
+      return byte & static_cast<unit_type>(detail::SparsityState::NONZERO);
     }
 
     SCOPE bool is_zero(std::size_t i) const {
       const unit_type byte = sparsity_data()[i];
-      return (byte & static_cast<unit_type>(SparsityState::NONZERO)) == 0;
+      return (byte & static_cast<unit_type>(detail::SparsityState::NONZERO)) == 0;
     }
 
     /**
@@ -150,7 +175,7 @@ namespace mra {
      */
     SCOPE void set_nonzero(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte |= static_cast<unit_type>(SparsityState::NONZERO);
+      byte |= static_cast<unit_type>(detail::SparsityState::NONZERO);
     }
 
     /**
@@ -158,7 +183,7 @@ namespace mra {
      */
     SCOPE void set_zero(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte &= ~static_cast<unit_type>(SparsityState::NONZERO);
+      byte &= ~static_cast<unit_type>(detail::SparsityState::NONZERO);
     }
 
     SCOPE void set_nonzero_all() {
@@ -179,7 +204,7 @@ namespace mra {
      * Mark the given id as unallocated and zero.
      */
     void remove(size_type id) {
-      sparsity_data()[id] = SparsityState::SPARSE;
+      sparsity_data()[id] = detail::SparsityState::SPARSE;
     }
 
     SCOPE std::size_t count_nonzero() const {
@@ -198,17 +223,17 @@ namespace mra {
      */
     SCOPE bool is_allocated(std::size_t i) const {
       const unit_type byte = sparsity_data()[i];
-      return byte & static_cast<unit_type>(SparsityState::ALLOCATED);
+      return byte & static_cast<unit_type>(detail::SparsityState::ALLOCATED);
     }
 
     SCOPE void set_allocated(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte |= static_cast<unit_type>(SparsityState::ALLOCATED);
+      byte |= static_cast<unit_type>(detail::SparsityState::ALLOCATED);
     }
 
     SCOPE void set_deallocated(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte &= ~static_cast<unit_type>(SparsityState::ALLOCATED);
+      byte &= ~static_cast<unit_type>(detail::SparsityState::ALLOCATED);
     }
 
     SCOPE void set_deallocated_all() {
@@ -262,7 +287,7 @@ namespace mra {
     }
 
     template<typename SparsityT>
-    void apply_sparsity(const SparsityT s) {
+    void apply_sparsity(const SparsityT& s) {
       assert(count() == s.size());
       for (size_type i = 0; i < count(); ++i) {
         if (s.is_nonzero(i)) {
@@ -320,19 +345,19 @@ namespace mra {
     using iterator = sparsity_iterator;
 
     iterator begin_nonzero() {
-      return iterator(sparsity_data(), SparsityState::NONZERO);
+      return iterator(sparsity_data(), detail::SparsityState::NONZERO);
     }
 
     iterator end_nonzero() {
-      return iterator(sparsity_data() + count(), SparsityState::NONZERO);
+      return iterator(sparsity_data() + count(), detail::SparsityState::NONZERO);
     }
 
     iterator begin_allocated() {
-      return iterator(sparsity_data(), SparsityState::ALLOCATED);
+      return iterator(sparsity_data(), detail::SparsityState::ALLOCATED);
     }
 
     iterator end_allocated() {
-      return iterator(sparsity_data() + count(), SparsityState::ALLOCATED);
+      return iterator(sparsity_data() + count(), detail::SparsityState::ALLOCATED);
     }
   };
 
@@ -364,22 +389,7 @@ namespace mra {
   };
 
 
-
-  /**
-   * Encoding of sparsity information using ranges.
-   *
-   * This encoding is more efficient than SparseArrayBase but is less flexible
-   * with a higher cost for updates. Also does not support concurrent updates on the device.
-   *
-   * \tparam ValueT The type of the values used by the owning container.
-   *                Sparsity will ensure proper alignment for this type but will
-   *                repurpose the memory to the type needed to encode sparsity.
-   */
-  template<typename Derived, typename ValueT>
-  struct RangeSparsityBase {
-    using value_type = std::decay_t<ValueT>;
-
-  private:
+  namespace detail {
 
     struct Range {
       ssize_type from = -1; // inclusive
@@ -387,9 +397,14 @@ namespace mra {
 
       Range() = default;
 
-      Range(size_type i)
+      Range(ssize_type i)
       : from(i)
       , to(i)
+      { }
+
+      Range(ssize_type from, ssize_type to)
+      : from(from)
+      , to(to)
       { }
 
       void add(size_type i) {
@@ -421,8 +436,26 @@ namespace mra {
 
     }; // class Range
 
+  } // namespace detail
+
+
+  /**
+   * Encoding of sparsity information using ranges.
+   *
+   * This encoding is more efficient than SparseArrayBase but is less flexible
+   * with a higher cost for updates. Also does not support concurrent updates on the device.
+   *
+   * \tparam ValueT The type of the values used by the owning container.
+   *                Sparsity will ensure proper alignment for this type but will
+   *                repurpose the memory to the type needed to encode sparsity.
+   */
+  template<typename Derived, typename ValueT>
+  struct RangeSparsityBase {
+    using value_type = std::decay_t<ValueT>;
+
+  private:
     class sparsity_iterator {
-      using iter_type = typename std::vector<Range>::iterator;
+      using iter_type = typename std::vector<detail::Range>::iterator;
       iter_type m_iter, m_end;
       size_type m_id = 0;
 
@@ -457,10 +490,10 @@ namespace mra {
       }
     }; // class sparsity_iterator
 
-    std::vector<Range> m_non_zero_ranges;   // ranges of non-zero entries
-    std::vector<Range> m_allocated_ranges;  // ranges of allocated entries
+    std::vector<detail::Range> m_non_zero_ranges;   // ranges of non-zero entries
+    std::vector<detail::Range> m_allocated_ranges;  // ranges of allocated entries
 
-    void add(size_type id, std::vector<Range>& ranges) {
+    void add(size_type id, std::vector<detail::Range>& ranges) {
       for (auto it = ranges.begin(); it != ranges.end(); ++it) {
         if (it->contains(id)) {
           return;
@@ -473,16 +506,16 @@ namespace mra {
           } else if (it != ranges.begin() && prev->to == id-1) {
             prev->to = id;
           } else {
-            ranges.insert(it, Range(id));
+            ranges.insert(it, detail::Range(id));
           }
           return;
         }
       }
       // add to the end
-      ranges.push_back(Range(id));
+      ranges.push_back(detail::Range(id));
     }
 
-    void remove(size_type id, std::vector<Range>& ranges) {
+    void remove(size_type id, std::vector<detail::Range>& ranges) {
       for (auto it = ranges.begin(); it != ranges.end(); ++it) {
         if (it->contains(id)) {
           if (it->from == it->to) {
@@ -498,14 +531,14 @@ namespace mra {
             /* split the range */
             auto next = ++it;
             it->to = id-1;
-            ranges.insert(next, Range(id+1, it->to));
+            ranges.insert(next, detail::Range(id+1, it->to));
           }
         }
         return;
       }
     }
 
-    bool contains(size_type id, const std::vector<Range>& ranges) const {
+    bool contains(size_type id, const std::vector<detail::Range>& ranges) const {
       for (const auto& r : ranges) {
         if (r.contains(id)) {
           return true;
@@ -513,6 +546,10 @@ namespace mra {
       }
       return false;
     }
+
+    // allow other base classes access
+    template<typename, typename>
+    friend struct RangeSparsityBase;
 
     /**
      * Returns the size of the sparse dimension (dimension 0).
@@ -608,9 +645,9 @@ namespace mra {
      */
     void set_all_nonzero() {
       m_non_zero_ranges.clear();
-      m_non_zero_ranges.push_back(Range(0, count()));
+      m_non_zero_ranges.push_back(detail::Range(0, count()));
       m_allocated_ranges.clear();
-      m_allocated_ranges.push_back(Range(0, count()));
+      m_allocated_ranges.push_back(detail::Range(0, count()));
     }
 
     /**
@@ -618,7 +655,7 @@ namespace mra {
      */
     void set_all_allocated() {
       m_allocated_ranges.clear();
-      m_allocated_ranges.push_back(Range(0, count()));
+      m_allocated_ranges.push_back(detail::Range(0, count()));
     }
 
     /**
@@ -644,16 +681,16 @@ namespace mra {
     void apply_sparsity(const SparseArrayBase<Derived_, Value_>& s) {
       m_non_zero_ranges.clear();
       m_allocated_ranges.clear();
-      Range ra  = {-1, -1}; // range for allocated entries
-      Range rnz = {-1, -1}; // range for nonzero entries
-      auto add_to_range = [&](size_type i, Range& r, std::vector<Range>& ranges) {
+      detail::Range ra  = {-1, -1}; // range for allocated entries
+      detail::Range rnz = {-1, -1}; // range for nonzero entries
+      auto add_to_range = [&](size_type i, detail::Range& r, std::vector<detail::Range>& ranges) {
         if (r.is_contiguous(i)) {
           r.add(i);
         } else {
           if (r.from != -1) {
             ranges.push_back(r);
           }
-          r = Range(i);
+          r = detail::Range(i);
         }
       };
       /* iterate over all entries and form the ranges for non-zero and allocated elements */
@@ -665,6 +702,15 @@ namespace mra {
           add_to_range(i, ra,  m_allocated_ranges);
         }
       }
+    }
+
+    /* apply sparsity information from input
+     * the count must be the same on both sparsity objects
+     * and both sparsity objects must point to the same memory space */
+    template<typename Derived_, typename Value_>
+    void apply_sparsity(const RangeSparsityBase<Derived_, Value_>& s) {
+      m_non_zero_ranges = s.m_non_zero_ranges;
+      m_allocated_ranges = s.m_allocated_ranges;
     }
 
 

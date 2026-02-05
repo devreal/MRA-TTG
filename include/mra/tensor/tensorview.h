@@ -104,7 +104,7 @@ namespace mra {
 
   namespace detail {
     template<Dimension I, typename Fn, typename... Args>
-    SCOPE void foreach_idxs_impl(const concepts::DenseTensorView auto& t, Fn&& fn, Args... args)
+    SCOPE void foreach_idxs_impl(const concepts::TensorView auto& t, Fn&& fn, Args... args)
     {
       constexpr Dimension NDIM = std::decay_t<decltype(t)>::ndim();
 #ifdef HAVE_DEVICE_ARCH
@@ -144,13 +144,13 @@ namespace mra {
 
   /* invoke fn for each NDIM index set */
   template<typename Fn>
-  SCOPE void foreach_idxs(const concepts::DenseTensorView auto& t, Fn&& fn) {
+  SCOPE void foreach_idxs(const concepts::TensorView auto& t, Fn&& fn) {
     detail::foreach_idxs_impl<0>(t, std::forward<Fn>(fn));
   }
 
   /* invoke fn for each flat index */
   template<typename Fn>
-  SCOPE void foreach_idx(const concepts::DenseTensorView auto& t, Fn&& fn) {
+  SCOPE void foreach_idx(const concepts::TensorView auto& t, Fn&& fn) {
     size_type tid = thread_id();
     for (size_type i = tid; i < t.size(); i += block_size()) {
       fn(i);
@@ -405,7 +405,7 @@ namespace mra {
     /// Defined below once we know TensorView
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorSlice& operator=(const TV& view);
+    SCOPE TensorSlice& operator=(const concepts::DenseTensorView<TV::ndim()> auto& view);
   };
 
 
@@ -428,6 +428,8 @@ namespace mra {
     using sparsity_type = Sparsity<TensorView<T, NDIM, Sparsity>, T>;
     template<typename U, Dimension M>
     using subview_type = TensorView<U, M, DenseViewBase>;
+    template<typename U, Dimension M>
+    using const_subview_type = TensorView<const U, M, DenseViewBase>;
     SCOPE static constexpr Dimension ndim() { return NDIM; }
     using dims_array_t = std::array<size_type, ndim()>;
     SCOPE static constexpr bool is_tensor() { return true; }
@@ -456,6 +458,25 @@ namespace mra {
         return idx*std::reduce(&m_dims[I+1], &m_dims[ndim()], 1, std::multiplies<size_type>{})
               + offset_impl<I+1>(std::forward<Dims>(idxs)...);
       }
+    }
+
+    template<typename... Dims>
+    SCOPE auto subview_info(Dims... idxs) const {
+      size_type offset = 0;
+      if (this->data() != nullptr) {
+        std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
+        for (size_type i = 0; i < indices.size(); ++i) {
+          assert(indices[i] < dim(i));
+        }
+        offset = offset_impl<0>(std::forward<Dims>(idxs)...);
+      }
+      constexpr const Dimension noffs = sizeof...(Dims);
+      constexpr const Dimension ndim = NDIM-noffs;
+      std::array<size_type, ndim> dims;
+      for (Dimension i = 0; i < ndim; ++i) {
+        dims[i] = m_dims[noffs+i];
+      }
+      return std::make_pair(offset, dims);
     }
 
   public:
@@ -498,8 +519,11 @@ namespace mra {
 
     SCOPE TensorView& operator=(TensorView&& other) = default;
 
+    /**
+     * Returns the number of allocated elements in the tensor.
+     */
     SCOPE size_type size() const {
-      return std::reduce(&m_dims[0], &m_dims[ndim()], 1, std::multiplies<size_type>{});
+      return this->count_allocated() * std::reduce(&m_dims[1], &m_dims[ndim()], 1, std::multiplies<size_type>{});
     }
 
     SCOPE size_type dim(Dimension d) const {
@@ -518,14 +542,20 @@ namespace mra {
       return s;
     }
 
-    /* array-style flattened access */
-    SCOPE value_type& operator[](size_type i) requires(!is_sparse()) {
+    /**
+     * Array-style flattened access.
+     * Returns a reference to the i-th allocated element.
+     **/
+    SCOPE value_type& operator[](size_type i) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       return this->data()[i];
     }
 
-    /* array-style flattened access */
-    SCOPE const_value_type operator[](size_type i) const requires(!is_sparse()) {
+    /**
+     * Array-style flattened access.
+     * Returns a reference to the i-th allocated element.
+     **/
+    SCOPE const_value_type operator[](size_type i) const {
       if (this->data() == nullptr) return const_value_type{};
       return this->data()[i];
     }
@@ -576,22 +606,18 @@ namespace mra {
      */
     template<typename... Dims>
     requires(sizeof...(Dims) < NDIM && (std::is_integral_v<Dims>&&...))
-    SCOPE subview_type<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) const {
-      size_type offset = 0;
-      if (this->data() != nullptr) {
-        std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
-        for (size_type i = 0; i < indices.size(); ++i) {
-          assert(indices[i] < dim(i));
-        }
-        offset = offset_impl<0>(std::forward<Dims>(idxs)...);
-      }
-      constexpr const Dimension noffs = sizeof...(Dims);
-      constexpr const Dimension ndim = NDIM-noffs;
-      std::array<size_type, ndim> dims;
-      for (Dimension i = 0; i < ndim; ++i) {
-        dims[i] = m_dims[noffs+i];
-      }
+    SCOPE subview_type<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) {
+      auto [offset, dims] = subview_info(std::forward<Dims>(idxs)...);
+      constexpr const Dimension ndim = std::tuple_size_v<decltype(dims)>;
       return subview_type<T, ndim>(&(this->data()[offset]), dims);
+    }
+
+    template<typename... Dims>
+    requires(sizeof...(Dims) < NDIM && (std::is_integral_v<Dims>&&...))
+    SCOPE const_subview_type<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) const {
+      auto [offset, dims] = subview_info(std::forward<Dims>(idxs)...);
+      constexpr const Dimension ndim = std::tuple_size_v<decltype(dims)>;
+      return const_subview_type<T, ndim>(&(this->data()[offset]), dims);
     }
 
     SCOPE std::array<Slice, ndim()> slices() const {
@@ -623,11 +649,12 @@ namespace mra {
     /// Add another tensor
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator+=(const TensorView& value) {
+    SCOPE TensorView& operator+=(const concepts::DenseTensorView<NDIM> auto& value) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) += value[i]; });
       return *this;
     }
+
 
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block, synchronizes
@@ -642,6 +669,19 @@ namespace mra {
       return *this;
     }
 
+
+    /// Copy into patch
+    /// Device: assumes this operation is called by all threads in a block, synchronizes
+    /// Host: assumes this operation is called by a single CPU thread
+    SCOPE TensorView& operator=(const concepts::DenseTensorView<NDIM> auto& other) {
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (other.data() == nullptr) {
+        foreach_idx(*this, [&](size_type i){ this->operator[](i) = 0; });
+      } else {
+        foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
+      }
+      return *this;
+    }
 
 
     /**
@@ -686,7 +726,7 @@ namespace mra {
       iterator (size_type count, TensorView& t)
       : detail::base_tensor_iterator<TensorView,ndimactive>(count, t)
       { }
-      value_type& operator*() { return this->t.data()[this->count]; }
+      auto& operator*() { return this->t.data()[this->count]; }
       iterator& operator++() {this->inc(); return *this;}
       bool operator!=(const iterator& other) {return this->count != other.count;}
       bool operator==(const iterator& other) {return this->count == other.count;}
@@ -737,10 +777,15 @@ namespace mra {
     T *m_ptr; // may be const or non-const
   };
 
+#if 0
+    template<concepts::TensorView U>
+    requires(U::ndim() == ndim())
+    SCOPE TensorSlice& operator=(const U& view);
+#endif // 0
 
   template<concepts::TensorView TV>
   SCOPE TensorSlice<TV>& TensorSlice<TV>::operator=(
-    const TV& view)
+    const concepts::DenseTensorView<TV::ndim()> auto& view)
   {
     foreach_idx(*this, [&](size_type i){ this->operator[](i) = view[i]; });
     return *this;

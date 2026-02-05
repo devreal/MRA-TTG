@@ -18,7 +18,7 @@ namespace mra {
     private:
       std::vector<detail::FunctionNodeBase<T, NDIM>*> m_nodes;
       std::vector<bool> m_initial;
-      mra::Tensor<T, 2> m_norms; // M x N matrix of norms (M: number of nodes, N: number of functions)
+      mra::DenseTensor<T, 2> m_norms; // M x N matrix of norms (M: number of nodes, N: number of functions)
       std::string m_name;
 
     public:
@@ -30,10 +30,10 @@ namespace mra {
       {
         std::array<size_type, sizeof...(NodeTs)+1> counts = {node.count(), nodes.count()...};
 #ifndef MRA_ENABLE_HOST
-        m_norms = Tensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1,
+        m_norms = DenseTensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1,
                                 *std::max_element(counts.begin(), counts.end())}, ttg::scope::Allocate);
 #else
-        m_norms = Tensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1, *std::max_element(counts.begin(), counts.end())}, ttg::scope::SyncIn);
+        m_norms = DenseTensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1, *std::max_element(counts.begin(), counts.end())}, ttg::scope::SyncIn);
 #endif // MRA_ENABLE_HOST
         for (int i = 0; i < m_nodes.size(); ++i) {
           auto& node = *m_nodes[i];
