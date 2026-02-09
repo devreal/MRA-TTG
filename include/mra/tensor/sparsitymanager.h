@@ -41,6 +41,15 @@ namespace mra {
       }
 
       void populate_device_sparsity() {
+#ifdef MRA_ENABLE_HOST
+        for (size_t i = 0; i < sparsity_traits::required_space(m_tensor.dims()); ++i) {
+          //std::cout << "" << i << ": " << static_cast<int>(m_buffer.host_ptr()[i]) << std::endl;
+          m_tensor.buffer().host_ptr()[i] = m_buffer.host_ptr()[i];
+        }
+        std::memcpy(m_tensor.buffer().host_ptr(),
+                    m_buffer.host_ptr(),
+                    sparsity_traits::required_space(m_tensor.dims()));
+#else  // MRA_ENABLE_HOST
         // sanity checks
         assert(ttg::device::current_device().is_gpu());
         assert(m_tensor.buffer().is_current_on(ttg::device::current_device()));
@@ -54,13 +63,14 @@ namespace mra {
                                               sparsity_traits::required_space(m_tensor.dims()),
                                               parsec_device_gpu_transfer_direction_h2d);
         if (ret != PARSEC_SUCCESS) throw std::runtime_error("Failed to copy sparsity data from host to device!");
+#endif // MRA_ENABLE_HOST
       }
 
 
       /**
        * Mock tensor API
        */
-      const size_type dim(size_type d) const {
+      size_type dim(size_type d) const {
         return m_tensor.dim(d);
       }
 
@@ -69,7 +79,7 @@ namespace mra {
       }
 
     private:
-      const TensorType& m_tensor;
+      TensorType& m_tensor;
       ttg::Buffer<value_type, DeviceAllocator<value_type>> m_buffer;
     };
 
@@ -87,17 +97,39 @@ namespace mra {
     /**
      * Helper function to construct the buffers from each tensor.
      */
-    template<std::size_t... Is>
-    buffer_tuple_type construct_buffers(TensorTypes&... tensors, std::index_sequence<Is...>) {
-      return std::make_tuple(std::tuple_element_t<Is, buffer_tuple_type>(sparsity_traits<typename TensorTypes::sparsity_type>::required_space(tensors.dims()),
+    template<typename TensorTuple, std::size_t... Is>
+    buffer_tuple_type construct_buffers(TensorTuple&& tensors, std::index_sequence<Is...>) {
+      return std::make_tuple(std::tuple_element_t<Is, buffer_tuple_type>(sparsity_traits<typename TensorTypes::sparsity_type>::required_space(std::get<Is>(tensors).dims()),
                                                                          ttg::scope::SyncIn)...);
+    }
+
+    template<typename TensorTuple, std::size_t... Is>
+    mocktensor_tuple_type construct_mocktensors(TensorTuple&& tensors, std::index_sequence<Is...>) {
+      return std::make_tuple(MockTensor<TensorTypes>(std::get<Is>(tensors))...);
     }
 
   public:
 
     SparsityManager(TensorTypes&... tensors)
-    : m_tensors({tensors}...)
-    , m_buffers(construct_buffers(tensors..., std::make_index_sequence<sizeof...(TensorTypes)>{}))
+    : m_tensors(construct_mocktensors(std::forward_as_tuple(tensors...), std::make_index_sequence<sizeof...(TensorTypes)>{}))
+    , m_buffers(construct_buffers(std::forward_as_tuple(tensors...), std::make_index_sequence<sizeof...(TensorTypes)>{}))
+    { }
+
+
+    /**
+     * Overload for tuple of tensors.
+     */
+    SparsityManager(std::tuple<TensorTypes...>& tensors)
+    : m_tensors(construct_mocktensors(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
+    , m_buffers(construct_buffers(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
+    { }
+
+    /**
+     * Overload for tuple of tensors refs.
+     */
+    SparsityManager(const std::tuple<TensorTypes&...>& tensors)
+    : m_tensors(construct_mocktensors(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
+    , m_buffers(construct_buffers(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
     { }
 
 
@@ -115,6 +147,76 @@ namespace mra {
     mocktensor_tuple_type m_tensors;
     buffer_tuple_type m_buffers;
   };
+
+
+  namespace detail {
+    template<typename T>
+    struct sparseman_base;
+
+    /**
+     *
+     */
+    template<typename... TensorTypes>
+    struct sparseman_base<std::tuple<TensorTypes...>> {
+      using type = SparsityManager<std::decay_t<TensorTypes>...>;
+    };
+
+    /**
+     * Array overload constructs a tuple.
+     */
+    template<typename T, std::size_t N>
+    struct sparseman_base<std::array<T, N>> : public sparseman_base<decltype(std::tuple_cat(std::declval<std::array<T, N>>()))>
+    { };
+
+    template<typename T>
+    using sparseman_base_type = typename sparseman_base<T>::type;
+
+  } // namespace detail
+
+
+  /**
+   * Deduction guide for tuple of tensors overload.
+   */
+  template<typename... TensorTypes>
+  SparsityManager(std::tuple<TensorTypes...>& tensors) -> SparsityManager<TensorTypes...>;
+
+
+  namespace detail {
+
+    auto extract_tensor_ref(concepts::Tensor auto& tensor) {
+      return std::tie(tensor);
+    }
+
+    auto extract_tensor_ref(concepts::FunctionNode auto& node) {
+      return std::tie(node.coeffs());
+    }
+
+    template<typename... TensorTypes>
+    auto extract_tensor_ref(std::tuple<TensorTypes...>& tuple) {
+      auto extract = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return std::tuple_cat(extract_tensor_ref(std::get<Is>(tuple))...);
+      };
+      return extract(std::make_index_sequence<sizeof...(TensorTypes)>{});
+    }
+
+    template<typename T, std::size_t N>
+    auto extract_tensor_ref(std::array<T, N>& array) {
+      auto extract = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return std::tuple_cat(extract_tensor_ref(std::get<Is>(array))...);
+      };
+      return extract(std::make_index_sequence<N>{});
+    }
+  } // namespace detail
+
+  /**
+   * Factory function to create a SparsityManager from a list of tensors and function nodes or arrays/tuples thereof.
+   */
+  template<typename... TensorTypes>
+  auto make_sparsity_manager(TensorTypes&... tensors) {
+    auto reftuple = std::tuple_cat(detail::extract_tensor_ref(tensors)...);
+    using manager_type = detail::sparseman_base_type<decltype(reftuple)>;
+    return manager_type(reftuple);
+  }
 
 } // namespace mra
 

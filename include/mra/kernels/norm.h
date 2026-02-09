@@ -37,12 +37,16 @@ namespace mra {
       size_type K,
       const Key<NDIM>& key)
     {
-      const bool is_t0 = (0 == thread_id());
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
-      SHARED DenseTensorView<T, NDIM> n;
+      SHARED DenseTensorView<const T, NDIM> n;
       SHARED std::array<T, Key<NDIM>::num_children()> block_child_norms;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
-        if (is_t0) {
+        if (node.is_zero(blockid)) {
+          /* no work to do */
+          if (is_team_lead()) result_norms[blockid] = T(0.0);
+          continue;
+        }
+        if (is_team_lead()) {
           n = node(blockid);
           for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
             block_child_norms[i] = (child_norms[i] != nullptr) ? child_norms[i][blockid] : T(0.0);

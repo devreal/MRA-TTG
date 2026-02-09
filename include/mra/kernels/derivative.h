@@ -267,7 +267,7 @@ namespace mra {
         size_type blockId = blockIdx.x;
         T* block_tmp_ptr = &tmp[blockId*derivative_tmp_size<NDIM>(K)];
         const size_type K2NDIM = std::pow(K, NDIM);
-        if(is_team_lead()){
+        if (is_team_lead()) {
           tmp_result = DenseTensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
           left_tmp   = DenseTensorView<T, NDIM>(&block_tmp_ptr[2*K2NDIM], K);
           center_tmp = DenseTensorView<T, NDIM>(&block_tmp_ptr[3*K2NDIM], K);
@@ -318,8 +318,13 @@ namespace mra {
       static_assert(node_center.ndim() == NDIM+1, "node_center must be of dimension NDIM+1");
       static_assert(node_right.ndim() == NDIM+1, "node_right must be of dimension NDIM+1");
 
-      SHARED DenseTensorView<T, NDIM> node_left_view, node_center_view, node_right_view, deriv_view;
+      SHARED DenseTensorView<T, NDIM> deriv_view;
+      SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
+        if (deriv.is_zero(blockid)) {
+          /* nothing to do */
+          continue;
+        }
         if (is_team_lead()) {
           node_left_view = node_left(blockid);
           node_center_view = node_center(blockid);

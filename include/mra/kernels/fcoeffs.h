@@ -140,6 +140,10 @@ namespace mra {
 
       /* adjust pointers for the function of each block */
       for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x) {
+        if (coeffs_view.is_zero(fnid)) {
+          if (is_team_lead()) is_leaf[fnid] = false;
+          continue; // skip sparse entries
+        }
         if (is_team_lead()) {
           /* get the coefficient inputs */
           coeffs       = coeffs_view(fnid);

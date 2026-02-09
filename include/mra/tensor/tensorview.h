@@ -443,20 +443,22 @@ namespace mra {
       /**
        * Special handling for first dimension to account for sparsity.
        */
+      size_type offset = 0;
       if constexpr (I == 0) {
         if (this->is_zero(idx)) {
           /* no entry, return zero */
           return 0;
         } else {
           /* adjust the index based on which entries are allocated */
-          idx = this->offset_of(idx);
+          offset = this->offset_of(idx);
         }
+      } else {
+        offset = idx*std::reduce(&m_dims[I+1], &m_dims[ndim()], 1, std::multiplies<size_type>{});
       }
       if constexpr (sizeof...(idxs) == 0) {
-        return idx;
+        return offset;
       } else {
-        return idx*std::reduce(&m_dims[I+1], &m_dims[ndim()], 1, std::multiplies<size_type>{})
-              + offset_impl<I+1>(std::forward<Dims>(idxs)...);
+        return offset + offset_impl<I+1>(std::forward<Dims>(idxs)...);
       }
     }
 
@@ -518,6 +520,37 @@ namespace mra {
     SCOPE ~TensorView() = default;
 
     SCOPE TensorView& operator=(TensorView&& other) = default;
+
+#if 0
+    /**
+     * Overload to capture assignment of rvalue tensors with const T.
+     */
+    SCOPE TensorView& operator=(TensorView<const T, NDIM, Sparsity>&& other) requires(std::is_const_v<T>) {
+      m_dims = other.m_dims;
+      m_ptr = other.m_ptr;
+      other.m_ptr = nullptr;
+      return *this;
+    }
+#endif // 0
+
+    /**
+     * Move constructor for non-const TensorView from non-const TensorView.
+     * A static assert protects from cases where the source is const and the T is not.
+     * This overload catches assignments like:
+     *    SHARED DenseTensorView<float, 3> b;
+     *    a = const_input_tensor(0); // returns a subview of const_input_tensor which is of type TensorView<const float, 3>
+     *
+     * This overload is important to prevent accidental use of the copy-assignment operator `operator=(const TensorView auto& other)`,
+     * which would try to assign values. We assume that move semantics are only used to construct tensors.
+     */
+    template<typename U = T>
+    SCOPE TensorView& operator=(TensorView<U, NDIM, Sparsity>&& other) {
+      static_assert(std::is_same_v<U, T>, "Can only move from TensorView of same type. Make sure source and destination have the same T.");
+      m_dims = other.m_dims;
+      m_ptr = other.m_ptr;
+      other.m_ptr = nullptr;
+      return *this;
+    }
 
     /**
      * Returns the number of allocated elements in the tensor.
@@ -605,18 +638,27 @@ namespace mra {
      * Return a TensorView<T, (NDIM-M)> to a subview using the provided first M indices.
      */
     template<typename... Dims>
-    requires(sizeof...(Dims) < NDIM && (std::is_integral_v<Dims>&&...))
-    SCOPE subview_type<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) {
-      auto [offset, dims] = subview_info(std::forward<Dims>(idxs)...);
-      constexpr const Dimension ndim = std::tuple_size_v<decltype(dims)>;
+    requires(sizeof...(Dims) < NDIM-1 && (std::is_integral_v<Dims>&&...) && !std::is_const_v<T>)
+    SCOPE subview_type<T, NDIM-sizeof...(Dims)-1> operator()(size_type idx0, Dims... idxs) {
+      constexpr Dimension ndim = NDIM - sizeof...(Dims) - 1;
+      auto [offset, dims] = subview_info(idx0, std::forward<Dims>(idxs)...);
+      if (this->is_zero(idx0)) {
+        if constexpr (!std::is_const_v<T>) {
+          THROW("TensorView: attempt to access unallocated sparse elements");
+        }
+        return subview_type<T, ndim>(nullptr, dims); // return a view with nullptr data
+      }
       return subview_type<T, ndim>(&(this->data()[offset]), dims);
     }
 
     template<typename... Dims>
-    requires(sizeof...(Dims) < NDIM && (std::is_integral_v<Dims>&&...))
-    SCOPE const_subview_type<T, NDIM-sizeof...(Dims)> operator()(Dims... idxs) const {
-      auto [offset, dims] = subview_info(std::forward<Dims>(idxs)...);
-      constexpr const Dimension ndim = std::tuple_size_v<decltype(dims)>;
+    requires(sizeof...(Dims) < NDIM-1 && (std::is_integral_v<Dims>&&...))
+    SCOPE const_subview_type<T, NDIM-sizeof...(Dims)-1> operator()(size_type idx0, Dims... idxs) const {
+      auto [offset, dims] = subview_info(idx0, std::forward<Dims>(idxs)...);
+      constexpr Dimension ndim = NDIM - sizeof...(Dims) - 1;
+      if (this->m_ptr == nullptr || this->is_zero(idx0)) {
+        return const_subview_type<T, ndim>(nullptr, dims); // return a view with nullptr data
+      }
       return const_subview_type<T, ndim>(&(this->data()[offset]), dims);
     }
 
@@ -631,7 +673,7 @@ namespace mra {
     /// Fill with scalar
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator=(const value_type& value) {
+    SCOPE TensorView& operator=(const value_type& value) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) = value; });
       return *this;
@@ -640,7 +682,7 @@ namespace mra {
     /// Scale by scalar
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator*=(const value_type& value) {
+    SCOPE TensorView& operator*=(const value_type& value) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) *= value; });
       return *this;
@@ -649,7 +691,7 @@ namespace mra {
     /// Add another tensor
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator+=(const concepts::DenseTensorView<NDIM> auto& value) {
+    SCOPE TensorView& operator+=(const concepts::DenseTensorView<NDIM> auto& value) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) += value[i]; });
       return *this;
@@ -659,7 +701,7 @@ namespace mra {
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator=(const TensorView& other) {
+    SCOPE TensorView& operator=(const TensorView& other) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (other.data() == nullptr) {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = 0; });
@@ -673,7 +715,7 @@ namespace mra {
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator=(const concepts::DenseTensorView<NDIM> auto& other) {
+    SCOPE TensorView& operator=(const concepts::DenseTensorView<NDIM> auto& other) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (other.data() == nullptr) {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = 0; });

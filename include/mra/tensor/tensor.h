@@ -53,6 +53,13 @@ namespace mra {
   requires detail::TensorCompatibleSparsity<Sparsity>
   class Tensor : public ttg::TTValue<Tensor<T, NDIM, Sparsity, Allocator>>,
                  protected Sparsity<Tensor<T, NDIM, Sparsity, Allocator>, T> {
+
+
+    /**
+     * The tensor is not publicly derived from the sparsity class, but it needs to be a friend
+     * to access the protected functions for managing sparsity information.
+     */
+    friend Sparsity<Tensor<T, NDIM, Sparsity, Allocator>, T>;
   public:
     using value_type = std::decay_t<T>;
     using allocator_type = Allocator;
@@ -91,6 +98,12 @@ namespace mra {
     static auto create_dims_array(size_type dim, std::index_sequence<Is...>) {
       return std::array{((void)Is, dim)...};
     }
+
+    template<std::size_t... Is>
+    static auto create_dims_array(size_type dim0, size_type dim, std::index_sequence<Is...>) {
+      return std::array{dim0, ((void)Is, dim)...};
+    }
+
 
   public:
     Tensor() = default;
@@ -131,14 +144,9 @@ namespace mra {
            ttg::scope scope = ttg::scope::SyncIn)
     : ttvalue_type()
     , sparsity_type()
+    , m_dims(create_dims_array(sparsity_info.dim(0), K, std::make_index_sequence<NDIM-1>{}))
     , m_buffer(buffer_size(), scope)
     {
-      // set dimensions
-      m_dims[0] = sparsity_info.dim(0);
-      for (Dimension d = 1; d < NDIM; ++d) {
-        m_dims[d] = K;
-      }
-
       this->apply_sparsity(sparsity_info);
     }
 
@@ -295,7 +303,7 @@ namespace mra {
 
   std::ostream&
   operator<<(std::ostream& s, const concepts::Tensor auto& t) {
-    assert(t.buffer().is_current_on(ttg::device::Host()));
+    assert(t.buffer().is_current_on(ttg::device::Device::host()));
     s << t.current_view();
     return s;
   }

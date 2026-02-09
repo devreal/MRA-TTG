@@ -232,7 +232,11 @@ namespace mra{
            * We can finally compute the derivative.
            */
           if ((!left.empty() || key.is_left_boundary(axis)) && (!right.empty() || key.is_right_boundary(axis))){
-            mra::FunctionsReconstructedNode<T, NDIM> result(key, N, K, ttg::scope::Allocate);
+
+            SparsityInfo sparsity(N);
+            sparsity.nonzero_if_any(left, center, right);
+
+            mra::FunctionsReconstructedNode<T, NDIM> result(key, sparsity, K, ttg::scope::Allocate);
             result.set_all_leaf(true);
             auto tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*N, TempScope);
             const DenseTensor<T, 2+1>& operators = functiondata.get_operators();
@@ -260,6 +264,9 @@ namespace mra{
             }
             co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
+
+            SparsityManager sparseman(result);
+            sparseman.populate_device_sparsity();
 
             auto& D = *db.current_device_ptr();
             auto result_view = result.coeffs().current_view();

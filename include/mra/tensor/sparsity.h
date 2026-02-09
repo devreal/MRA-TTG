@@ -16,7 +16,7 @@ namespace mra {
 
 
 
-    enum class SparsityState : std::uint8_t { NONZERO = 1, ALLOCATED = 2, SPARSE = 0 };
+    enum class SparsityState : std::uint8_t { NONZERO = 1, ALLOCATED = 2, NONZERO_ALLOCATED = 3, SPARSE = 0 };
 
     inline bool operator&(SparsityState a, SparsityState b) {
       return (static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b)) != 0;
@@ -89,13 +89,6 @@ namespace mra {
     }
 
     /**
-     * Returns the size of the sparse dimension (dimension 0).
-     */
-    SCOPE std::size_t count() const {
-      return static_cast<const Derived*>(this)->dim(0);
-    }
-
-    /**
      * Returns the number of value_type entries needed to store the sparsity data.
      */
     SCOPE std::size_t value_count() const {
@@ -137,6 +130,13 @@ namespace mra {
     SparseArrayBase() = default;
 
     /**
+     * Returns the size of the sparse dimension (dimension 0).
+     */
+    SCOPE std::size_t count() const {
+      return static_cast<const Derived*>(this)->dim(0);
+    }
+
+    /**
      * Returns the offset to the data portion of the tensor.
      */
     SCOPE std::size_t data_offset() const {
@@ -166,16 +166,30 @@ namespace mra {
     }
 
     SCOPE bool is_zero(std::size_t i) const {
-      const unit_type byte = sparsity_data()[i];
+      auto sd = sparsity_data();
+      if (nullptr == sd) {
+        return true; // if no sparsity data, treat as all zero
+      }
+      const unit_type byte = sd[i];
       return (byte & static_cast<unit_type>(detail::SparsityState::NONZERO)) == 0;
     }
 
+    SCOPE bool is_any_nonzero() const {
+      const std::size_t n = count();
+      for (std::size_t i = 0; i < n; ++i) {
+        if (is_nonzero(i)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     /**
-     * Sets the i'th entry in the sparse dimension to non-zero.
+     * Sets the i'th entry in the sparse dimension to non-zero and allocated.
      */
     SCOPE void set_nonzero(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte |= static_cast<unit_type>(detail::SparsityState::NONZERO);
+      byte = static_cast<unit_type>(detail::SparsityState::NONZERO_ALLOCATED);
     }
 
     /**
@@ -183,7 +197,7 @@ namespace mra {
      */
     SCOPE void set_zero(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte &= ~static_cast<unit_type>(detail::SparsityState::NONZERO);
+      byte &= static_cast<unit_type>(detail::SparsityState::ALLOCATED); // keep allocated bit but clear non-zero bit
     }
 
     SCOPE void set_nonzero_all() {
@@ -288,7 +302,9 @@ namespace mra {
 
     template<typename SparsityT>
     void apply_sparsity(const SparsityT& s) {
-      assert(count() == s.size());
+      assert(count() == s.count());
+      /* zero out first */
+      set_zero_all();
       for (size_type i = 0; i < count(); ++i) {
         if (s.is_nonzero(i)) {
           set_nonzero(i);
@@ -311,7 +327,7 @@ namespace mra {
     /* form the union with the given sparsity */
     template<typename SparsityT>
     void union_sparsity(const SparsityT& s) {
-      assert(count() == s.size());
+      assert(count() == s.count());
       for (auto iter = s.begin_nonzero(); iter != s.end_nonzero(); ++iter) {
         set_nonzero(*iter);
       }
@@ -529,7 +545,7 @@ namespace mra {
             it->to--;
           } else {
             /* split the range */
-            auto next = ++it;
+            auto next = it + 1;
             it->to = id-1;
             ranges.insert(next, detail::Range(id+1, it->to));
           }
@@ -550,13 +566,6 @@ namespace mra {
     // allow other base classes access
     template<typename, typename>
     friend struct RangeSparsityBase;
-
-    /**
-     * Returns the size of the sparse dimension (dimension 0).
-     */
-    SCOPE std::size_t count() const {
-      return static_cast<const Derived*>(this)->dim(0);
-    }
 
   public:
 
@@ -579,9 +588,25 @@ namespace mra {
 
     ~RangeSparsityBase() = default;
 
+
+    /**
+     * Returns the size of the sparse dimension (dimension 0).
+     */
+    SCOPE std::size_t count() const {
+      return static_cast<const Derived*>(this)->dim(0);
+    }
+
     /* returns true if value is not zero */
     bool is_nonzero(size_type id) const {
       return contains(id, m_non_zero_ranges);
+    }
+
+    bool is_zero(size_type id) const {
+      return !contains(id, m_non_zero_ranges);
+    }
+
+    SCOPE bool is_any_nonzero() const {
+      return !m_non_zero_ranges.empty();
     }
 
     /**
@@ -645,9 +670,10 @@ namespace mra {
      */
     void set_all_nonzero() {
       m_non_zero_ranges.clear();
-      m_non_zero_ranges.push_back(detail::Range(0, count()));
+      m_non_zero_ranges.emplace_back(0, count());
       m_allocated_ranges.clear();
-      m_allocated_ranges.push_back(detail::Range(0, count()));
+      m_allocated_ranges.emplace_back(0, count());
+      assert(m_allocated_ranges.size() == 1);
     }
 
     /**
@@ -655,7 +681,8 @@ namespace mra {
      */
     void set_all_allocated() {
       m_allocated_ranges.clear();
-      m_allocated_ranges.push_back(detail::Range(0, count()));
+      m_allocated_ranges.emplace_back(0, count());
+      assert(m_allocated_ranges.size() == 1);
     }
 
     /**
@@ -822,6 +849,10 @@ namespace mra {
       return dim0() == 0;
     }
 
+    SCOPE bool is_any_nonzero() const {
+      return dim0() > 0;
+    }
+
 
     SCOPE std::size_t count_nonzero() const {
       return dim0();
@@ -834,22 +865,25 @@ namespace mra {
       return dim0() > 0;
     }
 
-    SCOPE std::size_t count_allocated() const {
+    SCOPE size_type count_allocated() const {
       return dim0();
     }
 
     /**
      * Returns the offset in the data portion corresponding to the i'th element.
      */
-    SCOPE std::size_t offset_of(std::size_t i) const {
+    SCOPE size_type offset_of(size_type i) const {
       if (dim0() == 0) {
         return 0;
       }
       /* count the size of each non-zero tensor in the 1:NDIM-1 dimensions */
-      std::size_t data_size = static_cast<const Derived*>(this)->dim(1);
-      auto dims = static_cast<const Derived*>(this)->dims();
-      for (std::size_t i = 2; i < static_cast<const Derived*>(this)->ndim(); ++i) {
-        data_size *= dims[i];
+      size_type data_size = 1;
+      if (Derived::ndim() > 1) {
+        auto dims = static_cast<const Derived*>(this)->dims();
+        data_size = dims[1];
+        for (size_type i = 2; i < static_cast<const Derived*>(this)->ndim(); ++i) {
+          data_size *= dims[i];
+        }
       }
       return i*data_size;
     }

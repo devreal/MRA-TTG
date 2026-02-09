@@ -81,6 +81,17 @@ namespace mra{
       };
 #endif // MRA_ENABLE_HOST
 
+      SparsityInfo sparsity(N);
+      sparsity.nonzero_if_any(node, from_parent);
+      std::cout << name << ": " << key << " sparsity " << sparsity << std::endl;
+
+      /* if the parent is a leaf then we mark the child as zero */
+      for (std::size_t i = 0; i < N; ++i) {
+        if (from_parent.is_leaf(i)) {
+          sparsity.set_zero(i);
+        }
+      }
+
       // array of child nodes
       std::array<mra::FunctionsReconstructedNode<T,NDIM>, mra::Key<NDIM>::num_children()> r_arr;
       for (auto it=children.begin(); it!=children.end(); ++it) {
@@ -121,7 +132,7 @@ namespace mra{
       *       we may have to consolidate the r's into a single buffer and pick them apart afterwards.
       *       That will require the ability to ref-count 'parent buffers'. */
       for (int i = 0; i < key.num_children(); ++i) {
-        r_arr[i].allocate(K, ttg::scope::Allocate);
+        r_arr[i].allocate(sparsity, K, ttg::scope::Allocate);
       }
 
       // compute norms
@@ -142,6 +153,11 @@ namespace mra{
       /* select a device */
       co_await ttg::device::select(inputs);
 #endif
+
+
+      auto sparseman = make_sparsity_manager(r_arr);
+      sparseman.populate_device_sparsity();
+
 
       // helper lambda to pick apart the std::array
       auto assemble_tensors = [&]<std::size_t... Is>(std::index_sequence<Is...>){

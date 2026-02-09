@@ -9,6 +9,7 @@
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
 #include "mra/misc/functionset.h"
+#include "mra/tensor/sparsitymanager.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -43,6 +44,8 @@ namespace mra{
       using function_type = typename FunctionSetT::function_type;
 
       size_type N = fns->num_functions(key);
+      SparsityInfo sparsity(N);
+      sparsity.set_all_nonzero();
       node_type result(key, N); // empty for fast-paths, no need to zero out
 #ifndef MRA_ENABLE_HOST
       auto outputs = ttg::device::forward();
@@ -52,6 +55,7 @@ namespace mra{
       for (std::size_t i = 0; i < N; ++i) {
         if (key.level() >= initial_level(fn_host_view[i])) {
           all_initial_level = false;
+          sparsity.set_nonzero(i);
           break;
         }
       }
@@ -72,28 +76,29 @@ namespace mra{
         bool all_negligible = true;
         auto trunc = mra::truncate_tol(key,thresh);
         for (std::size_t i = 0; i < N; ++i) {
-          all_negligible &= mra::is_negligible<function_type,T,NDIM>(
+          bool is_negligible = mra::is_negligible<function_type,T,NDIM>(
                                       fn_host_view[i], db.host_ptr()->template bounding_box<T>(key), trunc);
+          if (is_negligible) {
+            sparsity.set_zero(i);
+            result.set_leaf(i, true);
+          }
+          all_negligible &= is_negligible;
         }
-        if (all_negligible) {
-          //std::cout << "project " << key << " all negligible " << all_negligible << std::endl;
-          result.set_all_leaf(true);
-        } else {
-          /* here we actually compute: first select a device */
-          //result.is_leaf = fcoeffs(f, functiondata, key, thresh, coeffs);
+        if (!all_negligible) {
           /**
            * BEGIN FCOEFFS HERE
            * TODO: figure out a way to outline this into a function or coroutine
            */
           // allocate tensor
-          result = node_type(key, N, K, ttg::scope::Allocate);
+          result.allocate(sparsity, K, ttg::scope::Allocate);
           auto& coeffs = result.coeffs();
+
+          std::cout << name << " " << key << " all negligible " << all_negligible << " sparsity: " << sparsity << std::endl;
 
           // compute the norm of functions
           auto result_norms = FunctionNorms(name, result);
 
           /* global function data */
-          // TODO: need to make our own FunctionData with dynamic K
           const auto& phibar = functiondata.get_phibar();
           const auto& hgT = functiondata.get_hgT();
 
@@ -107,14 +112,17 @@ namespace mra{
           co_await ttg::device::select(db, gl, fns->buffer(), coeffs.buffer(), phibar.buffer(),
                                       hgT.buffer(), tmp_scratch, is_leafs, result_norms.buffer());
 #endif
-          auto coeffs_view = coeffs.current_view();
-          auto phibar_view = phibar.current_view();
-          auto hgT_view    = hgT.current_view();
-          T* tmp_device = tmp_scratch.current_device_ptr();
+          auto coeffs_view      = coeffs.current_view();
+          auto phibar_view      = phibar.current_view();
+          auto hgT_view         = hgT.current_view();
+          T* tmp_device         = tmp_scratch.current_device_ptr();
           bool *is_leafs_device = is_leafs.current_device_ptr();
-          auto fn_view   = fns->current_view(key); // the view for the functions in this batch
-          auto& domain = *db.current_device_ptr();
-          auto  gldata = gl.current_device_ptr();
+          auto  fn_view         = fns->current_view(key); // the view for the functions in this batch
+          auto& domain          = *db.current_device_ptr();
+          auto  gldata          = gl.current_device_ptr();
+
+          SparsityManager sparseman(coeffs);
+          sparseman.populate_device_sparsity();
 
           /* submit the kernel */
           submit_fcoeffs_kernel(domain, gldata, fn_view, key, K, tmp_device,

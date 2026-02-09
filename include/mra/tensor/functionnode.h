@@ -72,6 +72,16 @@ namespace mra {
         , m_num_func(N)
         { }
 
+        FunctionNodeBase(const key_type& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
+        : m_key(key)
+#ifdef MRA_ENABLE_HOST
+        , m_coeffs(sparsity, K, ttg::scope::SyncIn) // make sure we allocate on host
+#else
+        , m_coeffs(sparsity, K, scope)
+#endif
+        , m_num_func(sparsity.dim(0))
+        { }
+
         FunctionNodeBase(FunctionNodeBase&& other) = default;
         FunctionNodeBase(const FunctionNodeBase& other) = delete;
 
@@ -265,6 +275,11 @@ namespace mra {
         , m_metadata(N)
         { }
 
+        FunctionsReconstructedNode(const Key<NDIM>& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
+        : base_type(key, sparsity.dim(0), K, scope)
+        , m_metadata(sparsity.dim(0))
+        { }
+
 
         FunctionsReconstructedNode(FunctionsReconstructedNode&& other) = default;
         FunctionsReconstructedNode(const FunctionsReconstructedNode& other) = delete;
@@ -311,18 +326,28 @@ namespace mra {
           }
         }
 
+        /**
+         * Returns true if all nonzero nodes are leaf nodes.
+         */
         bool is_all_leaf() const {
           bool all_leaf = true;
+          size_type i = 0;
           for (auto& data : m_metadata) {
-            all_leaf &= data.is_leaf;
+            all_leaf &= data.is_leaf || this->sparsity().is_zero(i);
+            ++i;
           }
           return all_leaf;
         }
 
+        /**
+         * Returns true if any nonzero node is a leaf node.
+         */
         bool is_any_leaf() const {
           bool any_leaf = false;
+          size_type i = 0;
           for (auto& data : m_metadata) {
-            any_leaf |= data.is_leaf;
+            any_leaf |= data.is_leaf && !this->sparsity().is_zero(i);
+            ++i;
           }
           return any_leaf;
         }
@@ -361,6 +386,11 @@ namespace mra {
         void serialize(Archive& ar, const unsigned int) {
           serialize(ar);
         }
+
+        bool is_nonzero(size_type i) const {
+          return !this->sparsity().is_zero(i);
+        }
+
     };
 
 
@@ -402,12 +432,26 @@ namespace mra {
         , m_is_child_leafs(N)
         { }
 
+        FunctionsCompressedNode(const Key<NDIM>& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
+        : base_type(key, sparsity, 2*K, scope)
+        , m_is_child_leafs(sparsity.dim(0))
+        { }
+
+
         /**
          * Allocate space for coefficients using K.
          * The node must be empty before and will not be empty afterwards.
          */
         void allocate(size_type K, ttg::scope scope = ttg::scope::SyncIn) {
           base_type::allocate(2*K, scope);
+        }
+
+        /**
+         * Allocate space for coefficients using K.
+         * The node must be empty before and will not be empty afterwards.
+         */
+        void allocate(const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn) {
+          base_type::allocate(sparsity, 2*K, scope);
         }
 
         FunctionsCompressedNode(FunctionsCompressedNode&& other) = default;
@@ -519,6 +563,26 @@ namespace mra {
       return s;
     }
 
+    namespace detail {
+      template<typename T>
+      struct is_functionnode : std::false_type {};
+
+      template<typename T, Dimension NDIM>
+      struct is_functionnode<FunctionsReconstructedNode<T, NDIM>> : std::true_type {};
+
+      template<typename T, Dimension NDIM>
+      struct is_functionnode<FunctionsCompressedNode<T, NDIM>> : std::true_type {};
+
+      template<typename T>
+      constexpr bool is_functionnode_v = is_functionnode<std::decay_t<T>>::value;
+    } // namespace detail
+
+
+    namespace concepts {
+
+      template<typename T>
+      concept FunctionNode = detail::is_functionnode_v<T>;
+    } // namespace concepts
 
 
 } // namespace mra

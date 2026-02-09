@@ -104,7 +104,8 @@ namespace mra {
       size_type N,
       size_type K)
     {
-      SHARED DenseTensorView<T, NDIM> nodeA, nodeB, nodeR, cnodesR, cnodesD;
+      SHARED DenseTensorView<const T, NDIM> nodeA, nodeB;
+      SHARED DenseTensorView<T, NDIM> nodeR, cnodesR, cnodesD;
       SHARED DenseTensorView<T, NDIM+1> cnodesA, cnodesB, r1;
       SHARED T* workspace;
       size_type blockId = blockIdx.x;
@@ -122,6 +123,10 @@ namespace mra {
       }
 
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
+        if (nodeR_view.is_zero(fnid)) {
+          /* no work to do */
+          continue;
+        }
         if (is_team_lead()) {
           nodeA = nodeA_view(fnid);
           nodeB = nodeB_view(fnid);

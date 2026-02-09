@@ -70,24 +70,24 @@ namespace mra {
       T* d_sumsq,
       const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto in_views)
     {
-      const bool is_t0 = (0 == thread_id());
       const size_type K2NDIM    = std::pow(  K,NDIM);
       const size_type TWOK2NDIM = std::pow(2*K,NDIM);
-      using tensorview_t = decltype(p_in(0));
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
       SHARED T* workspace;
-      SHARED tensorview_t s, p, d;
+      SHARED DenseTensorView<T, NDIM> s, p, d;
       int blockId = blockIdx.x;
       T* block_tmp = &tmp[blockId*compress_tmp_size<NDIM>(K)];
 
-      if (is_t0) {
-        s = tensorview_t(&block_tmp[0], 2*K);
+      if (is_team_lead()) {
+        s = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
         workspace = &block_tmp[TWOK2NDIM];
       }
-
+      assert(result_in.is_any_nonzero() && "why did we even get here?!");
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x) {
-        /* no need to sync threads here */
-        if (is_t0) {
+        if (result_in.is_zero(fnid)) {
+          continue; // output is zero so skip computation and leave it zero
+        }
+        if (is_team_lead()) {
           for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
             block_in_views[i] = in_views[i](fnid);
           }

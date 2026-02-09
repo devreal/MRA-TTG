@@ -33,8 +33,13 @@ namespace mra {
       const T scalarB,
       size_type N)
     {
-      SHARED DenseTensorView<T, NDIM> nodeA, nodeB, nodeR;
+      SHARED DenseTensorView<const T, NDIM> nodeA, nodeB;
+      SHARED DenseTensorView<T, NDIM> nodeR;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
+        if (nodeR_view.is_zero(blockid)) {
+          /* no work to do */
+          continue;
+        }
         if (is_team_lead()) {
           nodeA = nodeA_view(blockid);
           nodeB = nodeB_view(blockid);

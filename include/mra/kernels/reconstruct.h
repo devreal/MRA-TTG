@@ -61,7 +61,7 @@ namespace mra {
       Key<NDIM> key,
       size_type N,
       size_type K,
-      concepts::TensorView<NDIM+1> auto node_view,
+      const concepts::TensorView<NDIM+1> auto node_view,
       T* tmp_ptr,
       const concepts::TensorView<2> auto hg,
       const concepts::TensorView<NDIM+1> auto from_parent_view,
@@ -73,7 +73,8 @@ namespace mra {
       SHARED std::array<decltype(r_arr[0](0)), Key<NDIM>::num_children()> block_r_arr;
       SHARED DenseTensorView<T, NDIM> s, tmp_node;
       SHARED T* workspace;
-      SHARED DenseTensorView<T, NDIM> node, from_parent;
+      SHARED DenseTensorView<const T, NDIM> node;
+      SHARED DenseTensorView<const T, NDIM> from_parent;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp_ptr[blockId*reconstruct_tmp_size<NDIM>(K)];
@@ -84,7 +85,13 @@ namespace mra {
         workspace   = &block_tmp_ptr[2*TWOK2NDIM];
       }
 
+      assert(node_view.is_any_nonzero() || from_parent.is_any_nonzero() && "why did we even get here?!");
+
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
+        if (node.is_zero(fnid) && from_parent.is_zero(fnid)) {
+          /* no work to do */
+          continue;
+        }
         if (is_t0) {
           node = node_view(fnid);
           from_parent = from_parent_view(fnid);
@@ -103,7 +110,7 @@ namespace mra {
     const Key<NDIM>& key,
     size_type N,
     size_type K,
-    concepts::TensorView<NDIM+1> auto& node,
+    const concepts::TensorView<NDIM+1> auto& node,
     const concepts::TensorView<2> auto& hg,
     const concepts::TensorView<NDIM+1> auto& from_parent,
     const concepts::TensorViewArray<NDIM+1, mra::Key<NDIM>::num_children()> auto& r_arr,
@@ -125,7 +132,7 @@ namespace mra {
     const Key<3>& key,
     size_type N,
     size_type K,
-    SparseTensorView<double, 3+1>& node,
+    const SparseTensorView<double, 3+1>& node,
     const SparseTensorView<double, 2>& hg,
     const SparseTensorView<double, 3+1>& from_parent,
     const std::array<SparseTensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,

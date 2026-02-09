@@ -9,6 +9,7 @@
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
 #include "mra/misc/functionset.h"
+#include "mra/tensor/sparsitymanager.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/functionnode.h"
@@ -87,21 +88,28 @@ namespace mra
 
           /* some inputs are on the device so submit a kernel */
 
+          SparsityInfo sparsity(N);
+          sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
+          //std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
+
           // allocate the result
-          result = mra::FunctionsCompressedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
-          auto& d = result.coeffs();
+          result.allocate(sparsity, K, ttg::scope::Allocate);
+
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
-          p = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
+          p.allocate(sparsity, K, ttg::scope::Allocate);
           p.set_all_leaf(false);
           assert(p.is_all_leaf() == false);
           FunctionNorms<T, NDIM> norms(name, in0, in1, in2, in3, in4, in5, in6, in7, result);
+
 
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
           const auto& hgT = functiondata.get_hgT();
           /* stores sumsq for each child and for result at the end of the kernel */
           auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(N, TempScope);
+
+          auto& d = result.coeffs();
 
 #ifndef MRA_ENABLE_HOST
           auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(),
@@ -130,6 +138,9 @@ namespace mra
           //auto input_ptrs = std::apply([](auto... ins){ return std::array{(ins.coeffs.buffer().current_device_ptr())...}; });
           auto input_views = std::array{in0.coeffs().current_view(), in1.coeffs().current_view(), in2.coeffs().current_view(), in3.coeffs().current_view(),
                                         in4.coeffs().current_view(), in5.coeffs().current_view(), in6.coeffs().current_view(), in7.coeffs().current_view()};
+
+          auto sparseman = make_sparsity_manager(d, p);
+          sparseman.populate_device_sparsity();
 
           auto coeffs_view = p.coeffs().current_view();
           auto rcoeffs_view = d.current_view();
@@ -176,11 +187,11 @@ namespace mra
           for (std::size_t i = 0; i < N; ++i) {
             if (std::abs(p.sum(i) - 1.0) > 1e-12) {
               all_correct = false;
-              std::cout << "At root of compressed tree " << key.batch() << " fn " << i << ": total normsq is " << p.sum(i) << std::endl;
+              std::cout << name << ": at root of compressed tree " << key.batch() << " fn " << i << ": total normsq is " << p.sum(i) << std::endl;
             }
           }
           if (all_correct) {
-            std::cout << "At root of compressed tree " << key.batch() << ": all norms are 1.0 with 1e-12 tolerance" << std::endl;
+            std::cout << name << ": at root of compressed tree " << key.batch() << ": all norms are 1.0 with 1e-12 tolerance" << std::endl;
           }
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::forward(
