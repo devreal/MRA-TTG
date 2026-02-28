@@ -26,7 +26,7 @@ target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)
 
 add_executable(mra-convolution-host-parsec
                autocorr.cc examples/convolution/test_convolution.cc)
-target_link_libraries(mra-convolution-host-parsec PUBLIC libmra-host-parsec)
+target_link_libraries(mra-convolution-host-parsec PUBLIC MADchem libmra-host-parsec)
 
 add_executable(mra-unit-host-parsec
                examples/unit/test_unit.cc)

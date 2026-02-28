@@ -8,7 +8,7 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T precision, int max_level, int d, int initial_level) {
+void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-d,d);
@@ -29,7 +29,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-2.0) + T(4.0)*drand48()) : 0.0;
+      r[d] = (seed > 0) ? (T(-6.0) + T(6.0)*drand48()) : 0.0;
     }
     if (seed > 0) {
       std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
@@ -42,8 +42,9 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   }
 
   T coeff = 10.0; // coefficient for the Gaussian
-  mra::Convolution<T, NDIM> conv(K, K, coeff, expnt, functiondata, functiondata);
-  mra::ConvolutionOperator<T, NDIM> op(K, K, conv);
+  mra::GaussianConvolutionOperator<T, NDIM> op(K, expnt, coeff);
+
+  std::vector<std::unique_ptr<ttg::TTBase>> tts;
 
   // put it into a buffer
   auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
@@ -52,7 +53,37 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
-  auto convolve = make_convolution(N, K, compress_result, compress_convolution_result, op, precision, "convolution");
+
+  auto [up_tt, down_tt, screener_tt, /*neighbor_dispatch_tt, rebalance_down_tt,*/ shell0_tt,
+        adjust_leaf_tt, accumulate_dispatch_tt, accumulate_tt] = make_convolution(N, K, compress_result, compress_convolution_result, op, precision, "convolution");
+
+#if 0
+  /**
+   * This is purely for debugging: a thread that prints the pending tasks in each TT every second.
+   * You can use this to see if the TTs are making progress or if they are stuck waiting for something.
+   */
+  tts.push_back(std::move(up_tt));
+  tts.push_back(std::move(down_tt));
+  tts.push_back(std::move(screener_tt));
+  //tts.push_back(std::move(neighbor_dispatch_tt));
+  //tts.push_back(std::move(rebalance_down_tt));
+  tts.push_back(std::move(shell0_tt));
+  tts.push_back(std::move(adjust_leaf_tt));
+  tts.push_back(std::move(accumulate_dispatch_tt));
+  tts.push_back(std::move(accumulate_tt));
+  std::atomic<int> signal = 0;
+  auto print_thread = std::thread([&](){
+    while (signal.load() == 0) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      std::cout << "======================" << std::endl;
+      for (auto& tt : tts) {
+        std::cout << "TT " << tt->get_name() << " pending tasks: " << std::endl;
+        tt->print_incomplete_tasks();
+      }
+      signal.store(0);
+    }
+  });
+#endif // 0
 
   auto norm  = make_norm(N, K, compress_convolution_result, norm_result);
   // final check
@@ -66,6 +97,10 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
 
   auto connected = make_graph_executable(start.get());
   assert(connected);
+
+  if (print_dot && ttg::default_execution_context().rank() == 0) {
+    std::cout << ttg::Dot(true)(start.get()) << std::endl;
+  }
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
   if (ttg::default_execution_context().rank() == 0) {
@@ -92,17 +127,19 @@ int main(int argc, char **argv) {
   int K = opt.parse("-K", 10);
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int axis    = opt.parse("-a", 0);
-  int log_precision = opt.parse("-p", 4); // default: 1e-4
+  int log_precision = opt.parse("-p", 8); // default: 1e-4
   int max_level = opt.parse("-l", -1);
   int initial_level = opt.parse("-i", 2);
   bool norand = opt.exists("-norand");
   int seed = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
   int domain = opt.parse("-d", 6);
+  bool print_dot = opt.exists("-dot");
 
   ttg::initialize(argc, argv, cores);
+  //ttg::trace_on();
   mra::GLinitialize();
   allocator_init(argc, argv);
-  test_convolution<double, 3>(N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level);
+  test_convolution<double, 3>(N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
 
   allocator_fini();
   ttg::finalize();

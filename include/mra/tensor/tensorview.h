@@ -396,6 +396,10 @@ namespace mra {
       return m_dims;
     }
 
+    SCOPE bool empty() const {
+      return m_ptr == nullptr || size() == 0;
+    }
+
     SCOPE size_type stride(size_type d) const {
       size_type s = 1;
       for (size_type i = d+1; i < ndim(); ++i) {

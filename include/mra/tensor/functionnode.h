@@ -26,7 +26,7 @@ namespace mra {
         using norm_tensor_view_type = TensorView<const value_type, NDIM>;
 
       protected:
-        key_type m_key; //< Key associated with this node to facilitate computation from otherwise unknown parent/child
+        key_type m_key = key_type::invalid(); //< Key associated with this node to facilitate computation from otherwise unknown parent/child
         tensor_type m_coeffs; //< if !is_leaf these are junk (and need not be communicated)
         size_type m_num_func = 0;
 #ifdef MRA_CHECK_NORMS
@@ -153,6 +153,10 @@ namespace mra {
 
         bool empty() const {
           return m_coeffs.empty();
+        }
+
+        bool invalid() const {
+          return m_key.is_invalid();
         }
 
         auto& buffer() {
@@ -381,6 +385,15 @@ namespace mra {
         bool is_child_leaf(size_type i, size_type child) const {
           return m_is_child_leafs[i][child];
         }
+
+        bool is_child_leaf(const Key<NDIM>& child) const {
+          bool result = true;
+          for (size_type i = 0; i < m_is_child_leafs.size(); ++i) {
+            result &= is_child_leaf(i, child.childindex());
+          }
+          return result;
+        }
+
 
         void set_child_leaf(size_type i, size_type child, bool arg = true) {
           m_is_child_leafs[i][child] = arg;

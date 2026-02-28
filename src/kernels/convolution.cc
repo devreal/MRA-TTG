@@ -13,6 +13,7 @@ namespace mra {
     const double normr,
     const double norms,
     const double fac,
+    const TensorView<double, 3+1>& in,
     const TensorView<double, 3+1>& f,
     TensorView<double, 3+1>& result,
     const std::array<TensorView<double, 2>, 3>& transr,

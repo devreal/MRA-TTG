@@ -73,6 +73,7 @@ namespace mra{
       const std::array<TensorView<T, 2>, NDIM>& transr,
       const std::array<TensorView<T, 2>, NDIM>& transs,
       const std::array<bool, 2>& at,
+      TensorView<T, NDIM>& in,
       TensorView<T, NDIM>& f,
       TensorView<T, NDIM>& f0,
       TensorView<T, NDIM>& resultf,
@@ -100,8 +101,17 @@ namespace mra{
       }
 
       tmpresult = resultf(s0);
+
+      // TODO: this does not do the same thing as the MADNESS code!
+      // MAD: r(s0).gaxpy(1.0,r0,1.0);
       gaxpy_kernel_impl<T, NDIM>(
         tmpresult, resultc, result, 1.0, 1.0);
+
+      if (!in.empty()) {
+        foreach_idx(result, [&](size_type i) {
+          result[i] += in[i];
+        });
+      }
     }
 
     template <typename T, Dimension NDIM>
@@ -114,6 +124,7 @@ namespace mra{
       const T normr,
       const T norms,
       const T fac,
+      const TensorView<T, NDIM+1> in_view,
       const TensorView<T, NDIM+1> f_view,
       TensorView<T, NDIM+1> result_view,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transr,
@@ -123,7 +134,7 @@ namespace mra{
       T* tmp)
     {
       SHARED TensorView<T, NDIM> f0, resultc, work1, work2;
-      SHARED TensorView<T, NDIM> f,tmpresult, resultf, result;
+      SHARED TensorView<T, NDIM> f, tmpresult, resultf, result, in;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp[blockId*convolution_tmp_size<NDIM>(K)];
@@ -137,20 +148,22 @@ namespace mra{
       work1     = TensorView<T, NDIM>(&block_tmp_ptr[              3*K2NDIM], 2*K);
       work2     = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 3*K2NDIM], 2*K);
       resultf   = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 3*K2NDIM], 2*K);
-      result    = TensorView<T, NDIM>(&block_tmp_ptr[3*TWOK2NDIM + 3*K2NDIM], 2*K);
+      // TODO: overwritten down there, needed?
+      // result    = TensorView<T, NDIM>(&block_tmp_ptr[3*TWOK2NDIM + 3*K2NDIM], 2*K);
 
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
         if (is_team_lead()) {
+          in     = in_view(blockId);
           f      = f_view(blockId);
           result = result_view(blockId);
         }
-      }
-      SYNCTHREADS();
+        SYNCTHREADS();
 
-      const T cnorm = mra::normf(f);
-      if (opnorm > 0.01*tol && opnorm*cnorm > tol) {
-        convolution_kernel_impl<T, NDIM>(key, K, normr, norms, fac, transr, transs, at, f, f0,
-          resultf, resultc, tmpresult, result, work1, work2);
+        const T cnorm = mra::normf(f);
+        if (opnorm > 0.01*tol && opnorm*cnorm > tol) {
+          convolution_kernel_impl<T, NDIM>(key, K, normr, norms, fac, transr, transs, at, in, f, f0,
+            resultf, resultc, tmpresult, result, work1, work2);
+        }
       }
     }
   } // namespace detail
@@ -164,6 +177,7 @@ namespace mra{
     const T normr,
     const T norms,
     const T fac,
+    const TensorView<T, NDIM+1>& in,
     const TensorView<T, NDIM+1>& f,
     TensorView<T, NDIM+1>& result,
     const std::array<TensorView<T, 2>, (size_t)NDIM>& transr,
@@ -178,9 +192,10 @@ namespace mra{
 
     CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
-    (key, K, N, opnorm, normr, norms, fac, f, result, transr, transs, at, tol, tmp));
+                (key, K, N, opnorm, normr, norms, fac, in, f, result, transr, transs, at, tol, tmp));
     checkSubmit();
   }
+
 
   /* explicit instantiation */
   extern template
@@ -192,7 +207,8 @@ namespace mra{
     const double normr,
     const double norms,
     const double fac,
-    const TensorView<double, 3+1>& f,
+    const TensorView<double, 3+1>& in,
+    const TensorView<double, 3+1>& contribution,
     TensorView<double, 3+1>& result,
     const std::array<TensorView<double, 2>, 3>& transr,
     const std::array<TensorView<double, 2>, 3>& transs,

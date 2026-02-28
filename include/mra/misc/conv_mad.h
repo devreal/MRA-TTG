@@ -9,6 +9,9 @@
 
 namespace mra {
 
+  /**
+   * A weird class that stores parameters for the operator and makes sure that madness is initialized once.
+   */
   template <typename T>
   struct OperatorInfo {
     size_type K;
@@ -16,14 +19,21 @@ namespace mra {
     T coeff;
 
     void init_madness() {
-      madness::World& world = madness::World::get_default();
-      madness::startup(world, 0, nullptr, false);
+      static std::once_flag flag;
+      std::call_once(flag, []() {
+        int argc = 0;
+        char** argv = nullptr;
+        madness::ParsecRuntime::initialize_with_existing_context(ttg::default_execution_context().impl().context());
+        madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
+        madness::World& world = madness::World::get_default();
+        madness::startup(world, 0, nullptr, false);
+      });
     }
-    OperatorInfo() : K(8), expnt(1500), coeff(1) {
-      // init_madness();
-    }
-    OperatorInfo(size_type K, T expnt, T coeff) : K(K), expnt(expnt), coeff(coeff) {
-      // init_madness();
+
+    OperatorInfo(size_type K, T expnt, T coeff)
+    : K(K), expnt(expnt), coeff(coeff)
+    {
+      init_madness();
     }
   };
 
@@ -68,17 +78,14 @@ namespace mra {
 
   template <typename T, Dimension NDIM>
   class GaussianConvolutionOperator {
+
   public:
     OperatorInfo<T> op_info;
 
-    GaussianConvolutionOperator() : op_info(), conv1d(op_info.K, op_info.coeff, op_info.expnt, 0, false) {
-      // startup(madness::World::get_default(), 0, nullptr, false);
-    }
-
-    GaussianConvolutionOperator(const OperatorInfo<T>& op_info) : op_info(op_info),
-                                              conv1d(op_info.K, op_info.coeff, op_info.expnt, 0, false) {
-      // startup(madness::World::get_default(), 0, nullptr, false);
-    }
+    GaussianConvolutionOperator(size_type K, T expnt, T coeff)
+    : op_info(K, expnt, coeff)
+    , conv1d(K, coeff, expnt, 0, false)
+    { }
 
     std::shared_ptr<const GaussianOperatorData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
       cachemutex.lock();
@@ -90,6 +97,7 @@ namespace mra {
 
       return make_op(n, disp);
     }
+
   private:
     // convolution1d madness object
     madness::GaussianConvolution1D<double> conv1d;
