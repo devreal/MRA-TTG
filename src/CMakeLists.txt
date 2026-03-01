@@ -28,6 +28,9 @@ add_executable(mra-convolution-host-parsec
                autocorr.cc examples/convolution/test_convolution.cc)
 target_link_libraries(mra-convolution-host-parsec PUBLIC libmra-host-parsec)
 
+add_executable(mad-convolution examples/convolution/test_convolution_madness.cc)
+target_link_libraries(mad-convolution PUBLIC libmra-host-parsec)
+
 add_executable(mra-unit-host-parsec
                examples/unit/test_unit.cc)
 target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
