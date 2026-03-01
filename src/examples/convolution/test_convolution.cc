@@ -134,12 +134,16 @@ int main(int argc, char **argv) {
   int seed = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
   int domain = opt.parse("-d", 6);
   bool print_dot = opt.exists("-dot");
+  int nrep = opt.parse("-n", 3);
 
   ttg::initialize(argc, argv, cores);
   //ttg::trace_on();
   mra::GLinitialize();
   allocator_init(argc, argv);
-  test_convolution<double, 3>(N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
+
+  for (int i = 0; i < nrep; ++i) {
+    test_convolution<double, 3>(N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
+  }
 
   allocator_fini();
   ttg::finalize();
