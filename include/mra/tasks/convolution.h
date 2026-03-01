@@ -133,8 +133,7 @@ namespace mra {
      ****************************************************************************************************************************************/
     auto up_contributions_tt = ttg::make_tt(
       [=](const mra::Key<NDIM>& key,
-          std::vector<detail::KeyPair<NDIM>>&& contributions,
-          const mra::FunctionsCompressedNode<T, NDIM>& node) {
+          std::vector<detail::KeyPair<NDIM>>&& contributions) {
         /**
          * Combine contributions from children and send them to the appropriate neighbors and parent.
          * We need to be careful to only send one message per neighbor/parent, so we will combine contributions that go to the same destination.
@@ -182,7 +181,7 @@ namespace mra {
 
         }
 
-      }, ttg::edges(up_contribution_edge, input), ttg::edges(down_contribution_edge, up_contribution_edge), name + "-up");
+      }, ttg::edges(up_contribution_edge), ttg::edges(down_contribution_edge, up_contribution_edge), name + "-up");
 
     /* Set the contribution reducer. On the way up, we receive from ourself and our children and send them to our ourself and 6 neighbors,
        as well as our parent.
@@ -209,6 +208,18 @@ namespace mra {
       [=](const Key<NDIM>& key,
           std::vector<detail::KeyPair<NDIM>>&& contributions,
           const mra::FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
+
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
         /**
          * Receive contributions from neighbors, parent, and self send them down to the appropriate children and ourselves.
          */
@@ -236,7 +247,7 @@ namespace mra {
         auto num_contributions = dest_contributions.size();
         //if (num_contributions > 0) {
           //std::cout << "DOWN " << key << " sending " << dest_contributions.size() << " contributions to accumulate dispatch" << std::endl;
-          ttg::send<1>(key, std::move(dest_contributions));
+          send_out(key, std::move(dest_contributions), std::integral_constant<std::size_t, 1>{});
         //}
 
         contributions.erase(backiter, contributions.end());
@@ -251,14 +262,14 @@ namespace mra {
           if (dest_contributions.size() > 0 || !node.is_child_leaf(child)) {
             // we have contributions or an existing child, send down to child
             //std::cout << "DOWN " << key << " sending " << dest_contributions.size() << " contributions to dest " << child << std::endl;
-            ttg::send<0>(child, std::move(dest_contributions));
+            send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
             child_leaf_info.is_child_leaf[child.childindex()] = false;
           }
           if (num_contributions > 0 && (node.invalid() || node.is_child_leaf(child))) {
             // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
             //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
-            ttg::send<0>(child, std::vector<detail::KeyPair<NDIM>>{});
-            ttg::send<2>(child, mra::FunctionsCompressedNode<T, NDIM>{}); // also send an empty node since the child task will expect one
+            send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+            send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
             child_leaf_info.is_child_leaf[child.childindex()] = false;
           }
         }
@@ -266,10 +277,10 @@ namespace mra {
         if (node.invalid()) {
           // send an empty node to the leaf-adjust task because it will not get once from shell0
           //std::cout << "DOWN " << key << " node is invalid, sending empty node to adjust leaf task" << std::endl;
-          ttg::send<3>(key, mra::FunctionsCompressedNode<T, NDIM>{});
+          send_out(key, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 3>{});
         }
 
-        ttg::send<4>(key, std::move(child_leaf_info));
+        send_out(key, std::move(child_leaf_info), std::integral_constant<std::size_t, 4>{});
 
         contributions.erase(backiter, contributions.end());
 #if 0
@@ -301,6 +312,18 @@ namespace mra {
      ****************************************************************************************************************************/
     auto adjust_leaf_tt = ttg::make_tt(
       [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node, const ChildLeafInfo& child_info) -> TASKTYPE {
+
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
         if (node.invalid()) {
           node = FunctionsCompressedNode<T, NDIM>(key, N);
         }
@@ -312,7 +335,7 @@ namespace mra {
           }
         }
 
-        ttg::send<0>(key, std::move(node));
+        send_out(key, std::move(node), std::integral_constant<std::size_t, 0>{});
       }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), name + "-adjust-leaf");
 
 
@@ -531,15 +554,26 @@ namespace mra {
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const std::vector<detail::KeyPair<NDIM>>& contributions) -> TASKTYPE {
 
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
         if (contributions.empty()) {
           // if we have no contributions to apply, just forward the input to the output
           //std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
-          ttg::send<2>(key, in_node);
+          send_out(key, in_node, std::integral_constant<std::size_t, 2>{});
         } else {
           // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively
           //std::cout << "ACCUMULATE DISPATCH " << key << " dispatching to accumulate " << contributions.back() << " with " << contributions.size() << " contributions" << std::endl;
-          ttg::send<0>(contributions.back(), in_node);
-          ttg::send<1>(contributions.back(), contributions);
+          send_out(contributions.back(), in_node, std::integral_constant<std::size_t, 0>{});
+          send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 1>{});
         }
 
       }, ttg::edges(to_shellN, contribution_edge),
