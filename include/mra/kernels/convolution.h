@@ -86,7 +86,7 @@ namespace mra{
       SHARED TensorView<T, NDIM> work1_k, work2_k;
       SHARED const std::array<Slice,NDIM> s0;
       if (is_team_lead()) {
-        s0 = {Slice(0, K), Slice(0, K), Slice(0, K)};
+        s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
         work1_k = TensorView<T, NDIM>(work1.data(), K);
         work2_k = TensorView<T, NDIM>(work2.data(), K);
       }
@@ -144,15 +144,17 @@ namespace mra{
       const size_type K2NDIM = std::pow(K, NDIM);
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
 
-      // construct temporaries and pass them to conv_transform
-      f0        = TensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
-      resultc   = TensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
-      tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], K);
-      work1     = TensorView<T, NDIM>(&block_tmp_ptr[              3*K2NDIM], 2*K);
-      work2     = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 3*K2NDIM], 2*K);
-      resultf   = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 3*K2NDIM], 2*K);
-      // TODO: overwritten down there, needed?
-      // result    = TensorView<T, NDIM>(&block_tmp_ptr[3*TWOK2NDIM + 3*K2NDIM], 2*K);
+      if (is_team_lead()) {
+        // construct temporaries and pass them to conv_transform
+        f0        = TensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
+        resultc   = TensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
+        tmpresult = TensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], K);
+        work1     = TensorView<T, NDIM>(&block_tmp_ptr[              3*K2NDIM], 2*K);
+        work2     = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 3*K2NDIM], 2*K);
+        resultf   = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 3*K2NDIM], 2*K);
+        // TODO: overwritten down there, needed?
+        // result    = TensorView<T, NDIM>(&block_tmp_ptr[3*TWOK2NDIM + 3*K2NDIM], 2*K);
+      }
 
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
         if (is_team_lead()) {
