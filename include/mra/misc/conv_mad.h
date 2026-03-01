@@ -157,14 +157,14 @@ namespace mra {
                         SU(op_info.K, op_info.K),
                         SVT(op_info.K, op_info.K);
           Tensor<T, 1> Rs(2 * op_info.K), Ss(op_info.K);
-          auto R_view = R.current_view();
-          auto RU_view = RU.current_view();
-          auto RVT_view = RVT.current_view();
-          auto S_view = S.current_view();
-          auto SU_view = SU.current_view();
-          auto SVT_view = SVT.current_view();
-          auto Rs_view = Rs.current_view();
-          auto Ss_view = Ss.current_view();
+          auto R_view = R.view_on(ttg::device::Device::host());
+          auto RU_view = RU.view_on(ttg::device::Device::host());
+          auto RVT_view = RVT.view_on(ttg::device::Device::host());
+          auto S_view = S.view_on(ttg::device::Device::host());
+          auto SU_view = SU.view_on(ttg::device::Device::host());
+          auto SVT_view = SVT.view_on(ttg::device::Device::host());
+          auto Rs_view = Rs.view_on(ttg::device::Device::host());
+          auto Ss_view = Ss.view_on(ttg::device::Device::host());
 
           for (size_type j=0; j<2*op_info.K; ++j){
             for (size_type k=0; k<2*op_info.K; ++k){
