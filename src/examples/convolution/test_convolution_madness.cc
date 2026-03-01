@@ -139,12 +139,6 @@ void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
 
-  FunctionDefaults<3>::set_k(K);
-  FunctionDefaults<3>::set_thresh(thresh);
-  FunctionDefaults<3>::set_truncate_mode(1);
-  FunctionDefaults<3>::set_cubic_cell(-L / 2, L / 2);
-  FunctionDefaults<3>::set_initial_level(initial_level);
-
   default_random_generator.setstate(
       99); // Ensure all processes have the same state
 
@@ -191,10 +185,17 @@ int main(int argc, char **argv) {
   int nrep = opt.parse("-n", 3);
   int seed = opt.parse("-s", 5551212);
   int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
+  int log_precision = opt.parse("-p", 8); // default: 1e-8
 
-
+  thresh = std::pow(10, -log_precision);
 
   startup(world, argc, argv);
+
+  FunctionDefaults<3>::set_k(K);
+  FunctionDefaults<3>::set_thresh(thresh);
+  FunctionDefaults<3>::set_truncate_mode(1);
+  FunctionDefaults<3>::set_cubic_cell(-L / 2, L / 2);
+  FunctionDefaults<3>::set_initial_level(initial_level);
 
   if (world.rank() == 0)
     FunctionDefaults<3>::print();
