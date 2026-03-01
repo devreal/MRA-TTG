@@ -204,7 +204,7 @@ namespace mra {
      *       whether our children receive contributions.
      ***********************************************************************************************/
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> down_recursive_edge;
-    auto down_contributions_tt = ttg::make_tt(
+    auto down_contributions_tt = ttg::make_tt<Space>(
       [=](const Key<NDIM>& key,
           std::vector<detail::KeyPair<NDIM>>&& contributions,
           const mra::FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
@@ -314,7 +314,7 @@ namespace mra {
      * Task that receives a node (either from shell0 if it exists already, or from down task if its new) and the leaf status of
      * its children, adjusts the leaf status based on whether it has children or receives contributions, and sends it to shellN.
      ****************************************************************************************************************************/
-    auto adjust_leaf_tt = ttg::make_tt(
+    auto adjust_leaf_tt = ttg::make_tt<Space>(
       [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node, const ChildLeafInfo& child_info) -> TASKTYPE {
 
 #ifndef MRA_ENABLE_HOST
@@ -351,7 +351,7 @@ namespace mra {
      * TODO: TTG needs a way to programatically set the number of inputs from within another TT, i.e., from an output to an input terminal.
      *       Taking the raw pointer here is a dirty hack!
      */
-    auto screener_tt = ttg::make_tt(
+    auto screener_tt = ttg::make_tt<Space>(
       [&, N, K, thresh, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](const mra::Key<NDIM>& key,
                               const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
@@ -466,7 +466,7 @@ namespace mra {
      * The task that applies the convolution operator on shell 0.
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
-    auto shell0_tt = ttg::make_tt(
+    auto shell0_tt = ttg::make_tt<Space>(
       [&, N, K, thresh, name](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
@@ -557,7 +557,7 @@ namespace mra {
     /**
      * Dispatch task receives the
      */
-    auto accumulate_dispatch = ttg::make_tt(
+    auto accumulate_dispatch = ttg::make_tt<Space>(
       [=](const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const std::vector<detail::KeyPair<NDIM>>& contributions) -> TASKTYPE {
@@ -598,7 +598,7 @@ namespace mra {
      *
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
-    auto accumulate_tt = ttg::make_tt(
+    auto accumulate_tt = ttg::make_tt<Space>(
       [&, N, K, thresh, name](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
