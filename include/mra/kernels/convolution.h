@@ -83,7 +83,14 @@ namespace mra{
       TensorView<T, NDIM>& work1,
       TensorView<T, NDIM>& work2)
     {
-      const std::array<Slice,NDIM> s0 = {Slice(0, K), Slice(0, K), Slice(0, K)};
+      SHARED TensorView<T, NDIM> work1_k, work2_k;
+      SHARED const std::array<Slice,NDIM> s0;
+      if (is_team_lead()) {
+        s0 = {Slice(0, K), Slice(0, K), Slice(0, K)};
+        work1_k = TensorView<T, NDIM>(work1.data(), K);
+        work2_k = TensorView<T, NDIM>(work2.data(), K);
+      }
+      SYNCTHREADS();
       T normthresh = 1e-20; // Can potentially be a parameter
 
       if (at[0] && (normr > normthresh/(normr * NDIM))) {
@@ -91,10 +98,6 @@ namespace mra{
       }
 
       f0(s0) = f(s0);
-      SHARED TensorView<T, NDIM> work1_k, work2_k;
-      work1_k = TensorView<T, NDIM>(work1.data(), K);
-      work2_k = TensorView<T, NDIM>(work2.data(), K);
-      SYNCTHREADS();
 
       if (at[1] && (norms > normthresh/(norms * NDIM))) {
         conv_transform<T, NDIM>(K, -fac, transs, f0, resultc, work1_k, work2_k);
