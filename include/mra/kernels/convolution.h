@@ -129,7 +129,7 @@ namespace mra{
       TensorView<T, NDIM+1> result_view,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transr,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transs,
-      const std::array<bool, 2>& at,
+      const std::array<bool, 2> at,
       const T tol,
       T* tmp)
     {
