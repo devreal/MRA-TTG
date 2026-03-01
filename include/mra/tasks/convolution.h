@@ -294,6 +294,10 @@ namespace mra {
 
         assert(contributions.empty() && "All contributions should have been sent!");
 
+#ifndef MRA_ENABLE_HOST
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
+
       }, ttg::edges(down_contribution_edge, ttg::fuse(input, down_recursive_edge)),
          ttg::edges(down_contribution_edge, contribution_edge, down_recursive_edge, down_to_adjust_leaf_node, down_to_adjust_leaf_child_info),
          name + "-down");
@@ -336,6 +340,10 @@ namespace mra {
         }
 
         send_out(key, std::move(node), std::integral_constant<std::size_t, 0>{});
+
+#ifndef MRA_ENABLE_HOST
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
       }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), name + "-adjust-leaf");
 
 
@@ -576,6 +584,9 @@ namespace mra {
           send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 1>{});
         }
 
+#ifndef MRA_ENABLE_HOST
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
       }, ttg::edges(to_shellN, contribution_edge),
          ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, result),
          name + "-accumulate-dispatch");
