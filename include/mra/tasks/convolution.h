@@ -262,14 +262,17 @@ namespace mra {
           if (dest_contributions.size() > 0 || !node.is_child_leaf(child)) {
             // we have contributions or an existing child, send down to child
             //std::cout << "DOWN " << key << " sending " << dest_contributions.size() << " contributions to dest " << child << std::endl;
-            send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
+            //send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
+            ttg::send<0>(child, std::move(dest_contributions));
             child_leaf_info.is_child_leaf[child.childindex()] = false;
           }
           if (num_contributions > 0 && (node.invalid() || node.is_child_leaf(child))) {
             // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
             //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
-            send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
-            send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
+            ttg::send<0>(child, std::vector<detail::KeyPair<NDIM>>{}); // send an empty contribution list to the child since it will expect one
+            ttg::send<2>(child, mra::FunctionsCompressedNode<T, NDIM>{}); // also send an empty node since the child task will expect one
+            //send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+            //send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
             child_leaf_info.is_child_leaf[child.childindex()] = false;
           }
         }
