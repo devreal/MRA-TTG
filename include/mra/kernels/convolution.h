@@ -84,7 +84,7 @@ namespace mra{
       TensorView<T, NDIM>& work2)
     {
       SHARED TensorView<T, NDIM> work1_k, work2_k;
-      SHARED const std::array<Slice,NDIM> s0;
+      SHARED std::array<Slice,NDIM> s0;
       if (is_team_lead()) {
         s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
         work1_k = TensorView<T, NDIM>(work1.data(), K);
