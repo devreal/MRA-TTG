@@ -39,7 +39,7 @@
 using namespace madness;
 
 static const double L = 12.0;      // box size
-static const double thresh = 1e-6; // precision
+static double thresh = 1e-6; // precision
 
 static double expnt = 1500.0;
 static double fac = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
