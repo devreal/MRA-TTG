@@ -2,7 +2,7 @@
 # define a base target for the MRA
 add_library(libmra-base-parsec INTERFACE)
 target_include_directories(libmra-base-parsec INTERFACE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(libmra-base-parsec INTERFACE MADworld ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
+target_link_libraries(libmra-base-parsec INTERFACE MADworld MADchem MADtensor MADmra ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
 #define a target for the host
@@ -26,7 +26,7 @@ target_link_libraries(mra-derivative-host-parsec PUBLIC libmra-host-parsec)
 
 add_executable(mra-convolution-host-parsec
                autocorr.cc examples/convolution/test_convolution.cc)
-target_link_libraries(mra-convolution-host-parsec PUBLIC MADchem libmra-host-parsec)
+target_link_libraries(mra-convolution-host-parsec PUBLIC libmra-host-parsec)
 
 add_executable(mra-unit-host-parsec
                examples/unit/test_unit.cc)
@@ -35,15 +35,15 @@ target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
 # Holding this off until BLAS in MADNESS works for our use case
 add_executable(mra-mad-deriv-host-parsec
                tests/mad_derivative_test.cc)
-target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
+target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
 
 add_executable(mra-mad-conv-host-parsec
                tests/mad_convolution_test.cc autocorr.cc)
-target_link_libraries(mra-mad-conv-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
+target_link_libraries(mra-mad-conv-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
 
 add_executable(mra-mad-debug-host-parsec
                tests/mad_conv.cc autocorr.cc)
-target_link_libraries(mra-mad-debug-host-parsec PUBLIC MADworld MADtensor MADmra libmra-host-parsec)
+target_link_libraries(mra-mad-debug-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
 
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
 target_link_libraries(mra-cycledimtest PUBLIC libmra-host-parsec)
