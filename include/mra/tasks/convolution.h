@@ -181,7 +181,7 @@ namespace mra {
 
         }
 
-      }, ttg::edges(up_contribution_edge), ttg::edges(down_contribution_edge, up_contribution_edge), name + "-up");
+      }, ttg::edges(up_contribution_edge), ttg::edges(down_contribution_edge, up_contribution_edge), "Up");
 
     /* Set the contribution reducer. On the way up, we receive from ourself and our children and send them to our ourself and 6 neighbors,
        as well as our parent.
@@ -303,7 +303,7 @@ namespace mra {
 
       }, ttg::edges(down_contribution_edge, ttg::fuse(input, down_recursive_edge)),
          ttg::edges(down_contribution_edge, contribution_edge, down_recursive_edge, down_to_adjust_leaf_node, down_to_adjust_leaf_child_info),
-         name + "-down");
+         "Down");
 
     /* Set the contribution reducer. On the way down, we receive from ourself, our parent, and 6 neighbors.
        Some nodes (root, boundaries) receive fewer contributions and will have to be adjusted dynamically. */
@@ -347,7 +347,7 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
         co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
-      }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), name + "-adjust-leaf");
+      }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), "AdjustLeaf");
 
 
     /**
@@ -450,20 +450,20 @@ namespace mra {
           down_tt_ptr->template set_argstream_size<0>(key, 1);
         }
 
-        send_out(key, contributions, std::integral_constant<std::size_t, 0>{}); // send contributions on the way up
+        send_out(key, contributions, std::integral_constant<std::size_t, 1>{}); // send contributions on the way up
 
 #ifndef MRA_ENABLE_HOST
         if (!contributions.empty()) {
-          sends.push_back(ttg::device::broadcast<1>(std::move(contributions), in_node)); // broadcast the input node to the accumulate tasks
+          sends.push_back(ttg::device::broadcast<0>(std::move(contributions), in_node)); // broadcast the input node to the accumulate tasks
         }
         co_await std::move(sends);
 #else
         if (!contributions.empty()) {
-          ttg::broadcast<1>(std::move(contributions), in_node); // broadcast the input node to the accumulate tasks
+          ttg::broadcast<0>(std::move(contributions), in_node); // broadcast the input node to the accumulate tasks
         }
 #endif // MRA_ENABLE_HOST
       },
-      ttg::edges(input), ttg::edges(up_contribution_edge, screener_to_accumulate), name + "-screen");
+      ttg::edges(input), ttg::edges(screener_to_accumulate, up_contribution_edge), "Screen");
 
     /**
      * The task that applies the convolution operator on shell 0.
@@ -548,7 +548,7 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
-    }, ttg::edges(input), ttg::edges(down_to_adjust_leaf_node), name + "-shell0");
+    }, ttg::edges(input), ttg::edges(down_to_adjust_leaf_node), "Shell0");
 
 
     /**
@@ -592,7 +592,7 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(to_shellN, contribution_edge),
          ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, result),
-         name + "-accumulate-dispatch");
+         "AccumulateDispatch");
 
     /**
      * Task that applies the contributions from non-zero shells, as determined on the way down the tree.
@@ -695,7 +695,7 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(accumulate_node_recurse, screener_to_accumulate, accumulate_contribution_recurse),
          ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, result),
-         name + "-accumulate");
+         "Accumulate");
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       up_contributions_tt->set_keymap(procmap);
@@ -720,11 +720,25 @@ namespace mra {
       accumulate_tt->set_devicemap([=](const detail::KeyPair<NDIM>& kp) { return devicemap(kp.dest); });
     }
     // TODO: assemble TTG
+
+    auto ins = std::make_tuple(screener_tt->template in<0>());
+    auto outs = std::make_tuple(accumulate_tt->template out<2>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(7);
+    ops[0] = std::move(up_contributions_tt);
+    ops[1] = std::move(down_contributions_tt);
+    ops[2] = std::move(screener_tt);
+    ops[3] = std::move(shell0_tt);
+    ops[4] = std::move(adjust_leaf_tt);
+    ops[5] = std::move(accumulate_dispatch);
+    ops[6] = std::move(accumulate_tt);
+    return make_ttg(std::move(ops), ins, outs, name);
+#if 0
     return std::make_tuple(std::move(up_contributions_tt), std::move(down_contributions_tt), std::move(screener_tt),
                            //std::move(neighbor_dispatch_tt),
                            //std::move(rebalance_down),
                            std::move(adjust_leaf_tt),
                            std::move(shell0_tt), std::move(accumulate_dispatch), std::move(accumulate_tt));
+#endif
   }
 
 

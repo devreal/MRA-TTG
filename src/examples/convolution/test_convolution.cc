@@ -54,8 +54,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
 
-  auto [up_tt, down_tt, screener_tt, /*neighbor_dispatch_tt, rebalance_down_tt,*/ shell0_tt,
-        adjust_leaf_tt, accumulate_dispatch_tt, accumulate_tt] = make_convolution(N, K, compress_result, compress_convolution_result, op, precision, "convolution");
+  auto convolution = make_convolution(N, K, compress_result, compress_convolution_result, op, precision, "convolution");
 
 #if 0
   /**
@@ -91,7 +90,7 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
     // TODO: check for the norm within machine precision
     auto norms_arr = norms.buffer().current_device_ptr();
     for (size_type i = 0; i < N; ++i) {
-      std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
+      //std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
     }
   }, ttg::edges(norm_result), ttg::edges(), "norm-check");
 
