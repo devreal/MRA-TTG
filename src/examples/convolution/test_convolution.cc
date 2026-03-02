@@ -8,7 +8,7 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
+void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-d,d);
@@ -101,20 +101,22 @@ void test_convolution(std::size_t N, std::size_t K, Dimension axis, int seed, T 
     std::cout << ttg::Dot(true)(start.get()) << std::endl;
   }
 
-  std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
-  if (ttg::default_execution_context().rank() == 0) {
-      beg = std::chrono::high_resolution_clock::now();
-      // This kicks off the entire computation
-      start->invoke(mra::Key<NDIM>(0, {0}));
-  }
-  ttg::execute();
-  ttg::fence();
+  for (int i = 0; i < nrep; ++i) {
+    std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
+    if (ttg::default_execution_context().rank() == 0) {
+        beg = std::chrono::high_resolution_clock::now();
+        // This kicks off the entire computation
+        start->invoke(mra::Key<NDIM>(0, {0}));
+    }
+    ttg::execute();
+    ttg::fence();
 
-  if (ttg::default_execution_context().rank() == 0) {
-    end = std::chrono::high_resolution_clock::now();
-    std::cout << "TTG Execution Time (milliseconds) : "
-              << (std::chrono::duration_cast<std::chrono::microseconds>(end - beg).count()) / 1000
-              << std::endl;
+    if (ttg::default_execution_context().rank() == 0) {
+      end = std::chrono::high_resolution_clock::now();
+      std::cout << "TTG Execution Time (milliseconds) : "
+                << (std::chrono::duration_cast<std::chrono::microseconds>(end - beg).count()) / 1000
+                << std::endl;
+    }
   }
 }
 
@@ -140,9 +142,7 @@ int main(int argc, char **argv) {
   mra::GLinitialize();
   allocator_init(argc, argv);
 
-  for (int i = 0; i < nrep; ++i) {
-    test_convolution<double, 3>(N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
-  }
+  test_convolution<double, 3>(nrep, N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
 
   allocator_fini();
   ttg::finalize();
