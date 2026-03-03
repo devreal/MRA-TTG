@@ -142,10 +142,8 @@ void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
   default_random_generator.setstate(
       99); // Ensure all processes have the same state
 
-  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(N);
-  for (int i = 0; i < N; ++i) {
-    ops[i].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
-  }
+  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
+  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
 
   // f.make_nonstandard(false, true);
   // f.compress();
