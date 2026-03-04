@@ -350,13 +350,57 @@ namespace mra {
       }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), "AdjustLeaf");
 
 
+    ttg::Edge<mra::Key<NDIM>, Tensor<T, 1>> norm_edge; // edge to send the cnorms from the screener to the accumulate task
+
+
+    /****************************************************
+     * Task that computes the norm and forwards it.
+     * NOTE: we separate this into its own task because
+     *       we otherwise serialize the screening on
+     *       the device manager.
+     ****************************************************/
+    auto norm_tt = ttg::make_tt<Space>(
+      [=](const Key<NDIM>& key,
+          const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
+
+
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
+        Tensor<T, 1> cnorms;
+
+        if (!in_node.empty()) {
+          cnorms = Tensor<T, 1>(N, ttg::scope::Allocate);
+#ifndef MRA_ENABLE_HOST
+          co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
+#endif
+
+          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, cnorms.current_view());
+
+#ifndef MRA_ENABLE_HOST
+          co_await ttg::device::wait(cnorms.buffer());
+#endif
+        }
+        send_out(key, std::move(cnorms), std::integral_constant<std::size_t, 0>{});
+      }, ttg::edges(input), ttg::edges(norm_edge), "Norm");
+
     /**
      * TODO: TTG needs a way to programatically set the number of inputs from within another TT, i.e., from an output to an input terminal.
      *       Taking the raw pointer here is a dirty hack!
      */
     auto screener_tt = ttg::make_tt<Space>(
-      [&, N, K, thresh, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](const mra::Key<NDIM>& key,
-                              const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
+      [&, N, K, thresh, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
+                              const mra::Key<NDIM>& key,
+                              const mra::FunctionsCompressedNode<T, NDIM>& in_node,
+                              const Tensor<T, 1>& cnorms) -> TASKTYPE {
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -394,6 +438,8 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::wait(cnorms.buffer());
 #endif
+
+          assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
 
@@ -463,7 +509,7 @@ namespace mra {
         }
 #endif // MRA_ENABLE_HOST
       },
-      ttg::edges(input), ttg::edges(screener_to_accumulate, up_contribution_edge), "Screen");
+      ttg::edges(input, norm_edge), ttg::edges(screener_to_accumulate, up_contribution_edge), "Screen");
 
     /**
      * The task that applies the convolution operator on shell 0.
@@ -700,6 +746,7 @@ namespace mra {
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       up_contributions_tt->set_keymap(procmap);
       down_contributions_tt->set_keymap(procmap);
+      norm_tt->set_keymap(procmap);
       screener_tt->set_keymap(procmap);
       //neighbor_dispatch_tt->set_keymap(procmap);
       //rebalance_down->set_keymap(procmap);
@@ -711,6 +758,7 @@ namespace mra {
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       up_contributions_tt->set_devicemap(devicemap);
       down_contributions_tt->set_devicemap(devicemap);
+      norm_tt->set_devicemap(devicemap);
       screener_tt->set_devicemap(devicemap);
       //neighbor_dispatch_tt->set_devicemap(devicemap);
       //rebalance_down->set_devicemap(devicemap);
@@ -723,14 +771,15 @@ namespace mra {
 
     auto ins = std::make_tuple(screener_tt->template in<0>());
     auto outs = std::make_tuple(accumulate_tt->template out<2>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(7);
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(8);
     ops[0] = std::move(up_contributions_tt);
     ops[1] = std::move(down_contributions_tt);
-    ops[2] = std::move(screener_tt);
-    ops[3] = std::move(shell0_tt);
-    ops[4] = std::move(adjust_leaf_tt);
-    ops[5] = std::move(accumulate_dispatch);
-    ops[6] = std::move(accumulate_tt);
+    ops[2] = std::move(norm_tt);
+    ops[3] = std::move(screener_tt);
+    ops[4] = std::move(shell0_tt);
+    ops[5] = std::move(adjust_leaf_tt);
+    ops[6] = std::move(accumulate_dispatch);
+    ops[7] = std::move(accumulate_tt);
     return make_ttg(std::move(ops), ins, outs, name);
 #if 0
     return std::make_tuple(std::move(up_contributions_tt), std::move(down_contributions_tt), std::move(screener_tt),
