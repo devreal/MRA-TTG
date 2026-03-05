@@ -390,6 +390,10 @@ namespace mra {
 #endif
         }
         send_out(key, std::move(cnorms), std::integral_constant<std::size_t, 0>{});
+
+#ifndef MRA_ENABLE_HOST
+      co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
       }, ttg::edges(input), ttg::edges(norm_edge), "Norm");
 
     /**
