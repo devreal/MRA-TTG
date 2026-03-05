@@ -420,24 +420,11 @@ namespace mra {
 
         std::vector<detail::KeyPair<NDIM>> contributions;
 
-        if (in_node.empty()){
-          //std::cout << "SCREENER " << key << " empty, sending empty to children" << std::endl;
-        } else {
+        if (!in_node.empty()){
 
           /**
            * Compute the cnorm using the norm kernel.
            */
-
-          Tensor<T, 1> cnorms(N, TempScope);
-#ifndef MRA_ENABLE_HOST
-          co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
-#endif
-
-          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, cnorms.current_view());
-
-#ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(cnorms.buffer());
-#endif
 
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
