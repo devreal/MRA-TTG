@@ -137,13 +137,9 @@ int main(int argc, char **argv) {
   bool print_dot = opt.exists("-dot");
   int nrep = opt.parse("-n", 3);
 
-  ttg::initialize(argc, argv, cores);
-  //ttg::trace_on();
-  mra::GLinitialize();
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv, cores);
 
   test_convolution<double, 3>(nrep, N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
 
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

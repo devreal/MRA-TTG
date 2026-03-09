@@ -8,8 +8,12 @@
 #include "mra/kernels.h"
 #include "mra/tasks.h"
 
+#include "mra/misc/conv_mad.h"
 #include "mra/misc/dims.h"
 #include "mra/misc/gl.h"
+#include "mra/misc/hash.h"
+#include "mra/misc/init.h"
+#include "mra/misc/allocator.h"
 #include "mra/misc/key.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"

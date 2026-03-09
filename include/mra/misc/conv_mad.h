@@ -18,23 +18,9 @@ namespace mra {
     T expnt;
     T coeff;
 
-    void init_madness() {
-      static std::once_flag flag;
-      std::call_once(flag, []() {
-        int argc = 0;
-        char** argv = nullptr;
-        madness::ParsecRuntime::initialize_with_existing_context(ttg::default_execution_context().impl().context());
-        madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
-        madness::World& world = madness::World::get_default();
-        madness::startup(world, 0, nullptr, false);
-      });
-    }
-
     OperatorInfo(size_type K, T expnt, T coeff)
     : K(K), expnt(expnt), coeff(coeff)
-    {
-      init_madness();
-    }
+    { }
   };
 
   template <typename T>

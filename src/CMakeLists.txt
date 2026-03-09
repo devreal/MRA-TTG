@@ -6,7 +6,10 @@ target_link_libraries(libmra-base-parsec INTERFACE MADworld MADchem MADtensor MA
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
 #define a target for the host
-add_library(libmra-host-parsec OBJECT gl.cc twoscale.cc kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc kernels/derivative.cc kernels/convolution.cc)
+add_library(libmra-host-parsec OBJECT gl.cc init.cc twoscale.cc
+                                      kernels/compress.cc kernels/reconstruct.cc
+                                      kernels/multiply.cc kernels/derivative.cc
+                                      kernels/convolution.cc)
 
 target_link_libraries(libmra-host-parsec PUBLIC libmra-base-parsec)
 target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
