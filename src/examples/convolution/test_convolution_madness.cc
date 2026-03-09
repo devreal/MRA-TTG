@@ -41,7 +41,7 @@ using namespace madness;
 static const double L = 12.0;      // box size
 static double thresh = 1e-6; // precision
 
-static double expnt = 1500.0;
+static double expnt = 1000.0;
 static double fac = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
 static double coeff = fac;
 
@@ -88,8 +88,8 @@ public:
 // Makes a new square-normalized Gaussian functor with random origin and
 // exponent
 real_functor_3d random_gaussian(int seed) {
-  const double expntmin = 1500;
-  const double expntmax = 3000;
+  const double expntmin = expnt;
+  const double expntmax = 2*expnt;
   const real_tensor &cell = FunctionDefaults<3>::get_cell();
   coord_3d origin;
   default_random_generator.setstate(seed);
@@ -184,6 +184,7 @@ int main(int argc, char **argv) {
   int seed = opt.parse("-s", 5551212);
   int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
   int log_precision = opt.parse("-p", 8); // default: 1e-8
+  expnt = opt.parse("-e", expnt);
 
   thresh = std::pow(10, -log_precision);
 

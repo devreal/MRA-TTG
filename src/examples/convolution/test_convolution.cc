@@ -8,7 +8,7 @@
 using namespace mra;
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
+void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T expnt_arg, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-d,d);
@@ -24,7 +24,7 @@ void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, in
 
   // define N Gaussians
   auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-  T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
+  T expnt = (seed > 0) ? (expnt_arg + expnt_arg*drand48()) : expnt_arg;
 
   for (int i = 0; i < N; ++i) {
     mra::Coordinate<T,NDIM> r;
@@ -38,7 +38,7 @@ void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, in
   }
 
   if (seed == 0) {
-    if (seed == 0) std::cout << N << " Gaussians with expnt " << 1500 << std::endl;
+    if (seed == 0) std::cout << N << " Gaussians with expnt " << expnt_arg << std::endl;
   }
 
   T coeff = 10.0; // coefficient for the Gaussian
@@ -136,10 +136,11 @@ int main(int argc, char **argv) {
   int domain = opt.parse("-d", 6);
   bool print_dot = opt.exists("-dot");
   int nrep = opt.parse("-n", 3);
+  double expnt_arg = opt.parse("-e", 1000.0);
 
   mra::initialize(argc, argv, cores);
 
-  test_convolution<double, 3>(nrep, N, K, axis, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
+  test_convolution<double, 3>(nrep, N, K, axis, expnt_arg, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
 
   mra::finalize();
 }
