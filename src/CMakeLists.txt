@@ -5,11 +5,11 @@ target_include_directories(libmra-base-parsec INTERFACE ${CMAKE_SOURCE_DIR}/incl
 target_link_libraries(libmra-base-parsec INTERFACE MADworld MADchem MADtensor MADmra ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
+set(MRA_SOURCES gl.cc init.cc twoscale.cc)
+set(MRA_KERNEL_SOURCES kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc kernels/derivative.cc kernels/convolution.cc)
+
 #define a target for the host
-add_library(libmra-host-parsec OBJECT gl.cc init.cc twoscale.cc
-                                      kernels/compress.cc kernels/reconstruct.cc
-                                      kernels/multiply.cc kernels/derivative.cc
-                                      kernels/convolution.cc)
+add_library(libmra-host-parsec OBJECT ${MRA_SOURCES})
 
 target_link_libraries(libmra-host-parsec PUBLIC libmra-base-parsec)
 target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
@@ -93,7 +93,9 @@ if (HAVE_CUDA)
                                                $<$<TARGET_EXISTS:tiledarray>:tiledarray>
                                                $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
 
-  add_library(libmra-cuda-parsec OBJECT gl.cc twoscale.cc kernels/compress.cu kernels/reconstruct.cu kernels/multiply.cu kernels/derivative.cu kernels/convolution.cu)
+  set(MRA_CUDA_KERNEL_SOURCES ${MRA_KERNEL_SOURCES})
+  list(TRANSFORM MRA_CUDA_KERNEL_SOURCES REPLACE "\\.cc$" ".cu")
+  add_library(libmra-cuda-parsec OBJECT ${MRA_SOURCES} ${MRA_CUDA_KERNEL_SOURCES})
 
   target_link_libraries(libmra-cuda-parsec PUBLIC libmra-cuda-base-parsec)
 
@@ -134,8 +136,10 @@ if (HAVE_HIP)
 
   # define a target for HIP
 
-  add_library(libmra-hip-parsec OBJECT gl.cc twoscale.cc kernels/compress.hip kernels/reconstruct.hip kernels/multiply.hip kernels/derivative.hip kernels/convolution.hip)
+  set(MRA_HIP_KERNEL_SOURCES ${MRA_KERNEL_SOURCES})
+  list(TRANSFORM MRA_HIP_KERNEL_SOURCES REPLACE "\\.cc$" ".hip")
 
+  add_library(libmra-hip-parsec OBJECT ${MRA_SOURCES} ${MRA_HIP_KERNEL_SOURCES})
   target_compile_definitions(libmra-hip-parsec PUBLIC MRA_ENABLE_HIP=1)
   target_link_libraries(libmra-hip-parsec PUBLIC libmra-base-parsec
                                               $<$<TARGET_EXISTS:tiledarray>:tiledarray>
@@ -154,7 +158,7 @@ if (HAVE_HIP)
   target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)
 
   add_executable(mra-mad-deriv-device-hip-parsec
-                 tests/mad_derivative_test.cu)
-  target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC MADworld MADtensor MADmra libmra-hip-parsec)
+                 tests/mad_derivative_test.hip)
+  target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC libmra-hip-parsec)
 
 endif (HAVE_HIP)
