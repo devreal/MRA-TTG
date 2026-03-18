@@ -3,6 +3,7 @@
 
 #include "mra/ops/inner.h"
 #include "mra/misc/gl.h"
+#include "mra/misc/functiondata.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/types.h"

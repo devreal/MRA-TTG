@@ -9,7 +9,7 @@ set(MRA_SOURCES gl.cc init.cc twoscale.cc)
 set(MRA_KERNEL_SOURCES kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc kernels/derivative.cc kernels/convolution.cc)
 
 #define a target for the host
-add_library(libmra-host-parsec OBJECT ${MRA_SOURCES})
+add_library(libmra-host-parsec OBJECT ${MRA_SOURCES} ${MRA_KERNEL_SOURCES})
 
 target_link_libraries(libmra-host-parsec PUBLIC libmra-base-parsec)
 target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
