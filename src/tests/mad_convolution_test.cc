@@ -31,7 +31,7 @@ static T u_exact(const coord_t &pt) {
 }
 
 template <typename T, Dimension NDIM>
-auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init_lev, bool ns) {
+auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init_lev) {
 
   madness::FunctionDefaults<3>::set_cubic_cell( -Length, Length );
   madness::FunctionDefaults<3>::set_k(k);
@@ -48,12 +48,7 @@ auto compute_conv_madness(madness::World& world, size_type k, T thresh, int init
 
   std::cout << "MAD function has " << f.min_nodes() << " nodes before convolution" << std::endl;
 
-  if (ns) {
-    f.make_nonstandard(false, true);
-  } else {
-    f.compress();
-  }
-
+  f.make_nonstandard(false, true);
 
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
   ops[0].reset(new madness::GaussianConvolution1D<double>(k, coeff, expnt, 0, false));
@@ -73,8 +68,8 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-Length,Length);
 
-  std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> cmap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> convmap, projmap, rmap;
+  std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> cmap, nsmap, convmap;
+  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> projmap, rmap;
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result,
@@ -108,11 +103,13 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto project       = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto extract_project = make_extract(project_result, projmap);
   auto compress      = make_compress(N, K, false, functiondata, project_result, compress_result, "compress");
+  auto extract_compress = make_extract(compress_result, cmap);
   auto reconstruct     = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
   auto extract_reconstruct = make_extract(reconstruct_result, rmap);
-  auto compress_r   = make_compress(N, K, false, functiondata2, reconstruct_result, compress_r_result, "compress_reconstruct");
-  auto extract_compress = make_extract(compress_r_result, cmap);
-  //auto convolve      = make_convolution(N, K, compress_result, convolution_result, op, precision, "convolution");
+  auto compress_r   = make_compress(N, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
+  auto extract_ns = make_extract(compress_r_result, nsmap);
+  auto convolve      = make_convolution(N, K, compress_result, convolution_result, op, precision, "convolution");
+  auto extract_conv  = make_extract(convolution_result, convmap);
   //auto reconstruct_c = make_reconstruct(N, K, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_conv");
   //auto extract_conv  = make_extract(reconstruct_conv_result, convmap);
   auto connected     = make_graph_executable(start.get());
@@ -131,7 +128,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world,argc,argv);
   {
-    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(world, K, precision, init_lev, false);
+    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(world, K, precision, init_lev);
     // std::cout << "Tree State of madfunc: " << madfunc.get_impl()->get_tree_state() << std::endl;
     // auto madkey = madness::Key<NDIM>(0, {0, 0, 0});
     // const auto &madcoeffs = madfunc.get_impl()->get_coeffs();
@@ -154,9 +151,13 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
     // fff.make_nonstandard(false, true);
     // fff.compress();
     //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
-    //madfunc.reconstruct();
+    madfunc.reconstruct();
     compare_mra_madness(madfunc, rmap, "reconstruct_result", verification_precision);
-    //compare_mra_madness(madconv, convmap, "conv_result", verification_precision);
+    madfunc.compress();
+    compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
+    madfunc.make_nonstandard(false, true);
+    compare_mra_madness(madfunc, nsmap, "nonstandard_result", verification_precision);
+    compare_mra_madness(madconv, convmap, "conv_result", verification_precision);
   }
   world.gop.fence();
 }
