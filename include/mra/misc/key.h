@@ -246,6 +246,13 @@ namespace mra {
         SCOPE bool is_descendant_of(const Key<NDIM>& other) const {
             return other.is_ancestor_of(*this);
         }
+
+        SCOPE Key operator-(const Key& other) const {
+            assert(n == other.n);
+            std::array<Translation,NDIM> l = this->l;
+            for (Dimension d = 0; d < NDIM; ++d) l[d] -= other.l[d];
+            return Key(n, l);
+        }
     };
 
     /// Range object used to iterate over children of a key
