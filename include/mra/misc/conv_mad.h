@@ -189,11 +189,11 @@ namespace mra {
           ops[i] = std::make_shared<const GaussianConvolutionData<T>>();
         }
       }
-        T norm = norm_ns(n, ops);
-        GaussianOperatorData<T, NDIM> ops_data;
-        ops_data.ops = ops;
-        ops_data.norm = norm;
-        ops_data.fac = 1.0;
+      T norm = norm_ns(n, ops);
+      GaussianOperatorData<T, NDIM> ops_data;
+      ops_data.ops = ops;
+      ops_data.norm = norm;
+      ops_data.fac = 1.0;
 
       cachemutex.lock();
       if (_opcache.find(disp) == _opcache.end()) {
@@ -204,8 +204,8 @@ namespace mra {
       cachemutex.unlock();
       auto& r = it->second;
       return r;
-      }
-    };
+    }
+  };
 
 } // namespace mra
 
