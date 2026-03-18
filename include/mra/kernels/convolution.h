@@ -3,8 +3,8 @@
 
 #include <algorithm>
 #include "mra/ops/mxm.h"
-#include "mra/kernels.h"
 #include "mra/kernels/gaxpy.h"
+#include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
@@ -94,7 +94,7 @@ namespace mra{
       T normthresh = 1e-20; // Can potentially be a parameter
 
       if (at[0] && (normr > normthresh/(normr * NDIM))) {
-        conv_transform<T, NDIM>(2*K, fac, transr, f, resultf, work1, work2);
+        conv_transform<T, NDIM>(2*K, fac, transr, f, result, work1, work2);
       }
 
       f0(s0) = f(s0);
@@ -107,8 +107,12 @@ namespace mra{
 
       // TODO: this does not do the same thing as the MADNESS code!
       // MAD: r(s0).gaxpy(1.0,r0,1.0);
-      gaxpy_kernel_impl<T, NDIM>(
-        tmpresult, resultc, result, 1.0, 1.0);
+      //result(s0) += resultc;
+      foreach_idxs(resultc, [&](auto... idxs) {
+        result(idxs...) += tmpresult(idxs...);
+      });
+      //gaxpy_kernel_impl<T, NDIM>(
+      //  tmpresult, resultc, result, 1.0, 1.0);
 
       if (!in.empty()) {
         foreach_idx(result, [&](size_type i) {
