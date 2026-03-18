@@ -7,6 +7,7 @@ namespace mra {
   template
   void submit_convolution_kernel<double, 3>(
     Key<3> key,
+    Key<3> displacement,
     size_type K,
     size_type N,
     const double opnorm,

@@ -574,7 +574,7 @@ namespace mra {
         // empty in node view
         auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
         auto empty_node_view = empty_node.coeffs().current_view();
-        submit_convolution_kernel<T, NDIM>(key, K, N, opnorm, normr, norms, fac, empty_node_view,
+        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, normr, norms, fac, empty_node_view,
                                             in_node_view, out_view, transr, transs, at, tol,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
 
@@ -657,6 +657,7 @@ namespace mra {
 #endif
 
       auto key = keypair.dest;
+      auto displacement = keypair.source - keypair.dest;
 
       //std::cout << "ACCUMULATE " << key << " in_node " << in_node.key() << " applying contribution " << contribution_keys.back()
       //          << " with " << contribution_keys.size() << " contributions left" << std::endl;
@@ -673,7 +674,7 @@ namespace mra {
 
       mra::FunctionsCompressedNode<T, NDIM> out(key, N);
 
-      auto op_data = op.get_op(key.level(), mra::Key<NDIM>(key.level(), {0, 0, 0}));
+      auto op_data = op.get_op(key.level(), mra::Key<NDIM>(displacement));
 
       out.allocate(K, ttg::scope::Allocate);
 
@@ -714,7 +715,7 @@ namespace mra {
       auto out_view = out.coeffs().current_view();
       auto contribution_view = contribution.coeffs().current_view();
       auto in_node_view = in_node.coeffs().current_view();
-      submit_convolution_kernel<T, NDIM>(key, K, N, opnorm, normr, norms, fac, in_node_view,
+      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, normr, norms, fac, in_node_view,
                                           contribution_view, out_view, transr, transs, at, tol,
                                           tmp.current_device_ptr(), ttg::device::current_stream());
 

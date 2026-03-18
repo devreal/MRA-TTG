@@ -125,6 +125,7 @@ namespace mra{
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void convolution_kernel(
       Key<NDIM> key,
+      Key<NDIM> displacement,
       size_type K,
       size_type N,
       const T opnorm,
@@ -169,6 +170,8 @@ namespace mra{
         SYNCTHREADS();
 
         const T cnorm = mra::normf(f);
+
+	      std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm << " opnorm " << opnorm << " tol*fac " << tol << std::endl;
         if (opnorm > 0.01*tol && opnorm*cnorm > tol) {
           convolution_kernel_impl<T, NDIM>(key, K, normr, norms, fac, transr, transs, at, in, f, f0,
             resultf, resultc, tmpresult, result, work1, work2);
@@ -180,6 +183,7 @@ namespace mra{
   template <typename T, Dimension NDIM>
   void submit_convolution_kernel(
     Key<NDIM> key,
+	Key<NDIM> displacement,
     size_type K,
     size_type N,
     const T opnorm,
@@ -201,7 +205,7 @@ namespace mra{
 
     CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
-                (key, K, N, opnorm, normr, norms, fac, in, f, result, transr, transs, at, tol, tmp));
+                (key, displacement, K, N, opnorm, normr, norms, fac, in, f, result, transr, transs, at, tol, tmp));
     checkSubmit();
   }
 
@@ -210,6 +214,7 @@ namespace mra{
   extern template
   void submit_convolution_kernel<double, 3>(
     Key<3> key,
+    Key<3> displacement,
     size_type K,
     size_type N,
     const double opnorm,
