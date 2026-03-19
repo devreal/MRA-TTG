@@ -108,7 +108,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   auto extract_reconstruct = make_extract(reconstruct_result, rmap);
   auto compress_r   = make_compress(N, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
   auto extract_ns = make_extract(compress_r_result, nsmap);
-  auto convolve      = make_convolution(N, K, compress_result, convolution_result, op, precision, "convolution");
+  auto convolve      = make_convolution(N, K, compress_r_result, convolution_result, op, precision, "convolution");
   auto extract_conv  = make_extract(convolution_result, convmap);
   //auto reconstruct_c = make_reconstruct(N, K, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_conv");
   //auto extract_conv  = make_extract(reconstruct_conv_result, convmap);
