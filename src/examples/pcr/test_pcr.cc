@@ -133,10 +133,15 @@ int main(int argc, char **argv) {
   double expnt = opt.parse("-e", 1500.0); // default: 1000.0
   double domain_size = opt.parse("-d", 6.0); // size of the domain cube [-d,d]
   bool print_dot = opt.exists("-dot");
+  bool trace = opt.exists("-trace");
 
   ttg::initialize(argc, argv, cores);
   mra::GLinitialize();
   allocator_init(argc, argv);
+
+  if (trace) {
+    ttg::trace_on();
+  }
 
   /**
    * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the

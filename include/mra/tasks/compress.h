@@ -41,7 +41,7 @@ namespace mra
     // creates the right number of edges for nodes to flow from send_leafs_up to compress
     // send_leafs_up will select the right input for compress
     auto create_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-      return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})...);
+      return ttg::edges(in, ((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})...);
     };
     auto send_to_compress_edges = create_edges(std::make_index_sequence<num_children>{});
     /* append out edge to set of edges */
@@ -49,6 +49,7 @@ namespace mra
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
     auto do_compress = [&, fns, K, name](const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
+                          const mra::FunctionsReconstructedNode<T,NDIM> &in, // the node from the prior op
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in1,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in2,
@@ -89,7 +90,7 @@ namespace mra
           /* some inputs are on the device so submit a kernel */
 
           SparsityInfo sparsity(N);
-          sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
+          sparsity.nonzero_if_any(in, in0, in1, in2, in3, in4, in5, in6, in7);
           //std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
 
           // allocate the result
