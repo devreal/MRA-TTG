@@ -572,9 +572,9 @@ namespace mra {
         auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
         auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
         // empty in node view
-        auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
-        auto empty_node_view = empty_node.coeffs().current_view();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, normr, norms, fac, empty_node_view,
+        //auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
+        //auto empty_node_view = empty_node.coeffs().current_view();
+        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, normr, norms, fac, in_node_view,
                                             in_node_view, out_view, transr, transs, at, tol,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
 
