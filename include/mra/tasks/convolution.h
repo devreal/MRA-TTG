@@ -7,6 +7,7 @@
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
+#include "mra/ops/functions.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
 #include "mra/misc/conv_mad.h"
@@ -21,6 +22,14 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra {
+
+  /********************************
+   * TODO:
+   * - MADNESS agressively screens out contributions, leading to less nodes at the bottom than we have in MRA.
+   * - We need to truncate the the convolution result to screen for norms smaller than the threshold.
+   * - The convolution kernel will return the resulting norm and we can send an empty node if the result is screened out.
+   * - Then we walk up the tree to adjust child leaf status.
+   */
 
 
   namespace detail {
@@ -68,6 +77,20 @@ namespace mra {
         serialize(ar);
       }
     };
+
+    template<size_type NDIM, std::size_t I, std::size_t... Is>
+    void foreach_child_impl(const Key<NDIM>& key, auto&& fn,
+                            std::index_sequence<I, Is...> s) {
+      fn.template operator()<I>(key.child_at(I));
+      if constexpr (sizeof...(Is) > 0) {
+        foreach_child_impl(key, fn, std::index_sequence<Is...>{});
+      }
+    }
+
+    template<size_type NDIM>
+    void foreach_child(const Key<NDIM>& key, auto&& fn) {
+      foreach_child_impl(key, fn, std::make_index_sequence<Key<NDIM>::num_children()>{});
+    }
   } // namespace detail
 
 
@@ -104,6 +127,31 @@ namespace mra {
 
     using ChildLeafInfo = detail::ChildLeafInfo<NDIM>;
 
+    static constexpr const size_type num_children = Key<NDIM>::num_children();
+
+
+    // TAKEN FROM MADNESS:
+    // Tuning here is based on observation that with
+    // sufficiently high-order wavelet relative to the
+    // precision, that only nearest neighbor boxes contribute,
+    // whereas for low-order wavelets more neighbors will
+    // contribute.  Sufficiently high is picked as
+    // k>=2-log10(eps) which is our empirical rule for
+    // efficiency/accuracy and code instrumentation has
+    // previously indicated that (in 3D) just unit
+    // displacements are invoked.  The error decays as R^-(k+1),
+    // and the number of boxes increases as R^d.
+    //
+    // Fac is the expected number of contributions to a given
+    // box, so the error permitted per contribution will be
+    // tol/fac
+
+    // radius of shell (nearest neighbor is diameter of 3 boxes, so radius=1.5)
+    double radius = 1.5 + 0.33 * std::max(0.0, 2 - std::log10(thresh) -
+                                                    K); // 0.33 was 0.5
+    //double radius = 2.5;
+    const double fac = vol_nsphere(NDIM, radius);
+
     /**
      * A set of edges to communicate neighbor nodes.
      */
@@ -119,6 +167,7 @@ namespace mra {
 
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> to_shellN;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> shell0_to_dispatch;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_result;
 
     ttg::Edge<mra::Key<NDIM>, std::vector<detail::KeyPair<NDIM>>> contribution_edge; // connecting the down task to the accumulate dispatch task
 
@@ -186,7 +235,7 @@ namespace mra {
     /* Set the contribution reducer. On the way up, we receive from ourself and our children and send them to our ourself and 6 neighbors,
        as well as our parent.
        Some nodes (leaves, boundaries) receive fewer contributions and will have to be adjusted dynamically by the screener. */
-    constexpr std::size_t num_up_contributions = 1 + Key<NDIM>::num_children(); // contributions from self and children
+    constexpr std::size_t num_up_contributions = 1 + num_children; // contributions from self and children
     up_contributions_tt->template set_input_reducer<0>([](std::vector<detail::KeyPair<NDIM>>& a, const std::vector<detail::KeyPair<NDIM>>& b){
       a.insert(a.end(), b.begin(), b.end());
     }, num_up_contributions);
@@ -278,7 +327,7 @@ namespace mra {
         }
 
         if (node.invalid()) {
-          // send an empty node to the leaf-adjust task because it will not get once from shell0
+          // send an empty node to the leaf-adjust task because it will not get one from shell0
           //std::cout << "DOWN " << key << " node is invalid, sending empty node to adjust leaf task" << std::endl;
           send_out(key, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 3>{});
         }
@@ -401,7 +450,7 @@ namespace mra {
      *       Taking the raw pointer here is a dirty hack!
      */
     auto screener_tt = ttg::make_tt<Space>(
-      [&, N, K, thresh, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
+      [&, N, K, thresh, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
                               const mra::Key<NDIM>& key,
                               const mra::FunctionsCompressedNode<T, NDIM>& in_node,
                               const Tensor<T, 1>& cnorms) -> TASKTYPE {
@@ -426,6 +475,8 @@ namespace mra {
 
         if (!in_node.empty()){
 
+          const double tol = truncate_tol(key, thresh);
+
           /**
            * Compute the cnorm using the norm kernel.
            */
@@ -433,28 +484,40 @@ namespace mra {
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
+//#if 0
+          auto for_each = [&](auto&& fn){
+            for (int d0 = -3; d0 <= 3; ++d0) {
+              for (int d1 = -3; d1 <= 3; ++d1) {
+                for (int d2 = -3; d2 <= 3; ++d2) {
+                  if (!(d0 == 1 && d1 == 0 && d2 == 0)) { // skip self contribution since it is always above the threshold and we will apply it separately
+                    continue;
+                  }
+                  auto disp_key = mra::Key<NDIM>(0, {d0, d1, d2});
+                  mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
+                  if (!neighbor_key.is_valid() || neighbor_key == key) {
+                    continue;
+                  }
+                  fn(disp_key, neighbor_key);
+                }
+              }
+            }
+          };
 
           /**
            * Assemble our list of contributions.
            */
-          for (int d0 = -3; d0 <= 3; ++d0) {
-            for (int d1 = -3; d1 <= 3; ++d1) {
-              for (int d2 = -3; d2 <= 3; ++d2) {
-                auto disp_key = mra::Key<NDIM>(key.level(), {d0, d1, d2});
-                mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
-                if (!neighbor_key.is_valid() || neighbor_key == key) {
-                  continue;
-                }
-                auto op_data = op.get_op(key.level(), disp_key);
-                for (int i = 0; i < N; ++i) {
-                  if (op_data->norm * cnorm_view(i) > thresh) {
-                    contributions.push_back({key, neighbor_key});
-                    break; // if any of the coefficients pass the threshold we add the contribution
-                  }
-                }
+          for_each([&](const auto& disp_key, const auto& neighbor_key){
+            auto op_data = op.get_op(key.level(), disp_key);
+            for (int i = 0; i < N; ++i) {
+              std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
+                        << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
+              if (op_data->norm * cnorm_view(i) > tol / fac) {
+                contributions.push_back({key, neighbor_key});
+                break; // if any of the coefficients pass the threshold we add the contribution
               }
             }
-          }
+          });
+//#endif // 0
 
           //std::cout << "SCREEN " << key << " computed contributions " << contributions.size() << std::endl;
         }
@@ -507,7 +570,7 @@ namespace mra {
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
     auto shell0_tt = ttg::make_tt<Space>(
-      [&, N, K, thresh, name](
+      [&, N, K, fac, thresh, name](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
@@ -535,30 +598,33 @@ namespace mra {
 
         out.allocate(K, ttg::scope::Allocate);
         out.set_ns();
+        mra::apply_leaf_info(out, in_node);
         // set child leaf information
         for (size_type i = 0; i < N; ++i) {
-          for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
+          for (size_type c = 0; c < num_children; ++c) {
             out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
           }
         }
+
+        Tensor<T, 1> resnorms(N, TempScope);
         T normr = 1.0;
         T norms = 1.0;
-        T fac = op_data->fac;
-        T opnorm = op_data->norm * op_data->fac;
-        T tol = thresh*0.01;
+        T opnorm = op_data->norm;
+        T tol = truncate_tol(key, thresh);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
         auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
 
-        for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->Rnorm;
-        for (size_type i = 0; i < NDIM; ++i) norms *= op_data->ops[i]->Snorm;
+        for (size_type d = 0; d < NDIM; ++d) normr *= op_data->ops[d]->Rnorm;
+        for (size_type d = 0; d < NDIM; ++d) norms *= op_data->ops[d]->Snorm;
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
 
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), tmp);
+        auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
+                                        out.coeffs().buffer(), tmp, resnorms.buffer());
         for (Dimension d = 0; d < NDIM; ++d) {
           input.add(op_data->ops[d]->R.buffer());
           input.add(op_data->ops[d]->S.buffer());
@@ -572,14 +638,31 @@ namespace mra {
         auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
         auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
         // empty in node view
-        //auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
-        //auto empty_node_view = empty_node.coeffs().current_view();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, normr, norms, fac, in_node_view,
-                                            in_node_view, out_view, transr, transs, at, tol,
+        auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
+        auto empty_node_view = empty_node.coeffs().current_view();
+        auto resnorms_view = resnorms.current_view();
+        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, normr, norms, fac, tol, /*in_node_view*/ empty_node_view,
+                                            in_node_view, out_view, resnorms_view, transr, transs, at,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
 
+#ifndef MRA_ENABLE_HOST
+        // wait for the norms to come back
+        co_await ttg::device::wait(resnorms.buffer());
+#endif // MRA_ENABLE_HOST
+
+        /* check if the result norms are >0.0 and send an empty node otherwise */
+        bool empty = true;
+        auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
+        for (size_type i = 0; i < N; ++i) {
+          if (resnorms_host_view[i] != 0.0) {
+            empty = false;
+            break;
+          }
+        }
+        if (empty) out.make_empty(); // drop memory if the result is empty
       }
 
+      ttg::trace(name + "-shell0", key, " empty ", out.empty());
       send_out(key, std::move(out));
 
 #ifndef MRA_ENABLE_HOST
@@ -615,7 +698,7 @@ namespace mra {
 
         if (contributions.empty()) {
           // if we have no contributions to apply, just forward the input to the output
-          //std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
+          std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
           send_out(key, in_node, std::integral_constant<std::size_t, 2>{});
         } else {
           // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively
@@ -628,7 +711,7 @@ namespace mra {
         co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(to_shellN, contribution_edge),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, result),
+         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_result),
          "AccumulateDispatch");
 
     /**
@@ -639,7 +722,7 @@ namespace mra {
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
-      [&, N, K, thresh, name](
+      [&, N, K, fac, thresh, name](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
@@ -657,7 +740,8 @@ namespace mra {
 #endif
 
       auto key = keypair.dest;
-      auto displacement = keypair.source - keypair.dest;
+      auto source = keypair.source;
+      auto displacement = key - source;
 
       //std::cout << "ACCUMULATE " << key << " in_node " << in_node.key() << " applying contribution " << contribution_keys.back()
       //          << " with " << contribution_keys.size() << " contributions left" << std::endl;
@@ -672,6 +756,8 @@ namespace mra {
       // remove the current key
       contribution_keys.pop_back();
 
+      bool last_key = contribution_keys.empty();
+
       mra::FunctionsCompressedNode<T, NDIM> out(key, N);
 
       auto op_data = op.get_op(key.level(), mra::Key<NDIM>(displacement));
@@ -679,18 +765,19 @@ namespace mra {
       out.allocate(K, ttg::scope::Allocate);
 
       out.set_ns();
+      mra::apply_leaf_info(out, in_node);
       // set child leaf information
       for (size_type i = 0; i < N; ++i) {
-        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
+        for (size_type c = 0; c < num_children; ++c) {
           out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
         }
       }
+      Tensor<T, 1> resnorms;
       T normr = 1.0;
       T norms = 1.0;
-      T fac = op_data->fac;
-      T opnorm = op_data->norm * op_data->fac;
+      T opnorm = op_data->norm;
       T tol = thresh*0.01;
-      std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
+      std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
       // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
       auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
@@ -700,11 +787,18 @@ namespace mra {
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
+      if (last_key) {
+        resnorms = Tensor<T, 1>(N, TempScope);
+      }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
       for (Dimension d = 0; d < NDIM; ++d) {
         input.add(op_data->ops[d]->R.buffer());
         input.add(op_data->ops[d]->S.buffer());
+      }
+      if (last_key) {
+        // if this is the last we want to get the norms of the result back
+        input.add(resnorms.buffer());
       }
       co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
@@ -715,13 +809,37 @@ namespace mra {
       auto out_view = out.coeffs().current_view();
       auto contribution_view = contribution.coeffs().current_view();
       auto in_node_view = in_node.coeffs().current_view();
-      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, normr, norms, fac, in_node_view,
-                                          contribution_view, out_view, transr, transs, at, tol,
+      auto resnorms_view = resnorms.current_view();
+      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, normr, norms, fac, tol, in_node_view,
+                                          contribution_view, out_view, resnorms_view, transr, transs, at,
                                           tmp.current_device_ptr(), ttg::device::current_stream());
 
-      if (contribution_keys.empty()) {
-         // if this was the last contribution to apply, send the result to the output
-         send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 2>{});
+#ifndef MRA_ENABLE_HOST
+      // wait for norms to come back
+      if (last_key) {
+        co_await ttg::device::wait(resnorms.buffer());
+      }
+#endif // MRA_ENABLE_HOST
+
+
+
+      if (last_key) {
+        bool empty = true;
+        auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
+        for (size_type i = 0; i < N; ++i) {
+          if (resnorms_host_view(i) != 0.0) {
+            empty = false;
+            break;
+          }
+        }
+
+        if (empty) {
+          out.make_empty(); // drop the memory but keep child info
+        }
+
+        // if this was the last contribution to apply, send the result to the output
+        ttg::trace(name, key, ": last contribution, node empty: ", empty);
+        send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 2>{});
       } else {
         // send the result to the next contribution task or output
         send_out(contribution_keys.back(), std::move(out), std::integral_constant<std::size_t, 0>{});
@@ -732,8 +850,79 @@ namespace mra {
       co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(accumulate_node_recurse, screener_to_accumulate, accumulate_contribution_recurse),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, result),
+         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_result),
          "Accumulate");
+
+
+    /***************************************************************************************
+     * Task that dispatches the result to adjust_parent, filling the boolean inputs
+     * for leaf nodes.
+     * TODO: this task should be inlined somehow
+     ***************************************************************************************/
+
+    std::array<ttg::Edge<Key<NDIM>, bool>, num_children> adjust_parent_edges;
+
+    auto dispatch_adjust_parent_tt = ttg::make_tt<Space>(
+      [=](const Key<NDIM>& key, const FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
+        ttg::trace("DispatchAdjustParent", key, "is_all_child_leaf", node.is_all_child_leaf());
+
+        detail::foreach_child(key, [&]<std::size_t I>(const Key<NDIM>& child){
+          if (node.is_child_leaf(child)) {
+            std::cout << "DISPATCH ADJUST PARENT " << key << " child " << child << " is leaf, sending true" << std::endl;
+            ttg::send<I>(key, true);
+          }
+        });
+
+      }, ttg::edges(accumulate_result),
+         ttg::edges(adjust_parent_edges[0], adjust_parent_edges[1], adjust_parent_edges[2], adjust_parent_edges[3],
+                    adjust_parent_edges[4], adjust_parent_edges[5], adjust_parent_edges[6], adjust_parent_edges[7]),
+         "DispatchAdjustParent");
+
+    /***************************************************************************************
+     * Task that receives the result node and booleans from their children indicating
+     * whether the child is empty. This allows us to adjust the child-leaf info of the
+     * parent after all contributions have been accumulated.
+     ***************************************************************************************/
+    auto adjust_parent_tt = ttg::make_tt<Space>(
+      [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node,
+          bool child0, bool child1, bool child2, bool child3,
+          bool child4, bool child5, bool child6, bool child7) -> TASKTYPE {
+        // this task receives the leaf status of our children from the down task and sends it to our parent so that it can adjust its contribution count if necessary
+        auto child_info = std::array{child0, child1, child2, child3, child4, child5, child6, child7};
+
+        bool empty = node.empty();
+        if (!empty) {
+          // TODO: this is so awkward! Get rid of the N iterations
+          for (int n = 0; n < N; ++n) {
+            for (int i = 0; i < child_info.size(); ++i) {
+              node.set_child_leaf(n, i, child_info[i]);
+            }
+          }
+        }
+        std::cout << "ADJUST PARENT " << key << " is empty " << empty << std::endl;
+        if (key.level() > 0) {
+          select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent");
+        }
+
+        // we drop the node if it is empty, the parent will adjust its child-leaf info
+        // accordingly
+        if (!empty) {
+#ifndef MRA_ENABLE_HOST
+          co_await ttg::device::send<8>(key, std::move(node));
+#else
+          ttg::send<8>(key, std::move(node));
+#endif // MRA_ENABLE_HOST
+        }
+      }, ttg::edges(accumulate_result,
+                    adjust_parent_edges[0], adjust_parent_edges[1],
+                    adjust_parent_edges[2], adjust_parent_edges[3],
+                    adjust_parent_edges[4], adjust_parent_edges[5],
+                    adjust_parent_edges[6], adjust_parent_edges[7]),
+         ttg::edges(adjust_parent_edges[0], adjust_parent_edges[1],
+                    adjust_parent_edges[2], adjust_parent_edges[3],
+                    adjust_parent_edges[4], adjust_parent_edges[5],
+                    adjust_parent_edges[6], adjust_parent_edges[7],
+                    result), "AdjustParent");
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       up_contributions_tt->set_keymap(procmap);
@@ -746,6 +935,8 @@ namespace mra {
       adjust_leaf_tt->set_keymap(procmap);
       accumulate_dispatch->set_keymap(procmap);
       accumulate_tt->set_keymap([=](const detail::KeyPair<NDIM>& kp) { return procmap(kp.dest); });
+      dispatch_adjust_parent_tt->set_keymap(procmap);
+      adjust_parent_tt->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       up_contributions_tt->set_devicemap(devicemap);
@@ -758,12 +949,14 @@ namespace mra {
       adjust_leaf_tt->set_devicemap(devicemap);
       accumulate_dispatch->set_devicemap(devicemap);
       accumulate_tt->set_devicemap([=](const detail::KeyPair<NDIM>& kp) { return devicemap(kp.dest); });
+      dispatch_adjust_parent_tt->set_devicemap(devicemap);
+      adjust_parent_tt->set_devicemap(devicemap);
     }
     // TODO: assemble TTG
 
     auto ins = std::make_tuple(screener_tt->template in<0>());
-    auto outs = std::make_tuple(accumulate_tt->template out<2>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(8);
+    auto outs = std::make_tuple(adjust_parent_tt->template out<8>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(10);
     ops[0] = std::move(up_contributions_tt);
     ops[1] = std::move(down_contributions_tt);
     ops[2] = std::move(norm_tt);
@@ -772,14 +965,10 @@ namespace mra {
     ops[5] = std::move(adjust_leaf_tt);
     ops[6] = std::move(accumulate_dispatch);
     ops[7] = std::move(accumulate_tt);
+    ops[8] = std::move(dispatch_adjust_parent_tt);
+    ops[9] = std::move(adjust_parent_tt);
+
     return make_ttg(std::move(ops), ins, outs, name);
-#if 0
-    return std::make_tuple(std::move(up_contributions_tt), std::move(down_contributions_tt), std::move(screener_tt),
-                           //std::move(neighbor_dispatch_tt),
-                           //std::move(rebalance_down),
-                           std::move(adjust_leaf_tt),
-                           std::move(shell0_tt), std::move(accumulate_dispatch), std::move(accumulate_tt));
-#endif
   }
 
 

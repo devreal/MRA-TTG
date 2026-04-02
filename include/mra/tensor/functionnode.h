@@ -167,6 +167,14 @@ namespace mra {
           return m_coeffs.buffer();
         }
 
+        void clear() {
+          m_coeffs.clear();
+        }
+
+        void make_empty() {
+          clear();
+        }
+
         template <typename Archive>
         void serialize(Archive& ar) {
           ar& this->m_key;
@@ -413,6 +421,15 @@ namespace mra {
 
         bool is_ns() const {
           return m_ns;
+        }
+
+        void clear() {
+          base_type::clear();
+          set_all_child_leafs(false);
+        }
+
+        void make_empty() {
+          base_type::clear();
         }
 
         bool is_all_child_leaf() const {

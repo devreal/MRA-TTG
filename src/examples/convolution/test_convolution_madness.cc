@@ -184,7 +184,12 @@ int main(int argc, char **argv) {
   int seed = opt.parse("-s", 5551212);
   int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
   int log_precision = opt.parse("-p", 8); // default: 1e-8
+  bool trace = opt.exists("-trace");
   expnt = opt.parse("-e", expnt);
+
+  if (trace) {
+    ttg::trace_on();
+  }
 
   thresh = std::pow(10, -log_precision);
 

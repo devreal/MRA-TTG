@@ -5,6 +5,7 @@
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/platform.h"
+#include "madness/mra/key.h"
 
 namespace mra {
 
@@ -253,6 +254,21 @@ namespace mra {
             for (Dimension d = 0; d < NDIM; ++d) l[d] -= other.l[d];
             return Key(n, l);
         }
+
+        SCOPE size_type distsq() const {
+            uint64_t dist = 0;
+            for (std::size_t d = 0; d < NDIM; ++d) {
+                dist += l[d] * l[d];
+            }
+            return dist;
+        }
+
+        madness::Key<NDIM> to_madness_key() const {
+            madness::Vector<Translation, NDIM> disp;
+            for (Dimension d = 0; d < NDIM; ++d) disp[d] = l[d];
+            return madness::Key<NDIM>(n, disp);
+        }
+
     };
 
     /// Range object used to iterate over children of a key

@@ -2,7 +2,6 @@
 #define MRA_KERNELS_FCUBE_FOR_MUL_H
 
 #include <cassert>
-#include "mra/kernels.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"

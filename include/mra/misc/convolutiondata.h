@@ -18,10 +18,11 @@ namespace mra {
 
   template <typename T>
   struct ConvolutionData {
-    Tensor<T, 2> R, S;
-    T normR, normS;
+    // Tensors for R and T: (rank x 2D operator matrix)
+    Tensor<T, 3> R, T;
+    T Rnorm, Tnorm;
 
-    ConvolutionData() : R(), S(), normR(0.0), normS(0.0) {}
+    ConvolutionData() : R(), T(), Rnorm(0.0), Tnorm(0.0) {}
   };
 
   /// Nonstandard form of the operator

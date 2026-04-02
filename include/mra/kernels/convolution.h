@@ -46,12 +46,14 @@ namespace mra{
     T* work1ptr = work1.data();
     T* work2ptr = work2.data();
 
+    std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size << " norm f " << normf(f) << " trans " << 0 << normf(trans[0]) << std::endl;
     mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0].data());
 
     size = rank * size / dimk;
     dimi = size / dimk;
 
     for (size_type d = 1; d < NDIM; ++d) {
+      //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size  << " trans " << d << " norm " << norm(trans[d]) << std::endl;
       mTxmq(dimi, rank, dimk, work2ptr, work1ptr, trans[d].data());
       size = rank * size / dimk;
       dimi = size / dimk;
@@ -59,6 +61,8 @@ namespace mra{
     }
 
     detail::axpy_kernel_impl<T, NDIM>(work1, result, mufac);
+    std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size << " result " << normf(result) << std::endl;
+
   }
 
   namespace detail {
@@ -66,10 +70,13 @@ namespace mra{
     template <typename T, Dimension NDIM>
     DEVSCOPE void convolution_kernel_impl(
       Key<NDIM> key,
+      Key<NDIM> displacement,
       size_type K,
+      const T opnorm,
       const T normr,
       const T norms,
       const T fac,
+      const T tol,
       const std::array<TensorView<T, 2>, NDIM>& transr,
       const std::array<TensorView<T, 2>, NDIM>& transs,
       const std::array<bool, 2>& at,
@@ -81,7 +88,8 @@ namespace mra{
       TensorView<T, NDIM>& tmpresult,
       TensorView<T, NDIM>& result,  // size K, stores the sum
       TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2)
+      TensorView<T, NDIM>& work2,
+      T* resnorm_out)
     {
       SHARED TensorView<T, NDIM> work1_k, work2_k;
       SHARED std::array<Slice,NDIM> s0;
@@ -92,33 +100,68 @@ namespace mra{
       }
       SYNCTHREADS();
       T normthresh = 1e-20; // Can potentially be a parameter
+      const T cnorm = mra::normf(f);
+      T resnorm = 0.0;
 
-      if (at[0] && (normr > normthresh/(normr * NDIM))) {
-        conv_transform<T, NDIM>(2*K, fac, transr, f, result, work1, work2);
-      }
+      std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
+                << " opnorm " << opnorm << " tol " << tol << std::endl;
+      if ((cnorm * opnorm > tol / fac) && (cnorm * opnorm > tol / fac)) {
 
-      f0(s0) = f(s0);
+        // TODO: is the third condition valid?
+        if (at[0] && normr > normthresh /*&& (normr > normthresh/(normr * NDIM))*/) {
+          conv_transform<T, NDIM>(2*K, fac, transr, f, result, work1, work2);
+        }
 
-      if (at[1] && (norms > normthresh/(norms * NDIM))) {
-        conv_transform<T, NDIM>(K, -fac, transs, f0, resultc, work1_k, work2_k);
-      }
+        f0(s0) = f(s0);
 
-      tmpresult = resultf(s0);
+        if (at[1] && norms > normthresh /*&& (norms > normthresh/(norms * NDIM))*/) {
+          conv_transform<T, NDIM>(K, -fac, transs, f0, resultc, work1_k, work2_k);
+        }
 
-      // TODO: this does not do the same thing as the MADNESS code!
-      // MAD: r(s0).gaxpy(1.0,r0,1.0);
-      //result(s0) += resultc;
-      foreach_idxs(resultc, [&](auto... idxs) {
-        result(idxs...) += tmpresult(idxs...);
-      });
-      //gaxpy_kernel_impl<T, NDIM>(
-      //  tmpresult, resultc, result, 1.0, 1.0);
 
-      if (!in.empty()) {
-        foreach_idx(result, [&](size_type i) {
-          result[i] += in[i];
+        // TODO: this does not do the same thing as the MADNESS code!
+        // MAD: r(s0).gaxpy(1.0,r0,1.0);
+        //result(s0) += resultc;
+        foreach_idxs(resultc, [&](auto... idxs) {
+          result(idxs...) += resultc(idxs...);
         });
+        //gaxpy_kernel_impl<T, NDIM>(
+        //  tmpresult, resultc, result, 1.0, 1.0);
+
+        // set to zero if norm is below threshold; this is the aggressive screening analogous to MADNESS
+        resnorm = normf(result);
       }
+
+      bool above_threshold = (resnorm > (0.3 * tol / fac));
+
+      //tmpresult = resultf(s0);
+
+      std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement
+                << ", in " << normf(in)
+                << ", tol " << tol << ", fac " << fac
+                << ", result " << resnorm
+                << " above threshold " << above_threshold << std::endl;
+
+      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement << " result \n" << result << std::endl;
+
+      if (!above_threshold) {
+        /* reset result to 0 */
+        result = 0.0;
+      }
+      if (!in.empty()) {
+        /* add input values */
+        result += in;
+      }
+
+      if (resnorm_out != nullptr) {
+        resnorm = normf(result);
+        if (is_team_lead()) {
+          *resnorm_out = resnorm;
+        }
+      }
+
+      std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " result " << resnorm << std::endl;
+
     }
 
     template <typename T, Dimension NDIM>
@@ -132,13 +175,14 @@ namespace mra{
       const T normr,
       const T norms,
       const T fac,
+      const T tol,
       const TensorView<T, NDIM+1> in_view,
       const TensorView<T, NDIM+1> f_view,
       TensorView<T, NDIM+1> result_view,
+      TensorView<T, 1>& resnorms,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transr,
       const std::array<TensorView<T, 2>, (size_t)NDIM> transs,
       const std::array<bool, 2> at,
-      const T tol,
       T* tmp)
     {
       SHARED TensorView<T, NDIM> f0, resultc, work1, work2;
@@ -157,8 +201,6 @@ namespace mra{
         work1     = TensorView<T, NDIM>(&block_tmp_ptr[              3*K2NDIM], 2*K);
         work2     = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 3*K2NDIM], 2*K);
         resultf   = TensorView<T, NDIM>(&block_tmp_ptr[2*TWOK2NDIM + 3*K2NDIM], 2*K);
-        // TODO: overwritten down there, needed?
-        // result    = TensorView<T, NDIM>(&block_tmp_ptr[3*TWOK2NDIM + 3*K2NDIM], 2*K);
       }
 
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
@@ -169,13 +211,10 @@ namespace mra{
         }
         SYNCTHREADS();
 
-        const T cnorm = mra::normf(f);
-
-	      std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm << " opnorm " << opnorm << " tol*fac " << tol << std::endl;
-        if (opnorm > 0.01*tol && opnorm*cnorm > tol) {
-          convolution_kernel_impl<T, NDIM>(key, K, normr, norms, fac, transr, transs, at, in, f, f0,
-            resultf, resultc, tmpresult, result, work1, work2);
-        }
+        convolution_kernel_impl<T, NDIM>(key, displacement, K, opnorm, normr, norms, fac, tol,
+                                         transr, transs, at, in, f, f0,
+                                         resultf, resultc, tmpresult, result, work1, work2,
+                                         resnorms.empty() ? nullptr : &resnorms[blockId]);
       }
     }
   } // namespace detail
@@ -190,13 +229,14 @@ namespace mra{
     const T normr,
     const T norms,
     const T fac,
+    const T tol,
     const TensorView<T, NDIM+1>& in,
     const TensorView<T, NDIM+1>& f,
     TensorView<T, NDIM+1>& result,
+    TensorView<T, 1>& resnorms,
     const std::array<TensorView<T, 2>, (size_t)NDIM>& transr,
     const std::array<TensorView<T, 2>, (size_t)NDIM>& transs,
     const std::array<bool, 2>& at,
-    const T tol,
     T* tmp,
     ttg::device::Stream stream)
   {
@@ -205,7 +245,8 @@ namespace mra{
 
     CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
-                (key, displacement, K, N, opnorm, normr, norms, fac, in, f, result, transr, transs, at, tol, tmp));
+                (key, displacement, K, N, opnorm, normr, norms, fac, tol, in, f, result,
+                 resnorms, transr, transs, at, tmp));
     checkSubmit();
   }
 
@@ -221,13 +262,14 @@ namespace mra{
     const double normr,
     const double norms,
     const double fac,
+    const double tol,
     const TensorView<double, 3+1>& in,
     const TensorView<double, 3+1>& contribution,
     TensorView<double, 3+1>& result,
+    TensorView<double, 1>& resnorms,
     const std::array<TensorView<double, 2>, 3>& transr,
     const std::array<TensorView<double, 2>, 3>& transs,
     const std::array<bool, 2>& at,
-    const double tol,
     double* tmp,
     ttg::device::Stream stream);
 

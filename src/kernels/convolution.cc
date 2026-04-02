@@ -14,13 +14,14 @@ namespace mra {
     const double normr,
     const double norms,
     const double fac,
+    const double tol,
     const TensorView<double, 3+1>& in,
     const TensorView<double, 3+1>& f,
     TensorView<double, 3+1>& result,
+    TensorView<double, 1>& resnorms,
     const std::array<TensorView<double, 2>, 3>& transr,
     const std::array<TensorView<double, 2>, 3>& transs,
     const std::array<bool, 2>& at,
-    const double tol,
     double* tmp,
     ttg::device::Stream stream);
 

@@ -8,6 +8,7 @@
 #include "mra/kernels/transform.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/child_slice.h"
+#include "mra/ops/functions.h"
 
 namespace mra {
 
@@ -27,6 +28,7 @@ namespace mra {
     DEVSCOPE void reconstruct_kernel_impl(
       Key<NDIM> key,
       size_type K,
+      bool accumulate_NS,
       const TensorView<T, NDIM>& node,
       const TensorView<T, 2>& hg,
       const TensorView<T, NDIM>& from_parent,
@@ -38,11 +40,23 @@ namespace mra {
       s = 0.0;
       tmp_node = node;
       auto child_slice = get_child_slice<NDIM>(key, K, 0);
-      if (key.level() != 0) tmp_node(child_slice) = from_parent;
+      // TODO: MADNESS seems to have the parent node already in place on reconstruct. What is going on here?
+      if (key.level() > 0) {
+        if (accumulate_NS) {
+          tmp_node(child_slice) += from_parent;
+        } else {
+          tmp_node(child_slice) = from_parent;
+        }
+      }
+      //if (accumulate_NS && key.level() != 0) tmp_node(child_slice) += from_parent;
+      //std::cout << "MRA-RECONSTRUCT tmp_node " << key << "\n" << tmp_node << std::endl;
 
       //unfilter<T,K,NDIM>(node.get().coeffs, s);
       transform<NDIM>(tmp_node, hg, s, workspace);
 
+      //std::cout << "MRA-RECONSTRUCT " << key << " node norm " << normf(node)
+      //          << " from_parent norm " << normf(from_parent) << " s norm " << normf(s) << std::endl;
+      //std::cout << "MRA-RECONSTRUCT S " << key << "\n" << s << std::endl;
       /* extract all r from s
       * NOTE: we could do this on 1<<NDIM blocks but the benefits would likely be small */
       for (size_type i = 0; i < key.num_children(); ++i) {
@@ -61,6 +75,7 @@ namespace mra {
       Key<NDIM> key,
       size_type N,
       size_type K,
+      bool accumulate_NS,
       TensorView<T, NDIM+1> node_view,
       T* tmp_ptr,
       const TensorView<T, 2> hg,
@@ -93,7 +108,7 @@ namespace mra {
           }
         }
         SYNCTHREADS();
-        reconstruct_kernel_impl(key, K, node, hg, from_parent, s, tmp_node, workspace, block_r_arr);
+        reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr);
       }
     }
   } // namespace detail
@@ -103,6 +118,7 @@ namespace mra {
     const Key<NDIM>& key,
     size_type N,
     size_type K,
+    bool accumulate_NS,
     TensorView<T, NDIM+1>& node,
     const TensorView<T, 2>& hg,
     const TensorView<T, NDIM+1>& from_parent,
@@ -114,7 +130,7 @@ namespace mra {
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, smem_size, stream,
-      (key, N, K, node, tmp, hg, from_parent, r_arr));
+      (key, N, K, accumulate_NS, node, tmp, hg, from_parent, r_arr));
     checkSubmit();
   }
 
@@ -125,6 +141,7 @@ namespace mra {
     const Key<3>& key,
     size_type N,
     size_type K,
+    bool accumulate_NS,
     TensorView<double, 3+1>& node,
     const TensorView<double, 2>& hg,
     const TensorView<double, 3+1>& from_parent,

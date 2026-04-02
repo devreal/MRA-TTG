@@ -2,7 +2,7 @@
 #define MRA_KERNELS_COMPRESS_H
 
 #include <array>
-#include "mra/kernels.h"
+#include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"

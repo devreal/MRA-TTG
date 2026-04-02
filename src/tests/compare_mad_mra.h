@@ -7,6 +7,17 @@
 
 namespace mra {
 
+  namespace detail {
+    std::string madfunc_state(auto& madfunc) {
+      std::string state;
+      if (madfunc.is_compressed()) state += "compressed ";
+      if (madfunc.is_nonstandard()) state += "nonstandard ";
+      if (madfunc.is_reconstructed()) state += "reconstructed ";
+      if (madfunc.is_redundant()) state += "redundant ";
+      return state;
+    }
+  } // namespace detail
+
   template<typename T, typename NodeT, Dimension NDIM>
   void compare_mra_madness(const auto& madfunc, const std::map<Key<NDIM>, NodeT>& mramap, std::string name, T precision = 1e-15)
   {
@@ -14,6 +25,21 @@ namespace mra {
     bool all_zero = true;
     const auto &coeffs = madfunc.get_impl()->get_coeffs();
     std::cout << name << " MRA: " << mramap.size() << " nodes; MAD: " << madfunc.min_nodes() << " nodes" << std::endl;
+#if 0
+    if constexpr (std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
+      if (!madfunc.is_compressed() && !madfunc.is_nonstandard()) {
+        std::cout << name << ": MADNESS function expected as compressed or nonstandard but found "
+                  << detail::madfunc_state(madfunc) << std::endl;
+        throw std::runtime_error(name + ": expected MADNESS function to be either compressed or nonstandard");
+      }
+    } else if constexpr (std::is_same_v<NodeT, mra::FunctionsReconstructedNode<T, NDIM>>) {
+      if (!madfunc.is_reconstructed()) {
+        std::cout << name << ": MADNESS function expected as reconstructed but found "
+                  << detail::madfunc_state(madfunc) << std::endl;
+        throw std::runtime_error(name + ": expected MADNESS function to be reconstructed");
+      }
+    }
+#endif // 0
     for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
       std::array<Translation,NDIM> l;
       for (int i=0; i<NDIM; ++i){
@@ -35,8 +61,8 @@ namespace mra {
                     << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
           //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
         } else {
-          //std::cout << name << ": " << it->first << " with norm " << mad_norm
-          //          << " matches MRA norm " << mra_norm << std::endl;
+          std::cout << name << ": " << it->first << " with norm " << mad_norm
+                    << " matches MRA norm " << mra_norm << std::endl;
         }
       } else {
         // check whether the missing node is a leaf node; MADNESS stores them, MRA does not.

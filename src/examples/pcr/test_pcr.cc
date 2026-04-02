@@ -55,7 +55,7 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
   // C(P)
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   // C(R(C(P)))
   auto compress_r = make_compress(N, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
 
