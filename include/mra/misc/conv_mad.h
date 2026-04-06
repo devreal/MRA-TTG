@@ -9,70 +9,57 @@
 
 namespace mra {
 
-  enum class ConvolutionTensorType {
-    R = 0,
-    RU = 1,
-    RVT = 2,
-    Rs = 3,
-    S = 0,
-    SU = 1,
-    SVT = 2,
-    Ss = 3,
-    Count = 8
+  enum class NormId {
+    Rnorm = 0,
+    Snorm,
+    Rnormf,
+    Snormf,
+    NSnormf,
+    Fac,
+    MUnorm,
+    Count
   };
 
   template <typename T>
-  struct GaussianConvolutionData {
-    /**
-     * 4D Tensor holding all the convolution data for each dimension, across all muops.
-      - Rdata(:,0,:,:) = R
-      - Rdata(:,1,:,:) = RU
-      - Rdata(:,2,:,:) = RVT
-      - Rdata(:,3,0,:) = Rs (singular values of R)
-      - Sdata(:,0,:,:) = S
-      - Sdata(:,1,:,:) = SU
-      - Sdata(:,2,:,:) = SVT
-      - Sdata(:,7,0,:) = Ss (singular values of S)
+  struct ConvolutionData1D {
+#if 0
+    // 4D: rank x [R, RU, RVT] x 2D operator matrix
+    Tensor<T, 4> R, S;
+#endif // 0
 
-      Generally, the structure is data(muop_index, tensor_type, K, K).
-     */
-    Tensor<T, 4> Rdata; // 2K
-    Tensor<T, 4> Sdata; // K
-    Tensor<T, 2> R, S;
-    Tensor<T, 2> RU, RVT, SU, SVT;
-    Tensor<T, 1> Rs, Ss; // singular values of R and S matrix
-    T fac;
-    T Rnorm, Snorm, Rnormf, Snormf, NSnormf;
+    // 3D: rank x [R] x 2D operator matrix
+    Tensor<T, 3> R, S;
 
-    GaussianConvolutionData() : R(), S(), RU(), RVT(), SU(), SVT(),
-                                Rs(), Ss(),
-                                Rnorm(0.0), Snorm(0.0),
-                                Rnormf(0.0), Snormf(0.0), NSnormf(0.0) {}
-    GaussianConvolutionData(Tensor<T, 2>&& R_, Tensor<T, 2>&& S_,
-                              Tensor<T, 2>&& RU_, Tensor<T, 2>&& RVT_,
-                              Tensor<T, 2>&& SU_, Tensor<T, 2>&& SVT_,
-                              Tensor<T, 1>&& Rs_, Tensor<T, 1>&& Ss_,
-                              T Rnorm_, T Snorm_, T Rnormf_, T Snormf_, T NSnormf_)
-      : R(std::move(R_)), S(std::move(S_)),
-        RU(std::move(RU_)), RVT(std::move(RVT_)),
-        SU(std::move(SU_)), SVT(std::move(SVT_)),
-        Rs(std::move(Rs_)), Ss(std::move(Ss_)),
-        Rnorm(Rnorm_), Snorm(Snorm_),
-        Rnormf(Rnormf_), Snormf(Snormf_), NSnormf(NSnormf_) {}
-    GaussianConvolutionData(const GaussianConvolutionData&) = default;
-    GaussianConvolutionData(GaussianConvolutionData&&) = default;
-    ~GaussianConvolutionData() = default;
+    ConvolutionData1D() : R(), S(){}
+    ConvolutionData1D(size_type rank, size_type K)
+    : R(std::array{rank, 2*K, 2*K}, ttg::scope::SyncIn)
+    , S(std::array{rank, K, K}, ttg::scope::SyncIn)
+    { }
+    ConvolutionData1D(Tensor<T, 3>&& R_,
+                      Tensor<T, 3>&& S_)
+    : R(std::move(R_))
+    , S(std::move(S_))
+    { }
+    ConvolutionData1D(const ConvolutionData1D&) = default;
+    ConvolutionData1D(ConvolutionData1D&&) = default;
+    ~ConvolutionData1D() = default;
   };
 
-  template <typename T, Dimension NDIM>
-  struct GaussianOperatorData {
-    std::array<std::shared_ptr<const GaussianConvolutionData<T>>, NDIM> ops;
+  template<typename T, size_type NDIM>
+  struct ConvolutionData {
+    std::array<std::shared_ptr<const ConvolutionData1D<T>>, NDIM> data;
+    // also taken from MADNESS
+    // 3D: rank x NDIM x [Rnorm, Snorm, Rnormf, Snormf, NSnormf]
+    //     fac & munorm of each separated term is stored in the same tensor, at dim 0
+    Tensor<T, 3> norms;
     T norm;
-    T fac;
-    GaussianOperatorData() : ops{}, norm(0.0), fac(1.0) {}
-    GaussianOperatorData(const GaussianOperatorData&) = default;
-    GaussianOperatorData(GaussianOperatorData&&) = default;
-    ~GaussianOperatorData() = default;
+
+    ConvolutionData(size_type rank)
+    : data()
+    , norms(std::array{rank, NDIM, (size_type)NormId::Count}, ttg::scope::SyncIn)
+    , norm(-1.0)
+    { }
+
   };
 
   template <typename T, Dimension NDIM>
@@ -87,15 +74,70 @@ namespace mra {
     : mad_conv_sep(mad_conv_sep)
     { }
 
-    std::shared_ptr<const GaussianOperatorData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
+    /**
+     * Assembles ConvolutionData for the level and displacement.
+     */
+    std::shared_ptr<const ConvolutionData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
       cachemutex.lock();
-      auto it = _opcache.find(disp);
-      cachemutex.unlock();
-      if (it != _opcache.end()) {
+      auto key = Key<NDIM>(n, disp.translation());
+      auto it = _datacache.find(key);
+      if (it != _datacache.end()) {
+        cachemutex.unlock();
         return it->second;
       }
-
-      return make_op(n, disp);
+      /**
+       * First time looking for this Level/displacement.
+       * We generate the data out of MADNESS and store our own version of it.
+       * Start with assembling the ConvolutionData1D for each dimension.
+       * The 1D data is cached so we might reuse if from other displacements.
+       */
+      auto data = std::make_shared<ConvolutionData<T, NDIM>>(mad_conv_sep.get_rank());
+      for (int d = 0; d < NDIM; ++d) {
+        auto key_1d = std::make_pair(n, disp.translation()[d]);
+        auto it = _opcache.find(key_1d);
+        if (it == _opcache.end()) {
+          cachemutex.unlock();
+          // compute new data
+          auto data = make_op1d(n, disp.translation()[d], d);
+          cachemutex.lock();
+          // check if someone else generated this data
+          if (_opcache.find(key_1d) == _opcache.end()) {
+            auto [it_, inserted] = _opcache.insert(std::make_pair(key_1d, std::move(data)));
+            it = it_;
+          }
+        }
+        assert(it != _opcache.end());
+        data->data[d] = it->second;
+      }
+      /**
+       * Assemble the norms for each dimension and store the fac of each term.
+       */
+      auto& mad_ops = mad_conv_sep.get_ops();
+      auto norms_view = data->norms.view_on(ttg::device::Device::host());
+      for (int i = 0; i < mad_ops.size(); ++i) {
+        for (int d = 0; d < NDIM; ++d) {
+          auto cd_mad = mad_ops[i].getop(d)->nonstandard(n, disp.translation()[d]);
+          norms_view(i, d, (int)NormId::Rnorm) = cd_mad->Rnorm;
+          norms_view(i, d, (int)NormId::Snorm) = cd_mad->Tnorm;
+          norms_view(i, d, (int)NormId::Rnormf) = cd_mad->Rnormf;
+          norms_view(i, d, (int)NormId::Snormf) = cd_mad->Tnormf;
+          norms_view(i, d, (int)NormId::NSnormf) = cd_mad->NSnormf;
+        }
+        norms_view(i, 0, (int)NormId::Fac) = mad_ops[i].getfac();
+        norms_view(i, 0, (int)NormId::MUnorm) = munorm2_ns(n, i, data);
+      }
+      /* Finally, store the norm of the whole operator */
+      T norm = mad_conv_sep.norm(n, disp.to_madness_key(), disp.to_madness_key());
+      data->norm = norm;
+      it = _datacache.find(key);
+      if (it != _datacache.end()) {
+        cachemutex.unlock();
+        return it->second;
+      }
+      // insert new
+      _datacache.insert(std::make_pair(key, data));
+      cachemutex.unlock();
+      return data;
     }
 
   private:
@@ -103,42 +145,76 @@ namespace mra {
     //madness::GaussianConvolution1D<double> conv1d;
     // madness separate convolution object, provided by application
     madness::SeparatedConvolution<T, NDIM>& mad_conv_sep;
-    // our own cache of operator data
-    mutable std::map<Key<NDIM>, std::shared_ptr<const GaussianOperatorData<T, NDIM>>> _opcache;
+    // our own cache of full operator data for each [Level, Translation] (encoded as Key)
+    // includes all terms and dimensions
+    mutable std::map<std::pair<Level, Translation>, std::shared_ptr<const ConvolutionData1D<T>>> _opcache;
+    mutable std::map<Key<NDIM>, std::shared_ptr<const ConvolutionData<T, NDIM>>> _datacache;
     mutable std::mutex cachemutex;
 
-    T norm_ns(Level n, std::array<std::shared_ptr<const GaussianConvolutionData<T>>, NDIM>& ns) const {
-      T prodR = 1.0, prodS = 1.0;
-      for (size_type i = 0; i < NDIM; ++i) {
-        prodR *= ns[i]->Rnormf;
-        prodS *= ns[i]->Snormf;
+    template<typename TV>
+    void copy_from_madtensor(TV&& tv, const madness::Tensor<T>& m) const {
+      assert(tv.size() == m.size());
+      for (size_type i = 0; i < m.size(); ++i) {
+        tv[i] = m.ptr()[i];
       }
-
-      T prod = 1.0, sum = 0.0;
-      for (size_type i = 0; i < NDIM; ++i) {
-        T a = ns[i]->NSnormf;
-        T b = ns[i]->Snormf;
-        T aa = std::min(a, b);
-        T bb = std::max(a, b);
-        prod *= bb;
-        if (bb > 0) sum += aa / bb;
-      }
-
-      if (n) prod*=sum;
-      prodR *= prod;
-      return prodR;
     }
 
-    std::shared_ptr<const GaussianOperatorData<T, NDIM>> make_op(Level n, Key<NDIM> disp) const {
+    /**
+     * Assembles ConvolutionData1D for the level and displacement, for the given dimension.
+     * Note that the same 1D data may be shared across multiple dimensions and/or terms,
+     * depending on what MADNESS provides.
+     * This function does not modify the cache.
+     */
+    std::shared_ptr<const ConvolutionData1D<T>> make_op1d(Level n, Translation l, Dimension d) const {
 
-      cachemutex.lock();
-      auto it = _opcache.find(disp);
-      if (it != _opcache.end()) {
-        auto& r = it->second;
-        cachemutex.unlock();
-        return r;
+      auto& mad_ops = mad_conv_sep.get_ops();
+      auto data = std::make_shared<ConvolutionData1D<T>>(mad_ops.size(), mad_conv_sep.get_k());
+      auto rv = data->R.view_on(ttg::device::Device::host());
+      auto sv = data->S.view_on(ttg::device::Device::host());
+      for (int i = 0; i < mad_ops.size(); ++i) {
+        const madness::ConvolutionData1D<T>* cd_mad;
+        std::shared_ptr<const madness::Convolution1D<T> > conv1d = mad_ops[i].getop(d);
+        cd_mad = conv1d->nonstandard(n, l);
+        if (!(cd_mad->R.size() == 0 && cd_mad->T.size() == 0)) {
+          copy_from_madtensor(rv(i, 0), cd_mad->R);
+          //copy_from_madtensor(rv(i, 1), cd_mad->RU);
+          //copy_from_madtensor(rv(i, 2), cd_mad->RVT);
+          copy_from_madtensor(sv(i, 0), cd_mad->T); // S = T for us
+          //copy_from_madtensor(sv(i, 1), cd_mad->TU);
+          //copy_from_madtensor(sv(i, 2), cd_mad->TVT);
+        }
       }
-      cachemutex.unlock();
+      return data;
+    }
+
+
+    /// Taken from MADNESS, since munorm2_ns is private in SeparatedConvolution
+    /// and we have no way to get the norm otherwise.
+    /// Computes the Frobenius norm of one of the separated terms for the NS form
+    ///       ... WITHOUT FACTOR INCLUDED
+    /// compute for 1 term, all dim, 1 disp, essentially for SeparatedConvolutionInternal
+    double munorm2_ns(Level n, size_type mu, const std::shared_ptr<const ConvolutionData<T, NDIM>>& data) const {
+
+        double prodR=1.0;
+        double prod=1.0, sum=0.0;
+        auto norms_view = data->norms.view_on(ttg::device::Device::host());
+        for (std::size_t d=0; d<NDIM; ++d) {
+            double a = norms_view(mu, d, (int)NormId::NSnormf);
+            double b = norms_view(mu, d, (int)NormId::Snormf);
+            double aa = std::min(a,b);
+            double bb = std::max(a,b);
+            prod *= bb;
+            if (bb > 0.0) sum +=(aa/bb);
+        }
+        if (n) prod *= sum;
+        prodR = prod;
+
+        return prodR;
+    }
+
+
+#if 0
+    std::shared_ptr<const ConvolutionData<T, NDIM>> make_op(Level n, Key<NDIM> disp) const {
 
       // call madness nonstandard function to populate GaussianConvolutionData for each dimension
       std::array<std::shared_ptr<const GaussianConvolutionData<T>>, NDIM> ops;
@@ -243,6 +319,7 @@ namespace mra {
       auto& r = it->second;
       return r;
     }
+#endif // 0
   };
 
 } // namespace mra

@@ -16,7 +16,7 @@ namespace mra {
       const T scalarA)
     {
       foreach_idx(nodeR, [&](size_type i) {
-        nodeR[i] = scalarA*nodeA[i] + nodeR[i];
+        nodeR[i] += scalarA*nodeA[i];
       });
     }
 

@@ -600,15 +600,13 @@ namespace mra {
         out.set_ns();
         mra::apply_leaf_info(out, in_node);
         // set child leaf information
-        for (size_type i = 0; i < N; ++i) {
-          for (size_type c = 0; c < num_children; ++c) {
-            out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
-          }
-        }
+        //for (size_type i = 0; i < N; ++i) {
+        //  for (size_type c = 0; c < num_children; ++c) {
+        //    out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
+        //  }
+        //}
 
         Tensor<T, 1> resnorms(N, TempScope);
-        T normr = 1.0;
-        T norms = 1.0;
         T opnorm = op_data->norm;
         T tol = truncate_tol(key, thresh);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
@@ -616,18 +614,16 @@ namespace mra {
 
         auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
 
-        for (size_type d = 0; d < NDIM; ++d) normr *= op_data->ops[d]->Rnorm;
-        for (size_type d = 0; d < NDIM; ++d) norms *= op_data->ops[d]->Snorm;
-
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
                                         out.coeffs().buffer(), tmp, resnorms.buffer());
+        input.add(op_data->norms.buffer());
         for (Dimension d = 0; d < NDIM; ++d) {
-          input.add(op_data->ops[d]->R.buffer());
-          input.add(op_data->ops[d]->S.buffer());
+          input.add(op_data->data[d]->R.buffer());
+          input.add(op_data->data[d]->S.buffer());
         }
         co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
@@ -635,15 +631,16 @@ namespace mra {
         auto in_node_view = in_node.coeffs().current_view();
         auto out_view = out.coeffs().current_view();
 
-        auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
-        auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
+        auto opnorms_view = op_data->norms.current_view();
+        auto transr = std::array{op_data->data[0]->R.current_view(), op_data->data[1]->R.current_view(), op_data->data[2]->R.current_view()};
+        auto transs = std::array{op_data->data[0]->S.current_view(), op_data->data[1]->S.current_view(), op_data->data[2]->S.current_view()};
         // empty in node view
         auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
         auto empty_node_view = empty_node.coeffs().current_view();
         auto resnorms_view = resnorms.current_view();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, normr, norms, fac, tol, /*in_node_view*/ empty_node_view,
-                                            in_node_view, out_view, resnorms_view, transr, transs, at,
-                                            tmp.current_device_ptr(), ttg::device::current_stream());
+        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, fac, tol, /*in_node_view*/ empty_node_view,
+                                            in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
+                                            at, tmp.current_device_ptr(), ttg::device::current_stream());
 
 #ifndef MRA_ENABLE_HOST
         // wait for the norms to come back
@@ -767,23 +764,18 @@ namespace mra {
       out.set_ns();
       mra::apply_leaf_info(out, in_node);
       // set child leaf information
-      for (size_type i = 0; i < N; ++i) {
-        for (size_type c = 0; c < num_children; ++c) {
-          out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
-        }
-      }
+      //for (size_type i = 0; i < N; ++i) {
+      //  for (size_type c = 0; c < num_children; ++c) {
+      //    out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
+      //  }
+      //}
       Tensor<T, 1> resnorms;
-      T normr = 1.0;
-      T norms = 1.0;
       T opnorm = op_data->norm;
-      T tol = thresh*0.01;
+      T tol = truncate_tol(key, thresh);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
       // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
       auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
-
-      for (size_type i = 0; i < NDIM; ++i) normr *= op_data->ops[i]->Rnorm;
-      for (size_type i = 0; i < NDIM; ++i) norms *= op_data->ops[i]->Snorm;
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -792,9 +784,10 @@ namespace mra {
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
+      input.add(op_data->norms.buffer());
       for (Dimension d = 0; d < NDIM; ++d) {
-        input.add(op_data->ops[d]->R.buffer());
-        input.add(op_data->ops[d]->S.buffer());
+        input.add(op_data->data[d]->R.buffer());
+        input.add(op_data->data[d]->S.buffer());
       }
       if (last_key) {
         // if this is the last we want to get the norms of the result back
@@ -803,15 +796,17 @@ namespace mra {
       co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
-      auto transr = std::array{op_data->ops[0]->R.current_view(), op_data->ops[1]->R.current_view(), op_data->ops[2]->R.current_view()};
-      auto transs = std::array{op_data->ops[0]->S.current_view(), op_data->ops[1]->S.current_view(), op_data->ops[2]->S.current_view()};
+      auto transr = std::array{op_data->data[0]->R.current_view(), op_data->data[1]->R.current_view(), op_data->data[2]->R.current_view()};
+      auto transs = std::array{op_data->data[0]->S.current_view(), op_data->data[1]->S.current_view(), op_data->data[2]->S.current_view()};
 
+      auto opnorms_view = op_data->norms.current_view();
       auto out_view = out.coeffs().current_view();
       auto contribution_view = contribution.coeffs().current_view();
       auto in_node_view = in_node.coeffs().current_view();
       auto resnorms_view = resnorms.current_view();
-      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, normr, norms, fac, tol, in_node_view,
-                                          contribution_view, out_view, resnorms_view, transr, transs, at,
+      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, fac, tol, in_node_view,
+                                          contribution_view, out_view, resnorms_view, transr, transs,
+                                          opnorms_view, at,
                                           tmp.current_device_ptr(), ttg::device::current_stream());
 
 #ifndef MRA_ENABLE_HOST

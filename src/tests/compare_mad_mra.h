@@ -59,7 +59,17 @@ namespace mra {
           check = false;
           std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
                     << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
-          //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
+          auto mra_view = mra_coeff->second.coeffs().current_view();
+          for (int i = 0; i < mad_coeff.coeff().dim(0); ++i) {
+            for (int j = 0; j < mad_coeff.coeff().dim(1); ++j) {
+              for (int k = 0; k < mad_coeff.coeff().dim(2); ++k) {
+                 if (std::abs(mad_coeff.coeff()(i, j, k) - mra_view(0, i, j, k)) > precision) {
+                  std::cout << "    DIFF at coeff (" << i << ", " << j << ", " << k << "): MAD " << mad_coeff.coeff()(i, j, k)
+                            << " vs MRA " << mra_view(0, i, j, k) << " DIFF " << mad_coeff.coeff()(i, j, k) - mra_view(0, i, j, k) << std::endl;
+                }
+              }
+            }
+          }
         } else {
           std::cout << name << ": " << it->first << " with norm " << mad_norm
                     << " matches MRA norm " << mra_norm << std::endl;
