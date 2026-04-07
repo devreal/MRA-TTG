@@ -695,7 +695,7 @@ namespace mra {
 
         if (contributions.empty()) {
           // if we have no contributions to apply, just forward the input to the output
-          std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
+          //std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
           send_out(key, in_node, std::integral_constant<std::size_t, 2>{});
         } else {
           // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively
@@ -863,7 +863,7 @@ namespace mra {
 
         detail::foreach_child(key, [&]<std::size_t I>(const Key<NDIM>& child){
           if (node.is_child_leaf(child)) {
-            std::cout << "DISPATCH ADJUST PARENT " << key << " child " << child << " is leaf, sending true" << std::endl;
+            //std::cout << "DISPATCH ADJUST PARENT " << key << " child " << child << " is leaf, sending true" << std::endl;
             ttg::send<I>(key, true);
           }
         });
@@ -894,7 +894,7 @@ namespace mra {
             }
           }
         }
-        std::cout << "ADJUST PARENT " << key << " is empty " << empty << std::endl;
+        //std::cout << "ADJUST PARENT " << key << " is empty " << empty << std::endl;
         if (key.level() > 0) {
           select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent");
         }

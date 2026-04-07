@@ -244,8 +244,8 @@ namespace mra{
       const T cnorm = mra::normf(f);
       T resnorm = 0.0;
 
-      std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
-                << " opnorm " << opnorm << " tol " << tol << std::endl;
+      //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
+      //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
 
         apply_conv(K, fac, (tol / fac / cnorm), transr, transs,
@@ -258,13 +258,13 @@ namespace mra{
 
       bool above_threshold = (resnorm > (0.3 * tol / fac));
 
-      std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement
-                << ", in " << normf(in)
-                << ", tol " << tol << ", fac " << fac
-                << ", result " << resnorm
-                << " above threshold " << above_threshold << std::endl;
+      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement
+      //          << ", in " << normf(in)
+      //          << ", tol " << tol << ", fac " << fac
+      //          << ", result " << resnorm
+      //          << " above threshold " << above_threshold << std::endl;
 
-      std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement << " result \n" << result << std::endl;
+      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement << " result \n" << result << std::endl;
 
       // if not above the threshold in FunctionImpl::do_apply we drop the result
       if (!above_threshold) {
@@ -284,7 +284,7 @@ namespace mra{
         }
       }
 
-      std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " result " << resnorm << std::endl;
+      //std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " result " << resnorm << std::endl;
 
     }
 
