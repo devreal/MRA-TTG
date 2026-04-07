@@ -7,6 +7,11 @@
 
 using namespace mra;
 
+using coord_t = madness::Vector<double, 3>;
+using real_factory_t = madness::FunctionFactory<double, 3>;
+using real_function_t = madness::Function<double, 3>;
+using real_convolution_t = madness::SeparatedConvolution<double, 3>;
+
 template<typename T, mra::Dimension NDIM>
 void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T expnt_arg, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
@@ -41,8 +46,13 @@ void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T 
     if (seed == 0) std::cout << N << " Gaussians with expnt " << expnt_arg << std::endl;
   }
 
-  T coeff = 10.0; // coefficient for the Gaussian
-  mra::GaussianConvolutionOperator<T, NDIM> op(K, expnt, coeff);
+  double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
+  madness::World world(SafeMPI::COMM_WORLD);
+  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
+  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
+  real_convolution_t mad_conv(world, ops, K);
+
+  mra::GaussianConvolutionOperator<T, NDIM> op(mad_conv);
 
   std::vector<std::unique_ptr<ttg::TTBase>> tts;
 

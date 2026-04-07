@@ -16,7 +16,6 @@ using namespace mra;
 static double Length = 6.0;
 // static double width = 2*Length;
 static double expnt = 1500.0;
-static double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
 static const int init_lev = 2;
 
 using coord_t = madness::Vector<double, 3>;
@@ -184,10 +183,11 @@ int main(int argc, char **argv) {
   madness::FunctionDefaults<3>::set_thresh(precision);
   madness::FunctionDefaults<3>::set_initial_level(init_lev);
 
+  double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   madness::World world(SafeMPI::COMM_WORLD);
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
   ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
-  real_convolution_t op(world, ops, K);
+  real_convolution_t mad_conv(world, ops, K);
 
 
   if (ttg::default_execution_context().rank() == 0) {
@@ -201,7 +201,7 @@ int main(int argc, char **argv) {
   }
 
   test_convolution<double, 3>(N, K, precision, max_level,
-                             std::pow(10, -verification_log_precision), op);
+                             std::pow(10, -verification_log_precision), mad_conv);
 
   mra::finalize();
 }

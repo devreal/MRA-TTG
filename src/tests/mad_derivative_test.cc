@@ -204,7 +204,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis, T precision, in
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
   auto extract_compress = make_extract(compress_result, compmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
   // D(R(C(P)))
   auto extract_u = make_extract(reconstruct_result, umap);
   auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,

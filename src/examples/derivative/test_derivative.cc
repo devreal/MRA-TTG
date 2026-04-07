@@ -56,7 +56,7 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp");
   auto compress_d = make_compress(N, K, is_ns, functiondata, project_d_result, compress_d_result, "compress-Dcp");
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
+  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp");
   // D(R(C(P)))
   auto derivative = make_derivative(N, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis,
                                     FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
@@ -109,12 +109,9 @@ int main(int argc, char **argv) {
   int max_level = opt.parse("-l", -1);
   int domain = opt.parse("-d", 6);
 
-  ttg::initialize(argc, argv, cores);
-  mra::GLinitialize();
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv, cores);
 
   test_derivative<double, 3>(N, K, axis, std::pow(10, -log_precision), max_level, domain);
 
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

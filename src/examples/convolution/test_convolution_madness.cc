@@ -42,8 +42,6 @@ static const double L = 12.0;      // box size
 static double thresh = 1e-6; // precision
 
 static double expnt = 1000.0;
-static double fac = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
-static double coeff = fac;
 
 using real_factory_t = madness::FunctionFactory<double, 3>;
 using real_function_t = madness::Function<double, 3>;
@@ -122,6 +120,7 @@ real_functor_3d fixed_gaussian() {
   for (int i = 0; i < 3; i++) {
     origin[i] = 0.0;
   }
+  double coeff = pow(2.0 * expnt / constants::pi, 0.75);
   return real_functor_3d(new Gaussian(origin, expnt, coeff));
 }
 
@@ -142,6 +141,7 @@ void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
   default_random_generator.setstate(
       99); // Ensure all processes have the same state
 
+  double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
   ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
 
@@ -186,10 +186,6 @@ int main(int argc, char **argv) {
   int log_precision = opt.parse("-p", 8); // default: 1e-8
   bool trace = opt.exists("-trace");
   expnt = opt.parse("-e", expnt);
-
-  if (trace) {
-    ttg::trace_on();
-  }
 
   thresh = std::pow(10, -log_precision);
 

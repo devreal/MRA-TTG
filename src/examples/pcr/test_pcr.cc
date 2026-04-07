@@ -113,9 +113,7 @@ int main(int argc, char **argv) {
   int initial_level = opt.parse("-i", 2);
   int seed    = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
 
-  ttg::initialize(argc, argv, cores);
-  mra::GLinitialize();
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv, cores);
 
   /**
    * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the
@@ -125,6 +123,5 @@ int main(int argc, char **argv) {
     test_pcr<double, 3>(N, K, max_level, seed, initial_level);
   }
 
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

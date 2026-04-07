@@ -127,7 +127,7 @@ auto compute_conv_mra(size_type N, size_type K, T precision, int domain, int max
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
   auto compress = make_compress(N, K, false, functiondata, project_result, compress_result, "compress");
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
   auto extract = make_extract(reconstruct_result, rmap);
 
   auto connected = make_graph_executable(start.get());
