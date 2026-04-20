@@ -8,13 +8,14 @@
 #include "mra/misc/platform.h"
 #include "mra/tensor/cycledim.h"
 #include "mra/tensor/tensorview.h"
+#include "mra/kernels/transform_rocwmma.h"
 
 //#define MRA_CUDA_ENABLE_SHARED_TRANSFORM
 
 namespace mra {
 
 
-#if defined(MRA_CUDA_ENABLE_SHARED_TRANSFORM) && defined(MRA_ENABLE_CUDA) && defined(MRA_HAVE_CUBLASDX)
+#if !defined(MRA_HAVE_TRANSFORM_SHARED) && defined(MRA_CUDA_ENABLE_SHARED_TRANSFORM) && defined(MRA_ENABLE_CUDA) && defined(MRA_HAVE_CUBLASDX)
   template <Dimension NDIM, typename T>
   SCOPE bool transform_shared(
     const TensorView<T, NDIM>& t,
@@ -50,7 +51,7 @@ namespace mra {
     /* no need to synchronize here, mTxmq synchronizes */
     return true;
   }
-#else // defined(MRA_ENABLE_CUDA)
+#else !defined(MRA_HAVE_TRANSFORM_SHARED) // defined(MRA_HAVE_TRANSFORM_SHARED)
   template <Dimension NDIM, typename T>
   SCOPE bool transform_shared(
     const TensorView<T, NDIM>& t,
@@ -140,6 +141,25 @@ namespace mra {
         SYNCTHREADS();
       }
     }
+
+#if !defined (MRA_HAVE_TRANSFORM_SHARED)
+    /**
+     * Returns the size of shared memory needed for the transform operation.
+     * If we have a specialized shared memory implementation,
+     * it will provide its own implementation of this function.
+     *
+     */
+    template<typename T>
+    constexpr size_type transform_shmem_size(size_type K) {
+      return 0;
+    }
+
+    template <typename T>
+    inline Dim3 transform_blockdim(int K) {
+      return max_thread_dims(K);
+    }
+
+#endif // !defined (MRA_HAVE_TRANSFORM_SHARED)
 
 } // namespace mra
 

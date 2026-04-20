@@ -345,11 +345,10 @@ namespace mra {
     const int bc_right,
     ttg::device::Stream stream)
   {
-    size_type max_threads = std::min(K, MRA_MAX_K_SIZET);
-    Dim3 thread_dims = Dim3(max_threads, max_threads, 1);
-
-    auto smem_size = std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
-                              mTxmq_shmem_size<T>(2*K));
+    Dim3 thread_dims = transform_blockdim(K);
+    auto smem_size = transform_shmem_size<T>(2*K);
+    smem_size = std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
+                         smem_size); // used in transform
 
     CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::derivative_kernel, N, thread_dims, smem_size, stream,

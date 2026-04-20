@@ -171,9 +171,12 @@ namespace mra {
      * Computation on functions is embarassingly parallel and no
      * synchronization is required.
      */
-    Dim3 thread_dims = max_thread_dims(K);
 
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    Dim3 thread_dims = transform_blockdim(K);
+    auto smem_size = transform_shmem_size<T>(2*K);
+    smem_size = std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
+                         smem_size); // used in transform
+
     CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
     /* launch one block per child */
     CALL_KERNEL(detail::fcoeffs_kernel, N, thread_dims, smem_size, stream,

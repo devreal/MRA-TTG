@@ -114,9 +114,8 @@ namespace mra {
     const std::array<TensorView<T, NDIM+1>, Key<NDIM>::num_children()>& in_views,
     ttg::device::Stream stream)
   {
-    Dim3 thread_dims = max_thread_dims(2*K);
-
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    Dim3 thread_dims = transform_blockdim(2*K);
+    auto smem_size = transform_shmem_size<T>(2*K);
     CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::compress_kernel, N, thread_dims, smem_size, stream,
       (key, N, K, is_ns, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
