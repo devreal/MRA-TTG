@@ -585,7 +585,7 @@ namespace mra {
               make_batch_manager(procmap.batch_manager()->num_functions(),
                                  procmap.batch_manager()->num_local_batches(),
                                  DeviceInfo(),
-                                 BatchDistribution::FULL),
+                                 BatchDistribution::SINGLE_PE),
               target_level);
   }
 
