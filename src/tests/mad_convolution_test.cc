@@ -145,7 +145,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
     //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
     madfunc.make_nonstandard(false, true);
     compare_mra_madness(madfunc, nsmap, "nonstandard_result", verification_precision);
-    compare_mra_madness(madconv, convmap, "conv_result", verification_precision);
+    compare_mra_madness(madconv, rconvmap, "conv_result", verification_precision);
   }
   mad_conv.get_world().gop.fence();
 }
