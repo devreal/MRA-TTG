@@ -162,7 +162,13 @@ int main(int argc, char **argv) {
   int max_level = opt.parse("-l", -1);
   Length = opt.parse("-d", Length);
   bool norand = opt.exists("-norand");
-  int verification_log_precision = opt.parse("-v", 12); // default: 1e-12
+  /**
+   * Adaptively set log precision based on the K the user selected.
+   * NOTE: MRA/TTG does not use low-rank operator matrices and instead
+   *       does full-rank every time. This leads to slight deviations
+   *       below the user-selected threshold.
+   */
+  int verification_log_precision = opt.parse("-v", std::min(12, log_precision+2));
   bool trace = opt.exists("-trace");
 
   auto precision = std::pow(10, -log_precision);
