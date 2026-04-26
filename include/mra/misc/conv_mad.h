@@ -176,10 +176,10 @@ namespace mra {
         std::shared_ptr<const madness::Convolution1D<T> > conv1d = mad_ops[i].getop(d);
         cd_mad = conv1d->nonstandard(n, l);
         if (!(cd_mad->R.size() == 0 && cd_mad->T.size() == 0)) {
-          copy_from_madtensor(rv(i, 0), cd_mad->R);
+          copy_from_madtensor(rv(i), cd_mad->R);
           //copy_from_madtensor(rv(i, 1), cd_mad->RU);
           //copy_from_madtensor(rv(i, 2), cd_mad->RVT);
-          copy_from_madtensor(sv(i, 0), cd_mad->T); // S = T for us
+          copy_from_madtensor(sv(i), cd_mad->T); // S = T for us
           //copy_from_madtensor(sv(i, 1), cd_mad->TU);
           //copy_from_madtensor(sv(i, 2), cd_mad->TVT);
         }

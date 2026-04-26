@@ -49,8 +49,8 @@ namespace mra{
       T* work1ptr = work1.data();
       T* work2ptr = work2.data();
 
-      std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size
-                << " norm f " << normf(f) << " trans " << 0 << normf(trans[0](mu)) << std::endl;
+      //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size
+      //          << " norm f " << normf(f) << " trans " << 0 << normf(trans[0](mu)) << std::endl;
       mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0](mu).data());
 
       size = rank * size / dimk;
@@ -65,8 +65,8 @@ namespace mra{
       }
 
       detail::axpy_kernel_impl<T, NDIM>(work1, result, mufac);
-      std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size
-                << " result " << normf(result) << std::endl;
+      //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size
+      //          << " result " << normf(result) << std::endl;
 
     }
 

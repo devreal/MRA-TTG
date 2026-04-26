@@ -489,8 +489,8 @@ namespace mra {
             for (int d0 = -3; d0 <= 3; ++d0) {
               for (int d1 = -3; d1 <= 3; ++d1) {
                 for (int d2 = -3; d2 <= 3; ++d2) {
-                  if (!(d0 == 1 && d1 == 0 && d2 == 0)) { // skip self contribution since it is always above the threshold and we will apply it separately
-                    continue;
+                  if (d0 == 0 && d1 == 0 && d2 == 0) {
+                    continue; // skip self contribution since it is handled separately
                   }
                   auto disp_key = mra::Key<NDIM>(0, {d0, d1, d2});
                   mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
@@ -509,8 +509,8 @@ namespace mra {
           for_each([&](const auto& disp_key, const auto& neighbor_key){
             auto op_data = op.get_op(key.level(), disp_key);
             for (int i = 0; i < N; ++i) {
-              std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
-                        << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
+              //std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
+              //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
               if (op_data->norm * cnorm_view(i) > tol / fac) {
                 contributions.push_back({key, neighbor_key});
                 break; // if any of the coefficients pass the threshold we add the contribution
