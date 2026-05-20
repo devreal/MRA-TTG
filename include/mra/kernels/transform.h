@@ -15,6 +15,7 @@
 namespace mra {
 
 
+#if 0
 #if !defined(MRA_HAVE_TRANSFORM_SHARED) && defined(MRA_CUDA_ENABLE_SHARED_TRANSFORM) && defined(MRA_ENABLE_CUDA) && defined(MRA_HAVE_CUBLASDX)
   template <Dimension NDIM, typename T>
   SCOPE bool transform_shared(
@@ -61,6 +62,8 @@ namespace mra {
       return false;
   }
 #endif // defined(MRA_ENABLE_CUDA)
+       //
+#endif // 0
 
   template <Dimension NDIM, typename T>
   SCOPE void transform(
@@ -68,7 +71,7 @@ namespace mra {
     const TensorView<T, 2>& c,
     TensorView<T, NDIM>& result,
     T* workspace) {
-    if (transform_shared(t, c, result, workspace)) return;
+    if (transform_shared(t.dim(0), t.data(), c.data(), result.data(), workspace)) return;
     const T* pc = c.data();
     T *t0=workspace, *t1=result.data();
     if (t.ndim() & 0x1) std::swap(t0,t1);
@@ -156,7 +159,6 @@ namespace mra {
       return 0;
     }
 
-    template <typename T>
     inline Dim3 transform_blockdim(int K) {
       return max_thread_dims(K);
     }

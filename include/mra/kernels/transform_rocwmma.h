@@ -1,8 +1,9 @@
 #ifndef HAVE_TRANSFORM_ROCWMMA_H
 #define HAVE_TRANSFORM_ROCWMMA_H
 
-#include "util.h"
-#include "mxm.h"
+#include "mra/misc/platform.h"
+#include "mra/ops/mxm.h"
+//
 
 #define ROCWMMA_NUM_THREADS 512
 
@@ -10,10 +11,12 @@
 #include <hip/hip_runtime.h>
 #include <rocwmma/rocwmma.hpp>
 
+
 namespace mra {
 
 namespace detail {
 
+#if 0
 template <size_type K, typename T>
 __device__ void transform_klt16(
     const T* a,
@@ -66,6 +69,29 @@ __device__ void transform_klt16(
    }
 
 }
+       //
+
+  template <Dimension NDIM, size_type K, typename T>
+  SCOPE void transform_klt16(
+    const T* t,
+    const T* c,
+    T* result,
+    T* workspace) {
+    const T* pc = c;
+    T *t0=workspace, *t1=result;
+    if (NDIM & 0x1) std::swap(t0,t1);
+    const size_type dimj = K;
+    size_type dimi = 1;
+    for (size_type n=1; n<NDIM; ++n) dimi *= dimj;
+    mTxmq(dimi, dimj, dimj, t0, t, pc);
+    for (size_type n=1; n<NDIM; ++n) {
+      mTxmq(dimi, dimj, dimj, t1, t0, pc);
+      std::swap(t0,t1);
+    }
+    /* no need to synchronize here, mTxmq synchronizes */
+  }
+
+#endif // 0
 
 /**
  * This implementation only works on K=16. For other K values, we fall back to the Level-3 implementation.
@@ -92,11 +118,13 @@ __device__ void transform_rocwmma_k(
 
   if constexpr (K < 16) {
     // Fallback to non mma implementation
-    transform_klt16<K, T>(a, b, c);
+    transform_klt16<3, K, T>(a, b, c, workspace);
+    //transform(a, b, c, workspace);
     return;
   } else if constexpr (K > 16) {
     // Not supported, fallback to Level-3
-    transform_level3_k<T, K>(a, b, c, workspace);
+    //transform_level3_k<T, K>(a, b, c, workspace);
+    printf("WTF dude!");
     return;
   } else {
 
@@ -165,31 +193,34 @@ __device__ void transform_rocwmma_k(
 
 } // namespace detail
 
+template<typename T>
 __device__ bool transform_shared(
   int K,
-  const float* a,
-  const float* b,
-  float*& c,
-  float* workspace)
+  const T* a,
+  const T* b,
+  T* c,
+  T* workspace)
 {
   switch(K) {
+#if 0
     case  4:
-      transform_rocwmma_k<4, float>(a, b, c, workspace);
+	    detail::transform_rocwmma_k<4, float>(a, b, c, workspace);
       break;
     case  8:
-      transform_rocwmma_k<8, float>(a, b, c, workspace);
+      detail::transform_rocwmma_k<8, float>(a, b, c, workspace);
       break;
     case 10:
-      transform_rocwmma_k<10, float>(a, b, c, workspace);
+      detail::transform_rocwmma_k<10, float>(a, b, c, workspace);
       break;
     case 12:
-      transform_rocwmma_k<12, float>(a, b, c, workspace);
+      detail::transform_rocwmma_k<12, float>(a, b, c, workspace);
       break;
+#endif // 0
     case 16:
-      transform_rocwmma_k<16, float>(a, b, c, workspace);
+      detail::transform_rocwmma_k<16>(a, b, c, workspace);
       break;
     default:
-      printf("WARNING: transform_rocwmma does not support K=%d, falling back to reference implementation\n", K);
+      //printf("WARNING: transform_rocwmma does not support K=%d, falling back to reference implementation\n", K);
       return false;
   }
 
@@ -197,12 +228,26 @@ __device__ bool transform_shared(
 }
 
 } // namespace mra
+  //
+#else 
+
+namespace mra {
+template<typename T>
+__device__ bool transform_shared(
+  int K,
+  const T* a,
+  const T* b,
+  T* c,
+  T* workspace) {
+  return false;
+}
+}
 
 #endif // __HIP_DEVICE_COMPILE__
+       //
 
 namespace mra {
 
-  template <typename T>
   inline Dim3 transform_blockdim(int K) {
     return {ROCWMMA_NUM_THREADS, 1, 1};
   }
@@ -222,5 +267,6 @@ namespace mra {
 #undef ROCWMMA_NUM_THREADS
 
 #define MRA_HAVE_TRANSFORM_SHARED 1
+
 
 #endif // HAVE_TRANSFORM_ROCWMMA_H
