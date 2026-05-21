@@ -185,6 +185,16 @@ namespace mra {
       return false;
     }
 
+    SCOPE bool is_all_zero() const {
+      const std::size_t n = count();
+      for (std::size_t i = 0; i < n; ++i) {
+        if (!is_zero(i)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     /**
      * Sets the i'th entry in the sparse dimension to non-zero and allocated.
      */
@@ -626,6 +636,10 @@ namespace mra {
       return !m_non_zero_ranges.empty();
     }
 
+    SCOPE bool is_all_nonzero() const {
+      return m_non_zero_ranges.size() == 1 && m_non_zero_ranges[0].from == 0 && m_non_zero_ranges[0].to == count() - 1;
+    }
+
     /**
      * Returns true if the given id is allocated.
      */
@@ -876,6 +890,9 @@ namespace mra {
       return dim0() > 0;
     }
 
+    SCOPE bool is_all_nonzero() const {
+      return dim0() > 0;
+    }
 
     SCOPE std::size_t count_nonzero() const {
       return dim0();

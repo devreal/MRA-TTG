@@ -276,7 +276,7 @@ namespace mra {
         { }
 
         FunctionsReconstructedNode(const Key<NDIM>& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
-        : base_type(key, sparsity.dim(0), K, scope)
+        : base_type(key, sparsity, K, scope)
         , m_metadata(sparsity.dim(0))
         { }
 
@@ -385,6 +385,14 @@ namespace mra {
 
         bool is_nonzero(size_type i) const {
           return !this->sparsity().is_zero(i);
+        }
+
+        bool is_any_nonzero() const {
+          return this->sparsity().is_any_nonzero();
+        }
+
+        bool is_all_nonzero() const {
+          return this->sparsity().is_all_nonzero();
         }
 
     };
