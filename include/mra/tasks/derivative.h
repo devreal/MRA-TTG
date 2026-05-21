@@ -265,7 +265,7 @@ namespace mra{
             co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
-            SparsityManager sparseman(result);
+            SparsityManager sparseman = make_sparsity_manager(result);
             sparseman.populate_device_sparsity();
 
             auto& D = *db.current_device_ptr();
