@@ -83,9 +83,8 @@ namespace mra {
         s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
         tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
         workspace   = &block_tmp_ptr[2*TWOK2NDIM];
+        assert(node_view.is_any_nonzero() || from_parent_view.is_any_nonzero() && "why did we even get here?!");
       }
-
-      assert(node_view.is_any_nonzero() || from_parent.is_any_nonzero() && "why did we even get here?!");
 
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
         if (node.is_zero(fnid) && from_parent.is_zero(fnid)) {

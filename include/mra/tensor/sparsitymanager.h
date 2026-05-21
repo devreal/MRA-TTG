@@ -42,13 +42,13 @@ namespace mra {
 
       void populate_device_sparsity() {
 #ifdef MRA_ENABLE_HOST
-        for (size_t i = 0; i < sparsity_traits::required_space(m_tensor.dims()); ++i) {
-          //std::cout << "" << i << ": " << static_cast<int>(m_buffer.host_ptr()[i]) << std::endl;
-          m_tensor.buffer().host_ptr()[i] = m_buffer.host_ptr()[i];
-        }
+        //for (size_t i = 0; i < sparsity_traits::required_space(m_tensor.dims()); ++i) {
+        //  std::cout << "SPARSITY INFO [" << i << "]: " << *reinterpret_cast<uint64_t*>(&m_buffer.host_ptr()[i]) << std::endl;
+        //  m_tensor.buffer().host_ptr()[i] = m_buffer.host_ptr()[i];
+        //}
         std::memcpy(m_tensor.buffer().host_ptr(),
                     m_buffer.host_ptr(),
-                    sparsity_traits::required_space(m_tensor.dims()));
+                    sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type));
 #else  // MRA_ENABLE_HOST
         // sanity checks
         assert(ttg::device::current_device().is_gpu());
@@ -60,7 +60,7 @@ namespace mra {
         int ret = device_module->memcpy_async(device_module, ttg_parsec::detail::parsec_ttg_caller->dev_ptr->stream,
                                               m_buffer.host_ptr(),
                                               const_cast<value_type*>(m_tensor.buffer().current_device_ptr()),
-                                              sparsity_traits::required_space(m_tensor.dims()),
+                                              sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type),
                                               parsec_device_gpu_transfer_direction_h2d);
         if (ret != PARSEC_SUCCESS) throw std::runtime_error("Failed to copy sparsity data from host to device!");
 #endif // MRA_ENABLE_HOST
@@ -215,7 +215,7 @@ namespace mra {
   auto make_sparsity_manager(TensorTypes&... tensors) {
     auto reftuple = std::tuple_cat(detail::extract_tensor_ref(tensors)...);
     using manager_type = detail::sparseman_base_type<decltype(reftuple)>;
-    return manager_type(reftuple);
+    return manager_type{reftuple};
   }
 
 } // namespace mra

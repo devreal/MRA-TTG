@@ -281,6 +281,10 @@ namespace mra {
       s << " *]";
       s.setf(std::ios::scientific);
       //s.setf(std::ios::fixed);
+      if (t.empty()) {
+        s << " [empty tensor]\n";
+        break;
+      }
       for (size_type i=0; i<lastdimsize; ++i,++it) { //<<< it incremented here!
         // s.precision(4);
         s << " ";

@@ -112,10 +112,7 @@ namespace mra::detail {
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
   do {                                                          \
     blockIdx = {0, 0, 0};                                       \
-    for (std::size_t i = 0; i < blocks; ++i) {                  \
-      blockIdx.x = i;                                           \
-      name args;                                                \
-    }                                                           \
+    name args;                                                  \
   } while (0)
 #define CONFIGURE_KERNEL(name, shared) do {} while(0)
 #endif // __CUDACC__

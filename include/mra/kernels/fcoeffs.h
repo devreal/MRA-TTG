@@ -89,14 +89,14 @@ namespace mra {
         /* TensorView assignment synchronizes */
         T norm = mra::normf(r1);
         //std::cout << "project norm " << norm << " thresh " << thresh << std::endl;
+        bool is_leaf_val = (norm < mra::truncate_tol(key,thresh));
         if (is_team_lead()) {
-          *is_leaf = (norm < truncate_tol(key,thresh)); // test norm of difference coeffs
+          *is_leaf = is_leaf_val; // test norm of difference coeffs
           if (!*is_leaf) {
             // std::cout << "fcoeffs not leaf " << key << " norm " << norm << std::endl;
           }
         }
-        SYNCTHREADS();
-        if (!*is_leaf) {
+        if (!is_leaf_val) {
           /* zero out coeffs if this is not a leaf */
           coeffs = T(0.0);
         }
@@ -113,11 +113,12 @@ namespace mra {
       Key<NDIM> key,
       size_type K,
       T* tmp,
-      const concepts::TensorView<2> auto& phibar_view,
-      const concepts::TensorView<2> auto& hgT_view,
-      concepts::TensorView<NDIM+1> auto& coeffs_view,
-      bool *is_leaf,
-      T thresh)
+      const concepts::TensorView<2> auto phibar_view,
+      const concepts::TensorView<2> auto hgT_view,
+      concepts::TensorView<NDIM+1> auto coeffs_view,
+      T thresh,
+      const DenseTensorView<bool, 1> leaf_info_view,
+      DenseTensorView<bool, 1> result_leaf_info_view)
     {
       /* set up temporaries once in each block */
       SHARED DenseTensorView<T, NDIM> values, r0, r1, child_values, coeffs;
@@ -138,10 +139,12 @@ namespace mra {
         workspace    = &block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM+NDIM*K];
       }
 
+      /* carry over leaf info */
+      result_leaf_info_view = leaf_info_view;
+
       /* adjust pointers for the function of each block */
       for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x) {
         if (coeffs_view.is_zero(fnid)) {
-          if (is_team_lead()) is_leaf[fnid] = false;
           continue; // skip sparse entries
         }
         if (is_team_lead()) {
@@ -152,7 +155,7 @@ namespace mra {
         fcoeffs_kernel_impl(D, gldata, fns[fnid], key, K, fnid,
                             values, r0, r1, child_values, x_vec, x, workspace,
                             phibar_view, hgT_view, coeffs,
-                            &is_leaf[fnid], thresh);
+                            &result_leaf_info_view(fnid), thresh);
       }
     }
   } // namespace detail
@@ -171,8 +174,9 @@ namespace mra {
       const concepts::TensorView<2> auto& phibar_view,
       const concepts::TensorView<2> auto& hgT_view,
       concepts::TensorView<NDIM+1> auto& coeffs_view,
-      bool* is_leaf_scratch,
       T thresh,
+      const DenseTensorView<bool, 1>& leaf_info_view,
+      DenseTensorView<bool, 1>& result_leaf_info_view,
       ttg::device::Stream stream)
   {
     /**
@@ -188,7 +192,7 @@ namespace mra {
     CALL_KERNEL(detail::fcoeffs_kernel, fns.size(), thread_dims, smem_size, stream,
       (D, gldata, fns, key, K, tmp,
        phibar_view, hgT_view, coeffs_view,
-       is_leaf_scratch, thresh));
+       thresh, leaf_info_view, result_leaf_info_view));
     checkSubmit();
   }
 

@@ -610,7 +610,7 @@ namespace mra {
       }
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (is_sparse() && this->is_zero(indices[0])) {
-        THROW("TensorView: attempt to access unallocated sparse element");
+        THROW("TensorView: non-const attempt to access unallocated sparse subview or element");
       }
       return this->data()[offset(std::forward<Dims>(idxs)...)];
     }
@@ -644,7 +644,7 @@ namespace mra {
       auto [offset, dims] = subview_info(idx0, std::forward<Dims>(idxs)...);
       if (this->is_zero(idx0)) {
         if constexpr (!std::is_const_v<T>) {
-          THROW("TensorView: attempt to access unallocated sparse elements");
+          THROW("TensorView: non-const attempt to access unallocated sparse subview or element");
         }
         return subview_type<T, ndim>(nullptr, dims); // return a view with nullptr data
       }
@@ -723,6 +723,13 @@ namespace mra {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
       }
       return *this;
+    }
+
+    /**
+     * Returns true if the view has no allocated storage or zero size.
+     */
+    bool empty() const {
+      return this->data() == nullptr || this->size() == 0;
     }
 
 

@@ -69,24 +69,10 @@ namespace mra {
 
   private:
     size_type m_num_functions = 0;
-
   };
 
   inline std::ostream& operator<<(std::ostream& os, const SparsityInfo& si) {
-    os << "SparsityInfo(num_functions=" << si.dim(0) << ", [";
-    for (size_type i = 0; i < si.dim(0); ++i) {
-      if (si.is_nonzero(i)) {
-        os << "N";
-      } else if (si.is_allocated(i)) {
-        os << "A";
-      } else {
-        os << "Z";
-      }
-      if (i + 1 < si.dim(0)) {
-        os << ",";
-      }
-    }
-    os << "])";
+    os << "SparsityInfo(" << static_cast<const RangeSparsityBase<SparsityInfo, void>&>(si) << ")";
     return os;
   }
 

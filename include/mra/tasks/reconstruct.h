@@ -86,11 +86,11 @@ namespace mra{
       std::cout << name << ": " << key << " sparsity " << sparsity << std::endl;
 
       /* if the parent is a leaf then we mark the child as zero */
-      for (std::size_t i = 0; i < N; ++i) {
-        if (from_parent.is_leaf(i)) {
-          sparsity.set_zero(i);
-        }
-      }
+      //for (std::size_t i = 0; i < N; ++i) {
+      //  if (from_parent.is_leaf(i)) {
+      //    sparsity.set_zero(i);
+      //  }
+      //}
 
       // array of child nodes
       std::array<mra::FunctionsReconstructedNode<T,NDIM>, mra::Key<NDIM>::num_children()> r_arr;
@@ -141,12 +141,11 @@ namespace mra{
       }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
 
 #ifndef MRA_ENABLE_HOST
-      // helper lambda to pick apart the std::array
-      auto make_inputs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
+      // pick apart the array of r's into individual buffers for the kernel
+      auto inputs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
         return ttg::device::Input(hg.buffer(), tmp_scratch,
                                   (r_arr[Is].coeffs().buffer())...);
-      };
-      auto inputs = make_inputs(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
+      }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
       inputs.add(from_parent.coeffs().buffer());
       inputs.add(node.coeffs().buffer());
       inputs.add(norms.buffer());
@@ -159,11 +158,10 @@ namespace mra{
       sparseman.populate_device_sparsity();
 
 
-      // helper lambda to pick apart the std::array
-      auto assemble_tensors = [&]<std::size_t... Is>(std::index_sequence<Is...>){
-        return std::array{(r_arr[Is].coeffs().current_view())...};
-      };
-      auto r_ptrs = assemble_tensors(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
+      // pick apart the std::array
+      auto r_ptrs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
+                        return std::array{(r_arr[Is].coeffs().current_view())...};
+                      }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
       auto node_view = node.coeffs().current_view();
       auto hg_view = hg.current_view();
       auto from_parent_view = from_parent.coeffs().current_view();

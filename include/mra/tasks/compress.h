@@ -31,17 +31,30 @@ namespace mra
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>& in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
-    const char *name = "compress",
+    const std::string name = "compress",
     ProcMap&& procmap = {},
     DeviceMap&& devicemap = {})
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
 
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> filter_in(name + "-filter_in");
+
+    /**
+     * A filter that only sends internal nodes to the compress task. Leaf nodes are sent up via the do_send_leafs_up task.
+     */
+    auto filter_fn = [fns, K, name](const mra::Key<NDIM>& key,
+                                    const mra::FunctionsReconstructedNode<T, NDIM>& in) -> TASKTYPE {
+      if (!in.is_all_leaf()) {
+        /* otherwise send to the compress task */
+        ttg::send<0>(key, in);
+      }
+    };
+
     constexpr const std::size_t num_children = mra::Key<NDIM>::num_children();
     // creates the right number of edges for nodes to flow from send_leafs_up to compress
     // send_leafs_up will select the right input for compress
     auto create_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-      return ttg::edges(in, ((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})...);
+      return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})..., filter_in);
     };
     auto send_to_compress_edges = create_edges(std::make_index_sequence<num_children>{});
     /* append out edge to set of edges */
@@ -49,7 +62,6 @@ namespace mra
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
     auto do_compress = [&, fns, K, name](const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
-                          const mra::FunctionsReconstructedNode<T,NDIM> &in, // the node from the prior op
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in1,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in2,
@@ -57,12 +69,14 @@ namespace mra
                           const mra::FunctionsReconstructedNode<T,NDIM> &in4,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in5,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in6,
-                          const mra::FunctionsReconstructedNode<T,NDIM> &in7) -> TASKTYPE {
+                          const mra::FunctionsReconstructedNode<T,NDIM> &in7,
+                          const mra::FunctionsReconstructedNode<T,NDIM> &in // the node from the prior op
+                          ) -> TASKTYPE {
       //const typename ::detail::tree_types<T,K,NDIM>::compress_in_type& in,
       //typename ::detail::tree_types<T,K,NDIM>::compress_out_type& out) {
         size_type N = fns->num_functions(key);
         constexpr const auto num_children = mra::Key<NDIM>::num_children();
-        constexpr const auto out_terminal_id = num_children;
+        constexpr const auto out_terminal_id = num_children + 1;
         mra::FunctionsCompressedNode<T,NDIM> result(key, N); // The eventual result
         // create empty, may be reset if needed
         mra::FunctionsReconstructedNode<T, NDIM> p(key, N);
@@ -203,17 +217,20 @@ namespace mra
 #endif
         }
     };
-    auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, "send_leaves_up"),
-                               ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name));
+    auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, name + "-send_leaves_up"),
+                               ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name),
+                               ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), name + "-filter"));
 
     // set maps if provided
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       std::get<0>(ttt)->set_keymap(procmap);
       std::get<1>(ttt)->set_keymap(procmap);
+      std::get<2>(ttt)->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       std::get<0>(ttt)->set_devicemap(devicemap);
       std::get<1>(ttt)->set_devicemap(devicemap);
+      std::get<2>(ttt)->set_devicemap(devicemap);
     }
 
     return ttt;

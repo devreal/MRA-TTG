@@ -24,8 +24,8 @@ namespace mra {
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void simple_norm_kernel(
       Key<NDIM> key,
-      const concepts::TensorView<NDIM+1> auto& node,
-      concepts::TensorView<1> auto& result_norms,
+      const concepts::TensorView<NDIM+1> auto node,
+      concepts::TensorView<1> auto result_norms,
       size_type N)
     {
       const bool is_t0 = (0 == thread_id());

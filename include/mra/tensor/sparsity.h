@@ -66,6 +66,7 @@ namespace mra {
   struct SparseArrayBase {
 
     using value_type = ValueType;
+    using sparsity_type = SparseArrayBase<Derived, value_type>;
 
   private:
 
@@ -221,6 +222,10 @@ namespace mra {
       sparsity_data()[id] = detail::SparsityState::SPARSE;
     }
 
+    void reset() {
+      std::fill(static_cast<value_type*>(storage()), static_cast<value_type*>(storage()) + value_count(), value_type{});
+    }
+
     SCOPE std::size_t count_nonzero() const {
       const std::size_t n = count();
       std::size_t count = 0;
@@ -242,7 +247,7 @@ namespace mra {
 
     SCOPE void set_allocated(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
-      byte |= static_cast<unit_type>(detail::SparsityState::ALLOCATED);
+      byte = static_cast<unit_type>(detail::SparsityState::ALLOCATED);
     }
 
     SCOPE void set_deallocated(std::size_t i) {
@@ -304,10 +309,12 @@ namespace mra {
     void apply_sparsity(const SparsityT& s) {
       assert(count() == s.count());
       /* zero out first */
-      set_zero_all();
+      reset();
       for (size_type i = 0; i < count(); ++i) {
         if (s.is_nonzero(i)) {
           set_nonzero(i);
+        } else if (s.is_allocated(i)) {
+          set_allocated(i);
         } else {
           remove(i);
         }
@@ -395,12 +402,16 @@ namespace mra {
      */
     static constexpr bool allocates_storage() { return false; }
     /**
-     * How much additional space (in units of size_type) is required to store the sparsity information.
+     * How much additional space (in units of \ref value_type) is required to store the sparsity information.
      */
     template<std::size_t NDIM>
     static size_type required_space(const std::array<size_type, NDIM>& dims) {
       // worst case: every entry is its own range
       return detail::align_to_type<value_type>(dims[0]) / sizeof(value_type);
+    }
+
+    static constexpr std::string name() {
+      return "SparseArrayBase";
     }
   };
 
@@ -450,6 +461,11 @@ namespace mra {
         serialize(ar);
       }
 
+      std::ostream& operator<<(std::ostream& os) const {
+        os << "[" << from << ", " << to << "]";
+        return os;
+      }
+
     }; // class Range
 
   } // namespace detail
@@ -468,6 +484,7 @@ namespace mra {
   template<typename Derived, typename ValueT>
   struct RangeSparsityBase {
     using value_type = std::decay_t<ValueT>;
+    using sparsity_type = RangeSparsityBase<Derived, value_type>;
 
   private:
     class sparsity_iterator {
@@ -796,6 +813,10 @@ namespace mra {
       // worst case: every entry is its own range
       return 0;
     }
+
+    static constexpr std::string name() {
+      return "RangeSparsityBase";
+    }
   };
 
 
@@ -810,7 +831,9 @@ namespace mra {
   template<typename Derived, typename ValueType>
   struct DenseViewBase {
 
+    using derived_type = Derived;
     using value_type = ValueType;
+    using sparsity_type = DenseViewBase<Derived, ValueType>;
 
 
   private:
@@ -921,14 +944,48 @@ namespace mra {
     static constexpr size_type required_space(const std::array<size_type, NDIM>&) {
       return 0;
     }
+
+    static constexpr std::string name() {
+      return "DenseViewBase";
+    }
   };
 
+  namespace concepts {
+    template<typename T,
+             typename DerivedType = typename sparsity_traits<std::decay_t<T>>::derived_type,
+             typename ValueType = typename sparsity_traits<std::decay_t<T>>::value_type>
+    concept SparsityBase = std::is_same_v<T, DenseViewBase<DerivedType, ValueType>> ||
+                          std::is_same_v<T, SparseArrayBase<DerivedType, ValueType>> ||
+                          std::is_same_v<T, RangeSparsityBase<DerivedType, ValueType>>;
+  } // namespace concepts
 
   /**
    * Traits for sparsity views.
    */
   template<typename T>
   constexpr bool is_sparsity_view_v = sparsity_traits<std::decay_t<T>>::is_sparse();
+
+
+
+  inline std::ostream& operator<<(std::ostream& os, const concepts::SparsityBase auto& si) {
+    os << "[";
+    auto count = si.count();
+    for (size_type i = 0; i < count; ++i) {
+      if (si.is_nonzero(i)) {
+        os << "N";
+      } else if (si.is_allocated(i)) {
+        os << "A";
+      } else {
+        os << "Z";
+      }
+      if (i + 1 < count) {
+        os << ",";
+      }
+    }
+    os << "]";
+    return os;
+  }
+
 
 } // namespace mra
 

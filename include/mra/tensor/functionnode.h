@@ -308,11 +308,7 @@ namespace mra {
         }
 
         bool any_have_children() const {
-          bool result = false;
-          for (size_type i = 0; i < m_metadata.size(); ++i) {
-            result |= has_children(i);
-          }
-          return result;
+          return !is_all_leaf();
         }
 
 
@@ -333,7 +329,7 @@ namespace mra {
           bool all_leaf = true;
           size_type i = 0;
           for (auto& data : m_metadata) {
-            all_leaf &= data.is_leaf || this->sparsity().is_zero(i);
+            all_leaf &= data.is_leaf;
             ++i;
           }
           return all_leaf;
@@ -346,7 +342,7 @@ namespace mra {
           bool any_leaf = false;
           size_type i = 0;
           for (auto& data : m_metadata) {
-            any_leaf |= data.is_leaf && !this->sparsity().is_zero(i);
+            any_leaf |= data.is_leaf;
             ++i;
           }
           return any_leaf;

@@ -36,17 +36,36 @@ namespace mra{
     ProcMap procmap = {},
     DeviceMap devicemap = {})
   {
+    /**
+     * We need to track which functions have reached their leaf level at each position in the tree.
+     */
+    using LeafInfo = typename mra::DenseTensor<bool, 1>;
+    ttg::Edge<mra::Key<NDIM>, LeafInfo> refine("refine");
+
+    /**
+     * Takes the control input and sends an empty LeafInfo to the root of project.
+     */
+    auto dispatch_fn = [fns](const Key<NDIM>& key) {
+      LeafInfo leaf_info(fns->num_functions(key), ttg::scope::SyncIn);
+      auto host_ptr = leaf_info.buffer().host_ptr();
+      std::fill(host_ptr, host_ptr + leaf_info.size(), false);
+      ttg::send<0>(key, std::move(leaf_info));
+    };
+    auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn), ttg::edges(control), edges(refine), std::string(name) + "-dispatch");
+
     /* create a non-owning buffer for domain and capture it */
     auto fn = [&, K, max_level, thresh, gl = mra::GLbuffer<T>(), fns, name]
-              (const mra::Key<NDIM>& key) -> TASKTYPE {
+              (const mra::Key<NDIM>& key, const LeafInfo& leaf_info) -> TASKTYPE {
       using key_type = typename mra::Key<NDIM>;
       using node_type = typename mra::FunctionsReconstructedNode<T, NDIM>;
       using function_type = typename FunctionSetT::function_type;
 
       size_type N = fns->num_functions(key);
       SparsityInfo sparsity(N);
-      sparsity.set_all_nonzero();
+      LeafInfo result_leaf_info;
       node_type result(key, N); // empty for fast-paths, no need to zero out
+
+      sparsity.set_all_nonzero();
 #ifndef MRA_ENABLE_HOST
       auto outputs = ttg::device::forward();
 #endif // MRA_ENABLE_HOST
@@ -67,9 +86,9 @@ namespace mra{
         for (auto child : children(key)) bcast_keys.push_back(child);
 
 #ifndef MRA_ENABLE_HOST
-        outputs.push_back(ttg::device::broadcastk<0>(std::move(bcast_keys)));
+        outputs.push_back(ttg::device::broadcast<0>(std::move(bcast_keys), leaf_info));
 #else
-        ttg::broadcastk<0>(std::move(bcast_keys));
+        ttg::broadcast<0>(std::move(bcast_keys), leaf_info);
 #endif
         result.set_all_leaf(false);
       } else {
@@ -79,7 +98,7 @@ namespace mra{
           bool is_negligible = mra::is_negligible<function_type,T,NDIM>(
                                       fn_host_view[i], db.host_ptr()->template bounding_box<T>(key), trunc);
           if (is_negligible) {
-            sparsity.set_zero(i);
+            // don't set the function as sparse, we still need to get to the kernel to set the leaf info correctly for the children
             result.set_leaf(i, true);
           }
           all_negligible &= is_negligible;
@@ -93,6 +112,8 @@ namespace mra{
           result.allocate(sparsity, K, ttg::scope::Allocate);
           auto& coeffs = result.coeffs();
 
+          result_leaf_info = LeafInfo(N, TempScope); // TOOD: TTG should allocate on the host with Allocate
+
           std::cout << name << " " << key << " all negligible " << all_negligible << " sparsity: " << sparsity << std::endl;
 
           // compute the norm of functions
@@ -105,21 +126,22 @@ namespace mra{
           /* temporaries */
           const std::size_t tmp_size = fcoeffs_tmp_size<NDIM>(K)*N;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
-          auto is_leafs = ttg::Buffer<bool, DeviceAllocator<bool>>(N, TempScope);
 
           /* TODO: cannot do this from a function, had to move it into the main task */
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(db, gl, fns->buffer(), coeffs.buffer(), phibar.buffer(),
-                                      hgT.buffer(), tmp_scratch, is_leafs, result_norms.buffer());
+                                      hgT.buffer(), tmp_scratch, result_norms.buffer(),
+                                      leaf_info.buffer(), result_leaf_info.buffer());
 #endif
           auto coeffs_view      = coeffs.current_view();
           auto phibar_view      = phibar.current_view();
           auto hgT_view         = hgT.current_view();
           T* tmp_device         = tmp_scratch.current_device_ptr();
-          bool *is_leafs_device = is_leafs.current_device_ptr();
           auto  fn_view         = fns->current_view(key); // the view for the functions in this batch
           auto& domain          = *db.current_device_ptr();
           auto  gldata          = gl.current_device_ptr();
+          auto leaf_info_view    = leaf_info.current_view();
+          auto result_leaf_info_view = result_leaf_info.current_view();
 
           SparsityManager sparseman(coeffs);
           sparseman.populate_device_sparsity();
@@ -127,17 +149,18 @@ namespace mra{
           /* submit the kernel */
           submit_fcoeffs_kernel(domain, gldata, fn_view, key, K, tmp_device,
                                 phibar_view, hgT_view, coeffs_view,
-                                is_leafs_device, thresh, ttg::device::current_stream());
+                                thresh, leaf_info_view, result_leaf_info_view,
+                                ttg::device::current_stream());
 
           result_norms.compute();
 
           /* wait and get is_leaf back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(is_leafs, result_norms.buffer());
+          co_await ttg::device::wait(result_leaf_info, result_norms.buffer());
 #endif
 
           result_norms.verify(); // extracts the norms and stores them in the node
-          const bool* is_leafs_arr = is_leafs.host_ptr();
+          const bool* is_leafs_arr = result_leaf_info.buffer().host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
             result.is_leaf(i) = is_leafs_arr[i];
           }
@@ -146,6 +169,9 @@ namespace mra{
            */
         }
 
+        /**
+         * Handle forced level if provided by user.
+         */
         if (max_level > 0) {
           if (key.level() == max_level) {
             result.set_all_leaf(true);
@@ -162,9 +188,9 @@ namespace mra{
           std::vector<mra::Key<NDIM>> bcast_keys;
           for (auto child : children(key)) bcast_keys.push_back(child);
 #ifndef MRA_ENABLE_HOST
-          outputs.push_back(ttg::device::broadcastk<0>(std::move(bcast_keys)));
+          outputs.push_back(ttg::device::broadcast<0>(std::move(bcast_keys), std::move(result_leaf_info)));
 #else
-          ttg::broadcastk<0>(bcast_keys);
+          ttg::broadcast<0>(bcast_keys, std::move(result_leaf_info));
 #endif
         }
       }
@@ -176,12 +202,16 @@ namespace mra{
 #endif
     };
 
-    ttg::Edge<mra::Key<NDIM>, void> refine("refine");
-    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(ttg::fuse(control, refine)),
+    auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(refine),
                                   ttg::edges(refine,result), name);
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
-    return tt;
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
+      tt->set_keymap(procmap);
+      dispatch_tt->set_keymap(procmap);
+    }
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
+      tt->set_devicemap(devicemap);
+    }
+    return std::make_tuple(std::move(tt), std::move(dispatch_tt));
   }
 } // namespace mra
 
