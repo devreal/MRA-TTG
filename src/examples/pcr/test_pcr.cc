@@ -7,6 +7,14 @@
 
 using namespace mra;
 
+std::vector<ttg::TTBase*> all_tts;
+
+void print_incomplete_tasks() {
+  std::cout << "Incomplete tasks:" << std::endl;
+  for (auto tt : all_tts) {
+    tt->print_incomplete_tasks();
+  }
+}
 
 template<typename T, mra::Dimension NDIM>
 void test_pcr(std::size_t N, std::size_t K,
@@ -60,18 +68,29 @@ void test_pcr(std::size_t N, std::size_t K,
   // put it into a buffer
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
+  all_tts.push_back(start.get());
   auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
+  all_tts.push_back(std::get<0>(project).get());
+  all_tts.push_back(std::get<1>(project).get());
   // C(P)
   auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
-  // // R(C(P))
+  all_tts.push_back(std::get<0>(compress).get());
+  all_tts.push_back(std::get<1>(compress).get());
+  // R(C(P))
   auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  all_tts.push_back(reconstruct.get());
   // C(R(C(P)))
   auto compress_r = make_compress(gaussians, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  all_tts.push_back(std::get<0>(compress_r).get());
+  all_tts.push_back(std::get<1>(compress_r).get());
 
   // C(R(C(P))) - C(P)
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_reconstruct_result, compress_result, gaxpy_result, "gaxpy", pmap, dmap);
+  all_tts.push_back(gaxpy.get());
   // | C(R(C(P))) - C(P) |
   auto norm  = make_norm(gaussians, K, gaxpy_result, norm_result, "norm", pmap, dmap);
+  all_tts.push_back(std::get<0>(norm).get());
+  all_tts.push_back(std::get<1>(norm).get());
   // final check
   auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& norms){
     auto norms_view = norms.current_view();
