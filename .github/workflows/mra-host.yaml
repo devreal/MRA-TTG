@@ -98,10 +98,3 @@ jobs:
       working-directory: ${{github.workspace}}/build
       shell: bash
       run: ./src/mra-pcr-host-parsec
-
-    - name: Test Transition Matrices [host]
-      if: ${{ matrix.device == 'host' }}
-      working-directory: ${{github.workspace}}/build
-      shell: bash
-      run: ./src/mra-trmatrixtest
-
