@@ -7,6 +7,7 @@
 #include "mra/tensor/tensorview.h"
 
 #include <algorithm>
+#include <cmath>
 #include <numbers>
 
 namespace mra {
