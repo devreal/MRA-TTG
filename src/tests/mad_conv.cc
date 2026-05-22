@@ -98,7 +98,7 @@ auto compute_conv_madness(madness::World& world, size_type k, T thresh, int doma
 }
 
 template <typename T, mra::Dimension NDIM>
-auto compute_conv_mra(size_type N, size_type K, T precision, int domain, int max_level,
+void compute_conv_mra(size_type N, size_type K, T precision, int domain, int max_level,
                       T verification_precision, int argc, char** argv) {
 
   auto functiondata = mra::FunctionData<T,NDIM>(K);
@@ -149,7 +149,7 @@ auto compute_conv_mra(size_type N, size_type K, T precision, int domain, int max
     compare_mra_madness<T, NDIM>(mad_f, rmap, "projection", T(1e-12));
   }
   world.gop.fence();
-  }
+}
 
 int main(int argc, char** argv) {
 
