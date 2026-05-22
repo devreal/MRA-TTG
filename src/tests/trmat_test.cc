@@ -1,3 +1,11 @@
+
+/***
+ * NOTE: this file is outdated but is kept for the time being in case we go back to generating translation matrices ourselves.
+ *       It is currently not compiled or tested.
+ */
+
+
+
 #include <ttg.h>
 
 #include "mra/mra.h"

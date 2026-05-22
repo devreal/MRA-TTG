@@ -2,6 +2,8 @@
 #define MRA_KERNELS_CONVOLUTION_H
 
 #include <algorithm>
+#include <cmath>
+#include <numbers>
 #include "mra/ops/mxm.h"
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"

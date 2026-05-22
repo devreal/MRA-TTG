@@ -1,6 +1,12 @@
 #ifndef CONV_MAD_H
 #define CONV_MAD_H
 
+#include <memory>
+#include <array>
+#include <mutex>
+#include <map>
+#include <utility>
+
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
 #include <madness/mra/operator.h>
