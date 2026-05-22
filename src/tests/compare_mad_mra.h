@@ -4,6 +4,12 @@
 #include <mra/misc/key.h>
 #include <mra/tensor/functionnode.h>
 #include <map>
+#include <iostream>
+#include <string>
+#include <cmath>
+#include <type_traits>
+#include <array>
+#include <stdexcept>
 
 namespace mra {
 
