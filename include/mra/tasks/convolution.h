@@ -922,7 +922,7 @@ namespace mra {
         //std::cout << "ADJUST PARENT " << key << " is empty " << empty << std::endl;
         if (key.level() > 0) {
 #ifndef MRA_ENABLE_HOST
-          send.push_back(select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent"));
+          sends.push_back(select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent"));
 #else  // MRA_ENABLE_HOST
           select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent");
 #endif // MRA_ENABLE_HOST
