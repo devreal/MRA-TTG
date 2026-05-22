@@ -312,14 +312,14 @@ namespace mra {
             // we have contributions or an existing child, send down to child
             //std::cout << "DOWN " << key << " sending " << dest_contributions.size() << " contributions to dest " << child << std::endl;
             //send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
-            ttg::send<0>(child, std::move(dest_contributions));
+            send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
             child_leaf_info.is_child_leaf[child.childindex()] = false;
           }
           if (num_contributions > 0 && (node.invalid() || node.is_child_leaf(child))) {
             // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
             //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
-            ttg::send<0>(child, std::vector<detail::KeyPair<NDIM>>{}); // send an empty contribution list to the child since it will expect one
-            ttg::send<2>(child, mra::FunctionsCompressedNode<T, NDIM>{}); // also send an empty node since the child task will expect one
+            send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+            send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
             //send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
             //send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
             child_leaf_info.is_child_leaf[child.childindex()] = false;
@@ -885,6 +885,17 @@ namespace mra {
         // this task receives the leaf status of our children from the down task and sends it to our parent so that it can adjust its contribution count if necessary
         auto child_info = std::array{child0, child1, child2, child3, child4, child5, child6, child7};
 
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
         bool empty = node.empty();
         if (!empty) {
           // TODO: this is so awkward! Get rid of the N iterations
@@ -896,7 +907,12 @@ namespace mra {
         }
         //std::cout << "ADJUST PARENT " << key << " is empty " << empty << std::endl;
         if (key.level() > 0) {
+#ifndef MRA_ENABLE_HOST
+          send.push_back(select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent"));
+#else  // MRA_ENABLE_HOST
           select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent");
+#endif // MRA_ENABLE_HOST
+
         }
 
         // we drop the node if it is empty, the parent will adjust its child-leaf info
