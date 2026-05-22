@@ -228,9 +228,9 @@ namespace mra {
         }
 
         SCOPE constexpr bool is_valid() const {
-            bool valid = (n != -1);
+            bool valid = (n >= 0);
             for (Dimension d = 0; valid && d < NDIM; ++d) {
-                valid = valid && (l[d] >= 0) && (l[d] < (1 + (1ul<<n)));
+                valid = valid && (l[d] >= 0) && (l[d] < (1ul<<n));
             }
             return valid;
         }
