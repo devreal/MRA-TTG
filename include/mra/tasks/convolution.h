@@ -861,13 +861,27 @@ namespace mra {
       [=](const Key<NDIM>& key, const FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
         ttg::trace("DispatchAdjustParent", key, "is_all_child_leaf", node.is_all_child_leaf());
 
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
         detail::foreach_child(key, [&]<std::size_t I>(const Key<NDIM>& child){
           if (node.is_child_leaf(child)) {
             //std::cout << "DISPATCH ADJUST PARENT " << key << " child " << child << " is leaf, sending true" << std::endl;
-            ttg::send<I>(key, true);
+            send_out(key, true, std::integral_constant<std::size_t, I>{});
           }
         });
 
+#ifndef MRA_ENABLE_HOST
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
       }, ttg::edges(accumulate_result),
          ttg::edges(adjust_parent_edges[0], adjust_parent_edges[1], adjust_parent_edges[2], adjust_parent_edges[3],
                     adjust_parent_edges[4], adjust_parent_edges[5], adjust_parent_edges[6], adjust_parent_edges[7]),
