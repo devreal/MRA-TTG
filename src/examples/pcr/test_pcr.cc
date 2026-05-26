@@ -13,6 +13,7 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
+  bool is_ns = false;
 
   if (seed > 0) {
     srand48(seed);
@@ -34,7 +35,7 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
     T expnt = (seed > 0) ? (1500 + 1500*drand48()) : 1500.0;
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-6.0) + T(12.0)*drand48()) : 0.0;
+      r[d] = (seed > 0) ? (T(-2.0) + T(4.0)*drand48()) : 0.0;
     }
     if (seed > 0) {
       std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
@@ -52,11 +53,11 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   // C(R(C(P)))
-  auto compress_r = make_compress(N, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  auto compress_r = make_compress(N, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
 
   // C(R(C(P))) - C(P)
   auto gaxpy = make_gaxpy(compress_reconstruct_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K, "gaxpy", pmap, dmap);
@@ -67,7 +68,7 @@ void test_pcr(std::size_t N, std::size_t K, int max_level, int seed, int initial
     // TODO: check for the norm within machine precision
     auto norms_arr = norms.buffer().current_device_ptr();
     for (size_type i = 0; i < N; ++i) {
-      if (std::abs(norms_arr[i]) > 1e12) {
+      if (std::abs(norms_arr[i]) > 1e-12) {
         std::cout << "Final norm " << i << ": " << norms_arr[i] << std::endl;
       }
 
@@ -112,9 +113,7 @@ int main(int argc, char **argv) {
   int initial_level = opt.parse("-i", 2);
   int seed    = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
 
-  ttg::initialize(argc, argv, cores);
-  mra::GLinitialize();
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv, cores);
 
   /**
    * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the
@@ -124,6 +123,5 @@ int main(int argc, char **argv) {
     test_pcr<double, 3>(N, K, max_level, seed, initial_level);
   }
 
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

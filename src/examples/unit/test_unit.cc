@@ -15,6 +15,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   T g1 = 0;
   T g2 = 0;
   Dimension axis = 0;
+  bool is_ns = false;
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
@@ -41,8 +42,8 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
   auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, T(1e-6), project_control, project_result);
-  auto compress = make_compress(N, K, functiondata, project_result, compress_result);
-  auto reconstruct = make_reconstruct(N, K, functiondata, compress_result, reconstruct_result);
+  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result);
+  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result);
   auto gaxpy = make_gaxpy(compress_result, compress_result, gaxpy_result, T(1.0), T(-1.0), N, K);
   auto multiply = make_multiply(reconstruct_result, reconstruct_result, multiply_result, functiondata, db, N, K);
   auto derivative = make_derivative(N, K, multiply_result, derivative_result, functiondata, db, g1, g2, axis,

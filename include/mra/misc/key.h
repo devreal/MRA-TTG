@@ -5,6 +5,7 @@
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/platform.h"
+#include "madness/mra/key.h"
 
 namespace mra {
 
@@ -16,6 +17,10 @@ namespace mra {
 
     template <Dimension NDIM>
     class Key {
+
+    public:
+        enum class Direction {Left = -1, Right = 1};
+
     private:
         Level n;  // = 0; cannot default initialize if want to be POD
         std::array<Translation,NDIM> l; // = {}; ditto
@@ -174,7 +179,11 @@ namespace mra {
         }
 
         SCOPE Key<NDIM> neighbor(const Key<NDIM>& disp) const {
-            std::array<Translation,NDIM> l = this->l + disp.l;
+            std::array<Translation,NDIM> l = this->l;
+            for (Dimension d = 0; d < NDIM; ++d) {
+                l[d] += disp.l[d];
+                if (l[d] < 0 || l[d] >= (1ul<<n)) return invalid();
+            }
             return Key<NDIM>(n, l);
         }
 
@@ -186,6 +195,13 @@ namespace mra {
             return Key<NDIM>(n, l);
         }
 
+        SCOPE Key<NDIM> operator+(const std::array<int, NDIM>& disp) const {
+            std::array<Translation,NDIM> l = this->l;
+            for (Dimension d = 0; d < NDIM; ++d) {
+                l[d] += disp[d];
+            }
+            return Key<NDIM>(n, l);
+        }
 
         SCOPE bool is_left_boundary(Dimension axis) const {
             return (l[axis] == 0);
@@ -199,6 +215,10 @@ namespace mra {
             return is_left_boundary(axis) || is_right_boundary(axis);
         }
 
+        SCOPE bool is_boundary(Dimension axis, Direction dir) const {
+            return (dir == Direction::Left) ? is_left_boundary(axis) : is_right_boundary(axis);
+        }
+
         SCOPE constexpr static Key<NDIM> invalid() {
             return Key<NDIM>(-1);
         }
@@ -208,8 +228,47 @@ namespace mra {
         }
 
         SCOPE constexpr bool is_valid() const {
-            return n != -1;
+            bool valid = (n >= 0);
+            for (Dimension d = 0; valid && d < NDIM; ++d) {
+                valid = valid && (l[d] >= 0) && (l[d] < (1ul<<n));
+            }
+            return valid;
         }
+
+        SCOPE bool is_ancestor_of(const Key<NDIM>& other) const {
+            if (n >= other.n) return false;
+            int shift = other.n - n;
+            for (Dimension d = 0; d < NDIM; ++d) {
+                if (l[d] != (other.l[d] >> shift)) return false;
+            }
+            return true;
+        }
+
+        SCOPE bool is_descendant_of(const Key<NDIM>& other) const {
+            return other.is_ancestor_of(*this);
+        }
+
+        SCOPE Key operator-(const Key& other) const {
+            assert(n == other.n);
+            std::array<Translation,NDIM> l = this->l;
+            for (Dimension d = 0; d < NDIM; ++d) l[d] -= other.l[d];
+            return Key(n, l);
+        }
+
+        SCOPE size_type distsq() const {
+            uint64_t dist = 0;
+            for (std::size_t d = 0; d < NDIM; ++d) {
+                dist += l[d] * l[d];
+            }
+            return dist;
+        }
+
+        madness::Key<NDIM> to_madness_key() const {
+            madness::Vector<Translation, NDIM> disp;
+            for (Dimension d = 0; d < NDIM; ++d) disp[d] = l[d];
+            return madness::Key<NDIM>(n, disp);
+        }
+
     };
 
     /// Range object used to iterate over children of a key

@@ -8,6 +8,7 @@ namespace mra {
     const Key<3>& key,
     size_type N,
     size_type K,
+    bool accumulate_NS,
     TensorView<double, 3+1>& node,
     const TensorView<double, 2>& hg,
     const TensorView<double, 3+1>& from_parent,

@@ -98,4 +98,3 @@ jobs:
       working-directory: ${{github.workspace}}/build
       shell: bash
       run: ./src/mra-pcr-host-parsec
-

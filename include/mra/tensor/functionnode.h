@@ -26,7 +26,7 @@ namespace mra {
         using norm_tensor_view_type = TensorView<const value_type, NDIM>;
 
       protected:
-        key_type m_key; //< Key associated with this node to facilitate computation from otherwise unknown parent/child
+        key_type m_key = key_type::invalid(); //< Key associated with this node to facilitate computation from otherwise unknown parent/child
         tensor_type m_coeffs; //< if !is_leaf these are junk (and need not be communicated)
         size_type m_num_func = 0;
 #ifdef MRA_CHECK_NORMS
@@ -155,12 +155,24 @@ namespace mra {
           return m_coeffs.empty();
         }
 
+        bool invalid() const {
+          return m_key.is_invalid();
+        }
+
         auto& buffer() {
           return m_coeffs.buffer();
         }
 
         const auto& buffer() const {
           return m_coeffs.buffer();
+        }
+
+        void clear() {
+          m_coeffs.clear();
+        }
+
+        void make_empty() {
+          clear();
         }
 
         template <typename Archive>
@@ -332,6 +344,7 @@ namespace mra {
 
       private:
         std::vector<std::array<bool, Key<NDIM>::num_children()>> m_is_child_leafs; //< True if that child is leaf on tree
+        bool m_ns = false; //< True if node is non-standard
 
       public:
         /* constructs an empty node without key information,
@@ -389,12 +402,42 @@ namespace mra {
           return m_is_child_leafs[i][child];
         }
 
+        bool is_child_leaf(const Key<NDIM>& child) const {
+          bool result = true;
+          for (size_type i = 0; i < m_is_child_leafs.size(); ++i) {
+            result &= is_child_leaf(i, child.childindex());
+          }
+          return result;
+        }
+
+
+        void set_child_leaf(size_type i, size_type child, bool arg = true) {
+          m_is_child_leafs[i][child] = arg;
+        }
+
         void set_all_child_leafs(bool arg = true) {
           for (auto& node : m_is_child_leafs) {
             for (auto& c : node) {
               c = arg;
             }
           }
+        }
+
+        void set_ns(bool arg = true) {
+          m_ns = arg;
+        }
+
+        bool is_ns() const {
+          return m_ns;
+        }
+
+        void clear() {
+          base_type::clear();
+          set_all_child_leafs(false);
+        }
+
+        void make_empty() {
+          base_type::clear();
         }
 
         bool is_all_child_leaf() const {
@@ -411,6 +454,7 @@ namespace mra {
         void serialize(Archive& ar) {
           base_type::serialize(ar);
           ar& this->m_is_child_leafs;
+          ar& this->m_ns;
         }
 
         template <typename Archive>
