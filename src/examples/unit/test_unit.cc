@@ -15,6 +15,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   T g1 = 0;
   T g2 = 0;
   Dimension axis = 0;
+  bool is_ns = false;
 
   auto pmap = make_procmap<NDIM>(N, 1);
   auto dmap = make_devicemap<NDIM>(pmap);
@@ -44,8 +45,8 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
   auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result);
-  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result);
-  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result);
+  auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result);
+  auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result);
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_result, compress_result, gaxpy_result);
   auto multiply = make_multiply(gaussians, functiondata, db, K, reconstruct_result, reconstruct_result, multiply_result);
   auto derivative = make_derivative(gaussians, K, multiply_result, derivative_result, functiondata, db, g1, g2, axis,

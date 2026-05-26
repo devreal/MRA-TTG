@@ -3,6 +3,7 @@
 
 #include "mra/ops/inner.h"
 #include "mra/misc/gl.h"
+#include "mra/misc/functiondata.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/types.h"
@@ -18,6 +19,9 @@ namespace mra {
   template <typename T>
   struct ConvolutionData {
     Tensor<T, 2> R, S;
+    T normR, normS;
+
+    ConvolutionData() : R(), S(), normR(0.0), normS(0.0) {}
   };
 
   /// Nonstandard form of the operator
@@ -28,11 +32,8 @@ namespace mra {
     T fac;
 
     OperatorData() : ops{}, norm(0.0), fac(1.0) {}
-
     OperatorData(const OperatorData&) = default;
-
     ~OperatorData() = default;
-
   };
 
   template <typename T, Dimension NDIM>
@@ -48,9 +49,10 @@ namespace mra {
       const T* quad_w;                                 // quadrature weights
       Tensor<T, 3> c;                                  // autocorrelation coefficients
       FunctionData<T, NDIM>& functiondata;             // function data
-      std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
-      std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
-      std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
+      FunctionData<T, NDIM>& functiondata2;            // second function data for rnlp at finer level
+      mutable std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
+      mutable std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
+      mutable std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
       mutable std::mutex cachemutex;                   // mutex for thread safety
 
       void autoc(){
@@ -65,10 +67,44 @@ namespace mra {
         c_view(slices) = autocorr_view(slices);
       }
 
+    public:
+
+      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata, FunctionData<T, NDIM>& functiondata2)
+        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata), functiondata2(functiondata2) {
+        GLget(&quad_x, &quad_w, npt);
+        autoc();
+
+        // initialize rnlpcache with an empty tensor for issmall cases
+        Tensor<T, 1> rnlp; // initialize it to zero
+        Key<NDIM> key(-SHRT_MAX, std::array<Translation, NDIM>({0}));
+        cachemutex.lock();
+        if (rnlpcache.find(key) == rnlpcache.end()) {
+          rnlpcache.emplace(key, std::move(rnlp));
+        }
+        cachemutex.unlock();
+      }
+
+      Convolution(Convolution&&) = default;
+      Convolution(const Convolution&) = delete;
+      Convolution& operator=(Convolution&&) = default;
+      Convolution& operator=(const Convolution&) = delete;
+
+      bool issmall(Level n, Translation lx) const {
+        T beta = expnt * std::pow(T(0.25), T(n));
+        Translation l;
+        if (lx > 0) l = lx-1;
+        else if (lx < 0) l = -lx-1;
+        else l = 0;
+
+        return beta*l*l > 49.0; // heuristic cutoff (empirical)
+      }
+
       // projection of a Gaussian onto double order polynomials
-      const Tensor<T, 1>& make_rnlp(const Level n, Translation lx) {
+      const Tensor<T, 1>& make_rnlp(Level n, Translation lx) const {
         mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
         auto it = rnlpcache.find(key);
+        cachemutex.unlock();
         if (it != rnlpcache.end()) {
           const auto& r = it->second;
           return r;
@@ -78,11 +114,12 @@ namespace mra {
         auto rnlp_view = rnlp.current_view();
         rnlp_view = 0.0;
 
+        Translation lkeep = lx;
         if (lx < 0) lx = -lx-1;
         T scaledcoeff  = coeff*std::pow(0.5, 0.5*n);
         T beta = expnt * std::pow(T(0.25), T(n));
         T h = 1.0/std::sqrt(beta);
-        T nbox = 1.0/h;
+        size_type nbox = size_type(1.0/h);
         if (nbox < 1) nbox = 1;
         h = 1.0/nbox;
         T sch = std::abs(scaledcoeff*h);
@@ -102,6 +139,11 @@ namespace mra {
             }
             delete[] phix;
           }
+          if (lkeep < 0) {
+            for (int p = 1; p < 2*K; p += 2) {
+              rnlp_view(p) = -rnlp_view(p);
+            }
+          }
         }
         cachemutex.lock();
         if (rnlpcache.find(key) == rnlpcache.end()) {
@@ -113,20 +155,72 @@ namespace mra {
         return r;
       }
 
-    public:
+      const Tensor<T, 1>& get_rnlp (Level n, Translation lx) const {
+        mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
+        cachemutex.lock();
+        auto it = rnlpcache.find(key);
+        cachemutex.unlock();
+        if (it != rnlpcache.end()) {
+          const auto& r = it->second;
+          return r;
+        }
 
-      Convolution(size_type K, int npt, T coeff, T expnt, FunctionData<T, NDIM>& functiondata)
-        : K(K), npt(npt), c(K, K, 4*K), coeff(coeff), expnt(expnt), functiondata(functiondata) {
-        GLget(&quad_x, &quad_w, npt);
-        autoc();
+        Tensor<T, 1> rnlp;
+        Level natlev = 0.5*std::log2(expnt) + 1; // natural level for Gaussian
+
+        if (issmall(n, lx)) {
+          // store an empty tensor at n=-SHRT_MAX (initialized in the constructor) and return it when issmall is true
+          mra::Key<NDIM> key_small(0, -SHRT_MAX, std::array<Translation, NDIM>({0}));
+          cachemutex.lock();
+          auto it_small = rnlpcache.find(key_small); // guaranteed to be there since we initialized it in the constructor
+          cachemutex.unlock();
+          const auto& r_small = it_small->second;
+          return r_small;
+
+          // // const auto & r = Tensor<T, 1>(); // return an empty tensor
+          // rnlp = Tensor<T, 1>();
+          // return rnlp;
+        }
+        else if (n < natlev) {
+          // compute at a finer level
+          Tensor<T, 1> tmp(4*K), R(4*K), work(2*K);
+          const auto& r1 = get_rnlp(n+1, 2*lx);
+          const auto& r2 = get_rnlp(n+1, 2*lx+1);
+
+          auto tmp_view = tmp.current_view();
+          auto r1_view = r1.current_view();
+          auto r2_view = r2.current_view();
+
+          std::array<Slice,1> slice1 = {Slice(0, 2*K)};
+          std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
+          if (!r1.empty()) tmp_view(slice1) = r1_view(slice1);
+          if (!r2.empty()) tmp_view(slice2) = r2_view(slice1);
+
+          const auto& hgTtwo = functiondata2.get_hgT();
+          auto hgTtwo_view = hgTtwo.current_view();
+          auto R_view = R.current_view();
+          transform(tmp_view, hgTtwo_view, R_view, work.data());
+
+          rnlp = Tensor<T, 1>(2*K);
+          auto rnlp_view = rnlp.current_view();
+          rnlp_view(slice1) = R_view(slice1);
+
+          cachemutex.lock();
+          if (rnlpcache.find(key) == rnlpcache.end()) {
+            rnlpcache.emplace(key, std::move(rnlp));
+          }
+          it = rnlpcache.find(key);
+          cachemutex.unlock();
+          const auto& r = it->second;
+          return r;
+        }
+        else {
+          // the usual computation
+          return make_rnlp(n, lx);
+        }
       }
 
-      Convolution(Convolution&&) = default;
-      Convolution(const Convolution&) = delete;
-      Convolution& operator=(Convolution&&) = default;
-      Convolution& operator=(const Convolution&) = delete;
-
-      const Tensor<T, 2>& make_rnlij (const Level n, const Translation lx) {
+      const Tensor<T, 2>& make_rnlij (Level n, Translation lx) const {
         mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = rnlijcache.find(key);
@@ -139,15 +233,17 @@ namespace mra {
         Tensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
 
-        const auto& rnlp1 = make_rnlp(n, lx-1);
-        const auto& rnlp2 = make_rnlp(n, lx);
+        const auto& rnlp1 = get_rnlp(n, lx-1);
+        const auto& rnlp2 = get_rnlp(n, lx);
         auto rnlp1_view = rnlp1.current_view();
         auto rnlp2_view = rnlp2.current_view();
 
         std::array<Slice,1> slice1 = {Slice(0, 2*K)};
-        R_view(slice1) = rnlp1_view(slice1);
+        if (!rnlp1.empty()) R_view(slice1) = rnlp1_view(slice1);
+        // std::cout << "After copying rnlp1 to R_view, R_view is \n" << R_view << std::endl;
         std::array<Slice,1> slice2 = {Slice(2*K, 4*K)};
-        R_view(slice2) = rnlp2_view(slice1);
+        if (!rnlp2.empty()) R_view(slice2) = rnlp2_view(slice1);
+        // std::cout << "After copying rnlp2 to R_view, R_view is \n" << R_view << std::endl;
 
         T scale = std::pow(T(0.5), T(0.5*n));
         R_view *= scale;
@@ -166,7 +262,7 @@ namespace mra {
         return r;
       }
 
-      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) {
+      std::shared_ptr<const ConvolutionData<T>> make_nonstandard (const Level n, const Translation lx) const {
         mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = nscache.find(key);
@@ -176,60 +272,71 @@ namespace mra {
           return r;
         }
 
-        Tensor<T, 2> tmp(2*K, 2*K);
-        const Tensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
-        const Tensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
-        const Tensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
+        if (!issmall(n, lx)) {
+          Tensor<T, 2> R, S, work;
+          Tensor<T, 2> tmp(2*K, 2*K);
+          const Tensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
+          const Tensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
+          const Tensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
 
-        auto tmp_view = tmp.current_view();
-        auto rm_view = rm.current_view();
-        auto r0_view = r0.current_view();
-        auto rp_view = rp.current_view();
+          auto tmp_view = tmp.current_view();
+          auto rm_view = rm.current_view();
+          auto r0_view = r0.current_view();
+          auto rp_view = rp.current_view();
 
-        std::array<Slice,2> slice = {Slice(0, K), Slice(0, K)};
-        tmp_view(slice) = r0_view;
-        slice = {Slice(0, K), Slice(K, 2*K)};
-        tmp_view(slice) = rm_view;
-        slice = {Slice(K, 2*K), Slice(0, K)};
-        tmp_view(slice) = rp_view;
-        slice = {Slice(K, 2*K), Slice(K, 2*K)};
-        tmp_view(slice) = r0_view;
+          std::array<Slice,2> slice = {Slice(0, K), Slice(0, K)};
+          tmp_view(slice) = r0_view;
+          slice = {Slice(0, K), Slice(K, 2*K)};
+          tmp_view(slice) = rm_view;
+          slice = {Slice(K, 2*K), Slice(0, K)};
+          tmp_view(slice) = rp_view;
+          slice = {Slice(K, 2*K), Slice(K, 2*K)};
+          tmp_view(slice) = r0_view;
 
-        const auto& hgT = functiondata.get_hgT();
-        auto hgT_view = hgT.current_view();
-        Tensor<T, 2> R(2*K, 2*K), work(2*K, 2*K);
-        auto R_view = R.current_view();
-        transform(tmp_view, hgT_view, R_view, work.data());
-        Tensor<T, 2> S(K, K);
-        auto S_view = S.current_view();
-        slice = {Slice(0, K), Slice(0, K)};
-        S_view(slice) = R_view(slice);
+          const auto& hgT = functiondata.get_hgT();
+          auto hgT_view = hgT.current_view();
+          R = Tensor<T, 2>(2*K, 2*K);
+          S = Tensor<T, 2>(K, K);
+          work = Tensor<T, 2>(2*K, 2*K);
+          auto R_view = R.current_view();
+          auto S_view = S.current_view();
 
-        // transpose
-        for (size_type i = 0; i < 2*K; ++i) {
-          for (size_type j = i+1; j < 2*K; ++j) {
-            std::swap(R_view(i, j), R_view(j, i));
+          transform(tmp_view, hgT_view, R_view, work.data());
+          slice = {Slice(0, K), Slice(0, K)};
+          S_view(slice) = R_view(slice);
+
+          // transpose
+          for (size_type i = 0; i < 2*K; ++i) {
+            for (size_type j = i+1; j < 2*K; ++j) {
+              std::swap(R_view(i, j), R_view(j, i));
+            }
           }
-        }
 
-        for (size_type i = 0; i < K; ++i) {
-          for (size_type j = i+1; j < K; ++j) {
-            std::swap(S_view(i, j), S_view(j, i));
+          for (size_type i = 0; i < K; ++i) {
+            for (size_type j = i+1; j < K; ++j) {
+              std::swap(S_view(i, j), S_view(j, i));
+            }
           }
-        }
-        auto obj = ConvolutionData<T>();
-        obj.R = std::move(R);
-        obj.S = std::move(S);
+          auto obj = ConvolutionData<T>();
+          obj.R = std::move(R);
+          obj.S = std::move(S);
+          obj.normR = normf(obj.R.current_view());
+          obj.normS = normf(obj.S.current_view());
 
-        cachemutex.lock();
-        if (nscache.find(key) == nscache.end()) {
-          auto obj_ptr = std::make_shared<const ConvolutionData<T>>(std::move(obj));
-          nscache.emplace(key, std::move(obj_ptr));
+          cachemutex.lock();
+          if (nscache.find(key) == nscache.end()) {
+            auto obj_ptr = std::make_shared<const ConvolutionData<T>>(std::move(obj));
+            nscache.emplace(key, std::move(obj_ptr));
+          }
+          it = nscache.find(key);
+          cachemutex.unlock();
+          const auto& r = it->second;
+          return r;
         }
-        it = nscache.find(key);
-        cachemutex.unlock();
-        const auto& r = it->second;
-        return r;
+
+        auto empty = ConvolutionData<T>();
+        return std::make_shared<const ConvolutionData<T>>(std::move(empty));
+
       }
     };
 
@@ -241,7 +348,7 @@ namespace mra {
     size_type K;
     // size_type seprank;
     Convolution<T, NDIM>& conv;                             // convolution object
-    std::map<Key<NDIM>, std::shared_ptr<op_type>> opdata;   // map for storing operator data
+    mutable std::map<Key<NDIM>, std::shared_ptr<op_type>> opdata;   // map for storing operator data
     mutable std::mutex cachemutex;                          // mutex for thread safety
 
     T norm_ns(Level n, std::array<std::shared_ptr<const ConvolutionData<T>>, NDIM>& ns) const {
@@ -279,7 +386,7 @@ namespace mra {
     ConvolutionOperator& operator=(ConvolutionOperator&&) = default;
     ConvolutionOperator& operator=(const ConvolutionOperator&) = delete;
 
-    std::shared_ptr<const OperatorData<T, NDIM>> get_op(const Key<NDIM>& key) {
+    std::shared_ptr<const OperatorData<T, NDIM>> get_op(const Key<NDIM>& key) const {
       cachemutex.lock();
       auto it = opdata.find(key);
       cachemutex.unlock();

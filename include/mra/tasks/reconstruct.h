@@ -24,6 +24,7 @@ namespace mra{
   auto make_reconstruct(
     const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
+    bool accumulate_NS,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out,
@@ -55,7 +56,7 @@ namespace mra{
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) p->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) p->set_devicemap(devicemap);
 
-    auto do_reconstruct = [&, fns, K, name](const mra::Key<NDIM>& key,
+    auto do_reconstruct = [&, fns, K, accumulate_NS, name](const mra::Key<NDIM>& key,
                                             const mra::FunctionsCompressedNode<T, NDIM>& node,
                                             const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       size_type N = fns->num_functions(key);
@@ -67,7 +68,7 @@ namespace mra{
       // Send empty interior node to result tree
       auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
       r_empty.set_all_leaf(false);
-      //std::cout << name << " " << key << std::endl;
+      //std::cout << name << " " << key << " node norm " << normf(node.coeffs().current_view()) << " from_parent norm " << normf(from_parent.coeffs().current_view())  << std::endl;
 #ifndef MRA_ENABLE_HOST
       // forward() returns a vector that we can push into
       auto sends = ttg::device::forward(ttg::device::send<1>(key, std::move(r_empty)));
@@ -151,7 +152,7 @@ namespace mra{
       auto node_view = node.coeffs().current_view();
       auto hg_view = hg.current_view();
       auto from_parent_view = from_parent.coeffs().current_view();
-      submit_reconstruct_kernel(key, N, K, node_view, hg_view, from_parent_view,
+      submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
                                 r_ptrs, tmp_scratch.current_device_ptr(), ttg::device::current_stream());
 
 #ifdef MRA_CHECK_NORMS
@@ -167,6 +168,7 @@ namespace mra{
         const mra::Key<NDIM> child= *it;
         mra::FunctionsReconstructedNode<T,NDIM>& r = r_arr[it.index()];
         r.key() = child;
+        //std::cout << name << " " << key << " norm " << normf(node_view) << " child " << child << " r norm " << normf(r.coeffs().current_view()) << std::endl;
         if (r.is_all_leaf()) {
           do_send.template operator()<1>(child, std::move(r));
         } else {

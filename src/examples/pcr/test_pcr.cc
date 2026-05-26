@@ -18,6 +18,7 @@ void test_pcr(std::size_t N, std::size_t K,
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-domain_size, domain_size);
+  bool is_ns = false;
 
   if (seed > 0) {
     srand48(seed);
@@ -62,11 +63,11 @@ void test_pcr(std::size_t N, std::size_t K,
   auto start = make_start(gaussians, project_control);
   auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
+  auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   // C(R(C(P)))
-  auto compress_r = make_compress(gaussians, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  auto compress_r = make_compress(gaussians, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
 
   // C(R(C(P))) - C(P)
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_reconstruct_result, compress_result, gaxpy_result, "gaxpy", pmap, dmap);
@@ -77,7 +78,7 @@ void test_pcr(std::size_t N, std::size_t K,
     // TODO: check for the norm within machine precision
     auto norms_view = norms.current_view();
     for (size_type i = 0; i < norms_view.size(); ++i) {
-      if (std::abs(norms_view[i]) > 1e12) {
+      if (std::abs(norms_view[i]) > 1e-12) {
         std::cout << "Final norm " << i << " in batch " << key.batch() << " : " << norms_view[i] << std::endl;
       }
     }
@@ -134,9 +135,7 @@ int main(int argc, char **argv) {
   double domain_size = opt.parse("-d", 6.0); // size of the domain cube [-d,d]
   bool print_dot = opt.exists("-dot");
 
-  ttg::initialize(argc, argv, cores);
-  mra::GLinitialize();
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv, cores);
 
   /**
    * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the
@@ -146,6 +145,5 @@ int main(int argc, char **argv) {
     test_pcr<double, 3>(N, K, num_batches, max_level, seed, initial_level, root_radius, expnt, domain_size, print_dot);
   }
 
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

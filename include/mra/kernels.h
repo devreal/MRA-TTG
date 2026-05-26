@@ -14,5 +14,6 @@
 #include "mra/kernels/norm.h"
 #include "mra/kernels/derivative.h"
 #include "mra/kernels/simple_norm.h"
+#include "mra/kernels/convolution.h"
 
 #endif // MRA_KERNELS_H

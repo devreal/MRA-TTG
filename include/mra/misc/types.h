@@ -34,7 +34,7 @@ namespace mra {
 
     // Presently making all of these different to try to identify misuses
     using Level = int16_t; //< Type of level in adaptive tree (>=0) .. 16bit enough
-    using Translation = uint32_t; //< Type of translation in adaptive tree (>=0)
+    using Translation = int32_t; //< Type of translation in adaptive tree (>=0)
     using Batch = int16_t; //< Type of batch index in adaptive tree (>=0) .. 16bit enough
     using Dimension = uint32_t; //size_t; //< Number of dimension in function or tensor (>=1) .. 8 bit OK
     using HashValue = uint64_t; //< Type of hash value used by madness (unsigned)
