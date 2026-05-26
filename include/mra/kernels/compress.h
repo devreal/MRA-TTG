@@ -2,6 +2,8 @@
 #define MRA_KERNELS_COMPRESS_H
 
 #include <array>
+
+#include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
 #include "mra/ops/functions.h"
 #include "mra/misc/key.h"
@@ -29,6 +31,7 @@ namespace mra {
     DEVSCOPE void compress_kernel_impl(
       Key<NDIM> key,
       size_type K,
+      bool is_ns,
       concepts::TensorView<NDIM> auto& p,
       concepts::TensorView<NDIM> auto& d,
       const concepts::TensorView<2> auto& hgT,
@@ -44,15 +47,12 @@ namespace mra {
         s(child_slice) = in;
       }
 
-
       transform(s, hgT, d, workspace);
 
+      auto child_slice = get_child_slice<NDIM>(key, K, 0);
+      p = d(child_slice);
 
-      if (key.level() > 0) {
-        auto child_slice = get_child_slice<NDIM>(key, K, 0);
-        p = d(child_slice);
-        d(child_slice) = 0.0;
-      }
+      if (key.level() > 0 && !is_ns) d(child_slice) = 0.0;
 
       sumabssq(d, d_sumsq);
     }
@@ -63,6 +63,7 @@ namespace mra {
       Key<NDIM> key,
       size_type N,
       size_type K,
+      bool is_ns,
       concepts::TensorView<NDIM+1> auto p_in,
       concepts::TensorView<NDIM+1> auto result_in,
       const concepts::TensorView<2> auto hgT,
@@ -96,7 +97,7 @@ namespace mra {
         }
         SYNCTHREADS();
 
-        compress_kernel_impl(key, K, p, d, hgT, s, workspace,
+        compress_kernel_impl(key, K, is_ns, p, d, hgT, s, workspace,
                              &d_sumsq[fnid], block_in_views);
       }
     }
@@ -107,6 +108,7 @@ namespace mra {
     const Key<NDIM>& key,
     size_type N,
     size_type K,
+    bool is_ns,
     concepts::TensorView<NDIM+1> auto& p_view,
     concepts::TensorView<NDIM+1> auto& result_view,
     const concepts::TensorView<2> auto& hgT_view,
@@ -120,7 +122,8 @@ namespace mra {
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::compress_kernel, N, thread_dims, smem_size, stream,
-      (key, N, K, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
+      (key, N, K, is_ns, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
+    checkSubmit();
   }
 
 
@@ -130,6 +133,7 @@ void submit_compress_kernel<double, 3>(
     const Key<3>& key,
     size_type N,
     size_type K,
+    bool is_ns,
     SparseTensorView<double, 3+1>& p_view,
     SparseTensorView<double, 3+1>& result_view,
     const SparseTensorView<double, 2>& hgT_view,

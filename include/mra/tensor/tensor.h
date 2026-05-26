@@ -210,6 +210,11 @@ namespace mra {
       return size() == 0;
     }
 
+    void clear() {
+      m_buffer.clear();
+      std::fill(m_dims.begin(), m_dims.end(), 0);
+    }
+
     template <typename Archive>
     void serialize(Archive &ar) {
       ar &m_dims &m_buffer;
@@ -286,12 +291,12 @@ namespace mra {
         break;
       }
       for (size_type i=0; i<lastdimsize; ++i,++it) { //<<< it incremented here!
-        // s.precision(4);
+        s.precision(4);
         s << " ";
         //s.precision(8);
-        //s.width(12);
-        s.precision(16);
-        s.width(20);
+        s.width(12);
+        //s.precision(16);
+        //s.width(20);
         s << *it;
       }
       s.unsetf(std::ios::scientific);

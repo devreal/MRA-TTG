@@ -28,6 +28,7 @@ namespace mra
   static auto make_compress(
     const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
+    const bool is_ns,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>& in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
@@ -60,7 +61,7 @@ namespace mra
     /* append out edge to set of edges */
     auto compress_out_edges = std::tuple_cat(send_to_compress_edges, std::make_tuple(out));
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
-    auto do_compress = [&, fns, K, name](const mra::Key<NDIM>& key,
+    auto do_compress = [&, fns, K, is_ns, name](const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in1,
@@ -161,7 +162,7 @@ namespace mra
           auto rcoeffs_view = d.current_view();
           auto hgT_view = hgT.current_view();
 
-          submit_compress_kernel(key, N, K, coeffs_view, rcoeffs_view, hgT_view,
+          submit_compress_kernel(key, N, K, is_ns, coeffs_view, rcoeffs_view, hgT_view,
                                 tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
                                 ttg::device::current_stream());
           norms.compute();

@@ -8,6 +8,8 @@
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
 
+#include "compare_mad_mra.h"
+
 using namespace mra;
 
 typedef madness::Vector<double,3> coordT;
@@ -15,10 +17,10 @@ typedef madness::Function<double,3> functionT;
 typedef madness::FunctionFactory<double,3> factoryT;
 typedef madness::Tensor<double> tensorT;
 
-static const double Length = 4.0;
 static const int init_lev = 2;
 static double expnt = 1000.0;
 static double g_center_x = 0.0;  // x-center of current function (set per-function during MADNESS comparison)
+
 
 template <typename T>
 static T u_exact(const coordT &pt) {
@@ -66,6 +68,8 @@ auto compute_u_madness(madness::World& world, size_type k, T thresh, int init_le
 
   functionT u = factoryT(world).f(u_exact);
   u.set_autorefine(true);
+  std::cout << "MAD function has " << u.min_nodes() << " nodes before convolution" << std::endl;
+
   //u.truncate();
 
   return u;
@@ -266,15 +270,12 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   D[0].set_cube(-6,6);
   T g1 = 0;
   T g2 = 0;
-
+  bool is_ns = false;
 
   auto pmap = make_procmap<NDIM>(N, 1);
   auto dmap = make_devicemap<NDIM>(pmap);
 
   std::array<Slice,NDIM> slices = {Slice(0, K-1), Slice(0, K-1), Slice(0, 2*K-1)};
-
-  srand48(5551212); // for reproducible results
-  for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result;
@@ -313,9 +314,9 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
   auto extract_p = make_extract(project_result, project_result_map, "extract_p");
   // C(P)
-  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress", pmap, dmap);
+  auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
+  auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
   // D(R(C(P)))
   auto extract_u = make_extract(reconstruct_result, umap, "extract_u");
   using derivative_type = decltype(make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis_a,
@@ -406,7 +407,7 @@ int main(int argc, char **argv) {
   auto opt = mra::OptionParser(argc, argv);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 8);
-  expnt = opt.parse("-e", 100.0); // default: 100.0
+  expnt = opt.parse("-e", expnt); // default: 100.0
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int axis_a    = opt.parse("-a1", 0); // from axis 0
   int axis_b    = opt.parse("-a2", 2); // to axis 2
@@ -415,8 +416,7 @@ int main(int argc, char **argv) {
   int domain = opt.parse("-d", 6);
   int verification_log_precision = opt.parse("-v", 10); // default: 1e-10
 
-  ttg::initialize(argc, argv, cores);
-  mra::GLinitialize();
+  mra::initialize(argc, argv, cores);
 
   if (ttg::default_execution_context().size() > 1) {
     throw std::runtime_error("MADNESS derivative test does not support distributed execution yet.");
@@ -442,6 +442,5 @@ int main(int argc, char **argv) {
   test_derivative<double, 3>(N, K, axis_a, axis_b, std::pow(10, -log_precision), max_level,
                              std::pow(10, -verification_log_precision), argc, argv);
 
-  madness::finalize();
-  ttg::finalize();
+  mra::finalize();
 }

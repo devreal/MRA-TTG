@@ -2,7 +2,6 @@
 #define MRA_TASKS_NORM_H
 
 #include <ttg.h>
-#include "mra/kernels.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"

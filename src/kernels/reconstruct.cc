@@ -8,6 +8,7 @@ namespace mra {
     const Key<3>& key,
     size_type N,
     size_type K,
+    bool accumulate_NS,
     const SparseTensorView<double, 3+1>& node,
     const SparseTensorView<double, 2>& hg,
     const SparseTensorView<double, 3+1>& from_parent,

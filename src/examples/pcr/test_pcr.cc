@@ -26,6 +26,7 @@ void test_pcr(std::size_t N, std::size_t K,
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-domain_size, domain_size);
+  bool is_ns = false;
 
   if (seed > 0) {
     srand48(seed);
@@ -73,14 +74,14 @@ void test_pcr(std::size_t N, std::size_t K,
   all_tts.push_back(std::get<0>(project).get());
   all_tts.push_back(std::get<1>(project).get());
   // C(P)
-  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
+  auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   all_tts.push_back(std::get<0>(compress).get());
   all_tts.push_back(std::get<1>(compress).get());
   // R(C(P))
-  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   all_tts.push_back(reconstruct.get());
   // C(R(C(P)))
-  auto compress_r = make_compress(gaussians, K, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  auto compress_r = make_compress(gaussians, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
   all_tts.push_back(std::get<0>(compress_r).get());
   all_tts.push_back(std::get<1>(compress_r).get());
 
@@ -153,9 +154,7 @@ int main(int argc, char **argv) {
   bool print_dot = opt.exists("-dot");
   bool trace = opt.exists("-trace");
 
-  ttg::initialize(argc, argv, cores);
-  mra::GLinitialize();
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv, cores);
 
   if (trace) {
     ttg::trace_on();
@@ -169,6 +168,5 @@ int main(int argc, char **argv) {
     test_pcr<double, 3>(N, K, num_batches, max_level, seed, initial_level, root_radius, expnt, domain_size, print_dot);
   }
 
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

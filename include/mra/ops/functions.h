@@ -7,6 +7,8 @@
 #include "mra/tensor/tensorview.h"
 
 #include <algorithm>
+#include <cmath>
+#include <numbers>
 
 namespace mra {
 
@@ -15,6 +17,12 @@ namespace mra {
     template <typename T, Dimension NDIM>
     SCOPE T truncate_tol(const Key<NDIM>& key, const T thresh) {
         return thresh; // nothing clever for now
+    }
+
+    // volume of n-dimensional sphere of radius R
+    template<typename T>
+    SCOPE T vol_nsphere(int NDIM, T R) {
+        return std::pow(std::numbers::pi,NDIM*0.5)*std::pow(R,NDIM)/std::tgamma(1+0.5*NDIM);
     }
 
     /// Computes square of distance between two coordinates
@@ -164,10 +172,17 @@ namespace mra {
        * This requires block_size() elements in shared memory.
        * The block size can be controlled explicitly in case not all threads
        * contribute values.
+       *
+       * TODO: use __shfl_down_sync instead of shared memory for reduction on supported architectures.
        */
       template <typename T>
       SCOPE void reduce_block(const T input, T* output, size_type blocksize = block_size()) {
 #ifdef HAVE_DEVICE_ARCH
+
+#ifdef USE_SHFL_REDUCE
+        // TODO!
+
+#else // USE_SHFL_REDUCE
         __shared__ T sdata[MAX_THREADS_PER_BLOCK];
         size_type tid = thread_id();
         sdata[tid] = input;
@@ -198,6 +213,7 @@ namespace mra {
             *output = sdata[0];
         }
         SYNCTHREADS();
+#endif // USE_SHFL_REDUCE
 #else  // HAVE_DEVICE_ARCH
         *output = input;
 #endif // HAVE_DEVICE_ARCH

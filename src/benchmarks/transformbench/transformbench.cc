@@ -374,8 +374,7 @@ int main(int argc, char **argv) {
   std::cout << "Running benchmark with " << nreps << " repetitions, " << ntasks << " tasks, "
             << N << " functions, " << K << " coefficients, " << M << " blocks"
             << std::endl;
-  ttg::initialize(argc, argv);
-  allocator_init(argc, argv);
+  mra::initialize(argc, argv);
 #ifdef MRA_HAVE_KOKKOS
   Kokkos::initialize(argc, argv);
 #endif // MRA_HAVE_KOKKOS
@@ -386,6 +385,5 @@ int main(int argc, char **argv) {
   streams.clear();
   Kokkos::finalize();
 #endif // MRA_HAVE_KOKKOS
-  allocator_fini();
-  ttg::finalize();
+  mra::finalize();
 }

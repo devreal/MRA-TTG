@@ -392,6 +392,7 @@ namespace mra {
       return *this;
     }
 
+
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
@@ -400,6 +401,16 @@ namespace mra {
       foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
       return *this;
     }
+
+    /// Accumulate into patch
+    /// Device: assumes this operation is called by all threads in a block
+    /// Host: assumes this operation is called by a single CPU thread
+    typename std::enable_if<!std::is_const_v<TensorViewT>,TensorSlice&>::type
+    SCOPE operator+=(const TensorViewT& other) {
+      foreach_idx(*this, [&](size_type i){ this->operator[](i) += other[i]; });
+      return *this;
+    }
+
 
     /// Copy into patch
     /// Defined below once we know TensorView
@@ -565,6 +576,10 @@ namespace mra {
 
     SCOPE const dims_array_t& dims() const {
       return m_dims;
+    }
+
+    SCOPE bool empty() const {
+      return m_ptr == nullptr || size() == 0;
     }
 
     SCOPE size_type stride(size_type d) const {
