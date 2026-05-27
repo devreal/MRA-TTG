@@ -143,7 +143,7 @@ void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
 
   double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
-  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
+  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, madness::LatticeRange()));
 
   // f.make_nonstandard(false, true);
   // f.compress();

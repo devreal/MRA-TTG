@@ -56,9 +56,9 @@ void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axi
   // auto start_d = make_start(project_d_control);
   auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
   // C(P)
-  auto compress = make_compress(gaussians, K, functiondata, project_result, compress_result, "compress", pmap, dmap);
+  auto compress = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))
-  auto reconstruct = make_reconstruct(gaussians, K, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
+  auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
 
   using derivative_type = decltype(make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis_a,
                                       FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap));
@@ -71,7 +71,6 @@ void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axi
        (axis_a < axis_b) ? (ax <= axis_b) : (ax >= axis_b);
        ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out;
-    std::cout << "Computing derivative in axis " << ax << std::endl;
     derivatives[ax] = make_derivative(gaussians, K, deriv_in, out, functiondata, db, g1, g2, ax,
                                       FunctionData<T, NDIM>::BC_DIRICHLET,
                                       FunctionData<T, NDIM>::BC_DIRICHLET,

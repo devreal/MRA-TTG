@@ -49,7 +49,7 @@ auto compute_conv_madness(real_convolution_t& mad_conv) {
 
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(std::size_t N, size_type K, T precision, int max_level,
+void test_convolution(int num_batches, std::size_t N, size_type K, T precision, int max_level,
                      T verification_precision, real_convolution_t& mad_conv) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto functiondata2 = mra::FunctionData<T,NDIM>(2*K);
@@ -66,39 +66,41 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result,
                                                                    compress_r_result,
                                                                    convolution_result;
-  ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
+  ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_result;
+
+  auto pmap = make_procmap<NDIM>(N, num_batches);
+  auto dmap = make_devicemap<NDIM>(pmap);
 
   // define N Gaussians
-  auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-
-  for (int i = 0; i < N; ++i) {
+  auto gaussians = make_functionset<mra::Gaussian<T, NDIM>>(pmap.batch_manager());
+  auto gaussians_view = gaussians->current_view(); // host view
+  // define N Gaussians
+  for (int i = 0; i < gaussians->num_functions(); ++i) {
     mra::Coordinate<T,NDIM> r;
     for (size_t d=0; d<NDIM; d++) {
       r[d] = 0.0;
     }
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
   std::cout << N << " Gaussians with expnt " << expnt << std::endl;
 
   mra::GaussianConvolutionOperator<T, NDIM> op(mad_conv);
 
-  // put it into a buffer
-  auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
   // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
   auto db            = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
-  auto start         = make_start(project_control);
-  auto project       = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
+  auto start         = make_start(gaussians, project_control);
+  auto project       = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
   auto extract_project = make_extract(project_result, projmap);
-  auto compress      = make_compress(N, K, false, functiondata, project_result, compress_result, "compress");
+  auto compress      = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress");
   auto extract_compress = make_extract(compress_result, cmap);
-  auto reconstruct     = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto reconstruct     = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
   auto extract_reconstruct = make_extract(reconstruct_result, rmap);
-  auto compress_r   = make_compress(N, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
+  auto compress_r   = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
   auto extract_ns = make_extract(compress_r_result, nsmap);
-  auto convolve      = make_convolution(N, K, compress_r_result, convolution_result, op, precision, "convolution");
+  auto convolve      = make_convolution(gaussians, K, compress_r_result, convolution_result, op, precision, "convolution");
   auto extract_conv  = make_extract(convolution_result, convmap);
-  auto reconstruct_conv = make_reconstruct(N, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
+  auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
   auto extract_rconv  = make_extract(reconstruct_conv_result, rconvmap);
   auto connected     = make_graph_executable(start.get());
   assert(connected);
@@ -108,7 +110,7 @@ void test_convolution(std::size_t N, size_type K, T precision, int max_level,
 
       // beg = std::chrono::high_resolution_clock::now();
       // This kicks off the entire computation
-      start->invoke(mra::Key<NDIM>(0, {0, 0, 0}));
+      start->invoke();
   }
   ttg::execute();
   ttg::fence();
@@ -160,6 +162,7 @@ int main(int argc, char **argv) {
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
+  int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
   Length = opt.parse("-d", Length);
   bool norand = opt.exists("-norand");
   /**
@@ -192,7 +195,7 @@ int main(int argc, char **argv) {
   double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   madness::World world(SafeMPI::COMM_WORLD);
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
-  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
+  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, madness::LatticeRange()));
   real_convolution_t mad_conv(world, ops, K);
 
 
@@ -206,7 +209,7 @@ int main(int argc, char **argv) {
               << std::endl;
   }
 
-  test_convolution<double, 3>(N, K, precision, max_level,
+  test_convolution<double, 3>(num_batches, N, K, precision, max_level,
                              std::pow(10, -verification_log_precision), mad_conv);
 
   mra::finalize();

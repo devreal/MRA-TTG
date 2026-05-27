@@ -405,8 +405,8 @@ namespace mra {
     /// Accumulate into patch
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    typename std::enable_if<!std::is_const_v<TensorViewT>,TensorSlice&>::type
-    SCOPE operator+=(const TensorViewT& other) {
+    typename std::enable_if<!std::is_const_v<TV>,TensorSlice&>::type
+    SCOPE operator+=(const concepts::TensorView<TV::ndim()> auto& other) {
       foreach_idx(*this, [&](size_type i){ this->operator[](i) += other[i]; });
       return *this;
     }
@@ -578,8 +578,11 @@ namespace mra {
       return m_dims;
     }
 
+    /**
+     * Returns true if the view has no allocated storage or zero size.
+     */
     SCOPE bool empty() const {
-      return m_ptr == nullptr || size() == 0;
+      return this->data() == nullptr || this->size() == 0;
     }
 
     SCOPE size_type stride(size_type d) const {
@@ -739,14 +742,6 @@ namespace mra {
       }
       return *this;
     }
-
-    /**
-     * Returns true if the view has no allocated storage or zero size.
-     */
-    bool empty() const {
-      return this->data() == nullptr || this->size() == 0;
-    }
-
 
     /**
      * Returns the underlying storage pointer. This pointer should not

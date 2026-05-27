@@ -113,8 +113,9 @@ namespace mra {
    *       values based on the number of neighbors each task has. We still need to create the children but do not have to send empty inputs anymore.
    */
 
-  template <typename T, Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_convolution(size_type N, size_type K,
+  template <typename T, Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_convolution(const std::shared_ptr<FunctionSetT>& fns, size_type K,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> result,
                         const mra::GaussianConvolutionOperator<T, NDIM>& op,
@@ -369,6 +370,8 @@ namespace mra {
     auto adjust_leaf_tt = ttg::make_tt<Space>(
       [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node, const ChildLeafInfo& child_info) -> TASKTYPE {
 
+        size_type N = fns->num_functions(key);
+
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
         auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
@@ -399,7 +402,7 @@ namespace mra {
       }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), "AdjustLeaf");
 
 
-    ttg::Edge<mra::Key<NDIM>, Tensor<T, 1>> norm_edge; // edge to send the cnorms from the screener to the accumulate task
+    ttg::Edge<mra::Key<NDIM>, DenseTensor<T, 1>> norm_edge; // edge to send the cnorms from the screener to the accumulate task
 
 
     /****************************************************
@@ -412,6 +415,7 @@ namespace mra {
       [=](const Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
+        size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -424,10 +428,10 @@ namespace mra {
         };
 #endif
 
-        Tensor<T, 1> cnorms;
+        DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          cnorms = Tensor<T, 1>(N, ttg::scope::Allocate);
+          cnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
@@ -450,10 +454,12 @@ namespace mra {
      *       Taking the raw pointer here is a dirty hack!
      */
     auto screener_tt = ttg::make_tt<Space>(
-      [&, N, K, thresh, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
+      [&, K, thresh, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
                               const mra::Key<NDIM>& key,
                               const mra::FunctionsCompressedNode<T, NDIM>& in_node,
-                              const Tensor<T, 1>& cnorms) -> TASKTYPE {
+                              const DenseTensor<T, 1>& cnorms) -> TASKTYPE {
+
+        size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -492,7 +498,7 @@ namespace mra {
                   if (d0 == 0 && d1 == 0 && d2 == 0) {
                     continue; // skip self contribution since it is handled separately
                   }
-                  auto disp_key = mra::Key<NDIM>(0, {d0, d1, d2});
+                  auto disp_key = mra::Key<NDIM>(key.batch(), 0, {d0, d1, d2});
                   mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
                   if (!neighbor_key.is_valid() || neighbor_key == key) {
                     continue;
@@ -570,9 +576,11 @@ namespace mra {
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
     auto shell0_tt = ttg::make_tt<Space>(
-      [&, N, K, fac, thresh, name](
+      [&, K, fac, thresh, name](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
+
+      size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
@@ -594,7 +602,7 @@ namespace mra {
       if (!in_node.empty()) {
 
         // for fixed distance, the 2nd arg to get_op needs to be mra::Key<NDIM>(key.level(), {0, 0, 0})
-        auto op_data = op.get_op(key.level(), mra::Key<NDIM>(key.level(), {0, 0, 0}));
+        auto op_data = op.get_op(key.level(), mra::Key<NDIM>(key.batch(), key.level(), {0, 0, 0}));
 
         out.allocate(K, ttg::scope::Allocate);
         out.set_ns();
@@ -606,7 +614,7 @@ namespace mra {
         //  }
         //}
 
-        Tensor<T, 1> resnorms(N, TempScope);
+        DenseTensor<T, 1> resnorms(N, TempScope);
         T opnorm = op_data->norm;
         T tol = truncate_tol(key, thresh);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
@@ -719,7 +727,7 @@ namespace mra {
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
-      [&, N, K, fac, thresh, name](
+      [&, K, fac, thresh, name](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
@@ -740,6 +748,8 @@ namespace mra {
       auto source = keypair.source;
       auto displacement = key - source;
 
+      size_type N = fns->num_functions(key);
+
       //std::cout << "ACCUMULATE " << key << " in_node " << in_node.key() << " applying contribution " << contribution_keys.back()
       //          << " with " << contribution_keys.size() << " contributions left" << std::endl;
 
@@ -757,7 +767,7 @@ namespace mra {
 
       mra::FunctionsCompressedNode<T, NDIM> out(key, N);
 
-      auto op_data = op.get_op(key.level(), mra::Key<NDIM>(displacement));
+      auto op_data = op.get_op(key.level(), displacement);
 
       out.allocate(K, ttg::scope::Allocate);
 
@@ -769,7 +779,7 @@ namespace mra {
       //    out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
       //  }
       //}
-      Tensor<T, 1> resnorms;
+      DenseTensor<T, 1> resnorms;
       T opnorm = op_data->norm;
       T tol = truncate_tol(key, thresh);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
@@ -780,7 +790,7 @@ namespace mra {
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
       if (last_key) {
-        resnorms = Tensor<T, 1>(N, TempScope);
+        resnorms =  DenseTensor<T, 1>(N, TempScope);
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
@@ -898,6 +908,8 @@ namespace mra {
           bool child4, bool child5, bool child6, bool child7) -> TASKTYPE {
         // this task receives the leaf status of our children from the down task and sends it to our parent so that it can adjust its contribution count if necessary
         auto child_info = std::array{child0, child1, child2, child3, child4, child5, child6, child7};
+
+        size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();

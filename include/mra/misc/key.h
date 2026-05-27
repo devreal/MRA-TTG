@@ -226,7 +226,7 @@ namespace mra {
         }
 
         SCOPE constexpr static Key<NDIM> invalid() {
-            return Key<NDIM>(b, -1);
+            return Key<NDIM>(0, -1);
         }
 
         SCOPE constexpr bool is_invalid() const {

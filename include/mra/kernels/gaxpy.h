@@ -11,8 +11,8 @@ namespace mra {
   namespace detail {
     template <typename T, Dimension NDIM>
     DEVSCOPE void axpy_kernel_impl(
-      const TensorView<T, NDIM>& nodeA,
-      TensorView<T, NDIM>& nodeR,
+      const concepts::TensorView<NDIM> auto& nodeA,
+      concepts::TensorView<NDIM> auto& nodeR,
       const T scalarA)
     {
       foreach_idx(nodeR, [&](size_type i) {

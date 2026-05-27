@@ -20,7 +20,7 @@ namespace mra {
       }
     }
 
-    template <typename T, Dimension NDIM>
+    template <Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void simple_norm_kernel(
       Key<NDIM> key,
@@ -28,8 +28,9 @@ namespace mra {
       concepts::TensorView<1> auto result_norms,
       size_type N)
     {
+      using T = typename std::remove_reference_t<decltype(node)>::value_type;
       const bool is_t0 = (0 == thread_id());
-      SHARED DenseTensorView<T, NDIM> n;
+      SHARED DenseTensorView<const T, NDIM> n;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
         if (is_t0) {
           n = node(blockid);
@@ -41,12 +42,12 @@ namespace mra {
   } // namespace detail
 
 
-  template <typename T, Dimension NDIM>
+  template <Dimension NDIM>
   void submit_simple_norm_kernel(
     Key<NDIM> key,
-    const concepts::TensorView<NDIM+1> auto& in,
+    const concepts::TensorView<NDIM+1> auto&& in,
     size_type N,
-    concepts::TensorView<1> auto& result_norms)
+    concepts::TensorView<1> auto&& result_norms)
   {
     /* simple norm calculation can use as many threads as are available */
     CALL_KERNEL(detail::simple_norm_kernel, N, MAX_THREADS_PER_BLOCK, 0, ttg::device::current_stream(),

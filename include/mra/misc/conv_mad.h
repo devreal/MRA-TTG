@@ -30,19 +30,19 @@ namespace mra {
   struct ConvolutionData1D {
 #if 0
     // 4D: rank x [R, RU, RVT] x 2D operator matrix
-    Tensor<T, 4> R, S;
+    DenseTensor<T, 4> R, S;
 #endif // 0
 
     // 3D: rank x [R] x 2D operator matrix
-    Tensor<T, 3> R, S;
+    DenseTensor<T, 3> R, S;
 
     ConvolutionData1D() : R(), S(){}
     ConvolutionData1D(size_type rank, size_type K)
     : R(std::array{rank, 2*K, 2*K}, ttg::scope::SyncIn)
     , S(std::array{rank, K, K}, ttg::scope::SyncIn)
     { }
-    ConvolutionData1D(Tensor<T, 3>&& R_,
-                      Tensor<T, 3>&& S_)
+    ConvolutionData1D(DenseTensor<T, 3>&& R_,
+                      DenseTensor<T, 3>&& S_)
     : R(std::move(R_))
     , S(std::move(S_))
     { }
@@ -57,7 +57,7 @@ namespace mra {
     // also taken from MADNESS
     // 3D: rank x NDIM x [Rnorm, Snorm, Rnormf, Snormf, NSnormf]
     //     fac & munorm of each separated term is stored in the same tensor, at dim 0
-    Tensor<T, 3> norms;
+    DenseTensor<T, 3> norms;
     T norm;
 
     ConvolutionData(size_type rank)
@@ -85,7 +85,7 @@ namespace mra {
      */
     std::shared_ptr<const ConvolutionData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
       cachemutex.lock();
-      auto key = Key<NDIM>(n, disp.translation());
+      auto key = Key<NDIM>(0, n, disp.translation());
       auto it = _datacache.find(key);
       if (it != _datacache.end()) {
         cachemutex.unlock();
@@ -252,13 +252,13 @@ namespace mra {
           // op_data.Rs   = Tensor<T, 1>(2 * op_info.K);
           // op_data.Ss   = Tensor<T, 1>(op_info.K);
 
-          Tensor<T, 2> R(2 * K, 2 * K),
+          DenseTensor<T, 2> R(2 * K, 2 * K),
                         RU(2 * K, 2 * K),
                         RVT(2 * K, 2 * K),
                         S(K, K),
                         SU(K, K),
                         SVT(K, K);
-          Tensor<T, 1> Rs(2 * K), Ss(K);
+          DenseTensor<T, 1> Rs(2 * K), Ss(K);
           auto R_view = R.view_on(ttg::device::Device::host());
           auto RU_view = RU.view_on(ttg::device::Device::host());
           auto RVT_view = RVT.view_on(ttg::device::Device::host());

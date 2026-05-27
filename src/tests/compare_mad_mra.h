@@ -30,6 +30,7 @@ namespace mra {
     bool check = true;
     bool all_zero = true;
     const auto &coeffs = madfunc.get_impl()->get_coeffs();
+    Batch batch = mramap.begin() != mramap.end() ? mramap.begin()->first.batch() : 0; // assume all keys in MRA map have the same batch as MADNESS key
     std::cout << name << " MRA: " << mramap.size() << " nodes; MAD: " << madfunc.min_nodes() << " nodes" << std::endl;
 #if 0
     if constexpr (std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
@@ -52,7 +53,7 @@ namespace mra {
         l[i] = it->first.translation()[i];
       }
       auto mad_coeff = it->second;
-      Key<NDIM> key = Key<NDIM>(it->first.level(), l);
+      Key<NDIM> key = Key<NDIM>(batch, it->first.level(), l);
       const auto& mra_coeff = mramap.find(key);
       const auto& mad_norm = mad_coeff.coeff().svd_normf();
       if (mra_coeff != mramap.end()) {

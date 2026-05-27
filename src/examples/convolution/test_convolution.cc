@@ -13,11 +13,20 @@ using real_function_t = madness::Function<double, 3>;
 using real_convolution_t = madness::SeparatedConvolution<double, 3>;
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T expnt_arg, int seed, T precision, int max_level, int d, int initial_level, bool print_dot) {
+void test_convolution(int nrep, int N, int K,
+                      int num_batches, int seed,
+                      int max_level, int initial_level,
+                      T precision,
+                      T root_radius, T expnt,
+                      T domain_size, bool print_dot)
+{
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
-  D[0].set_cube(-d,d);
+  D[0].set_cube(-domain_size, domain_size);
   bool is_ns = true;
+
+  auto pmap = make_procmap<NDIM>(N, num_batches);
+  auto dmap = make_devicemap<NDIM>(pmap);
 
   srand48(5551212); // for reproducible results
   for (int i = 0; i < 10000; ++i) drand48(); // warmup generator
@@ -25,46 +34,44 @@ void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_convolution_result;
-  ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
+  ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_result;
 
   // define N Gaussians
-  auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
-  T expnt = (seed > 0) ? (expnt_arg + expnt_arg*drand48()) : expnt_arg;
-
-  for (int i = 0; i < N; ++i) {
+  auto gaussians = make_functionset<mra::Gaussian<T, NDIM>>(pmap.batch_manager());
+  auto gaussians_view = gaussians->current_view(); // host view
+  // T expnt = 1000.0;
+  for (int i = 0; i < gaussians->num_functions(); ++i) {
+    expnt = (seed > 0) ? (expnt + 1500*drand48()) : expnt;
     mra::Coordinate<T,NDIM> r;
-    for (size_t d=0; d<NDIM; d++) {
-      r[d] = (seed > 0) ? (T(-6.0) + T(6.0)*drand48()) : 0.0;
-    }
     if (seed > 0) {
-      std::cout << "Gaussian " << i << " expnt " << expnt << std::endl;
+      for (size_t d=0; d<NDIM; d++) {
+        r[d] = T(-1*(root_radius)) + T(root_radius)*drand48();
+      }
     }
-    gaussians[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, initial_level);
   }
 
   if (seed == 0) {
-    if (seed == 0) std::cout << N << " Gaussians with expnt " << expnt_arg << std::endl;
+    if (seed == 0) std::cout << N << " Gaussians with expnt " << expnt << std::endl;
   }
 
   double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   madness::World world(SafeMPI::COMM_WORLD);
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
-  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
+  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, madness::LatticeRange()));
   real_convolution_t mad_conv(world, ops, K);
 
   mra::GaussianConvolutionOperator<T, NDIM> op(mad_conv);
 
   std::vector<std::unique_ptr<ttg::TTBase>> tts;
 
-  // put it into a buffer
-  auto gauss_buffer = ttg::Buffer<mra::Gaussian<T, NDIM>>(std::move(gaussians), N);
   // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
-  auto start = make_start(project_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress");
+  auto start = make_start(gaussians, project_control);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
+  auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress");
 
-  auto convolution = make_convolution(N, K, compress_result, compress_convolution_result, op, precision, "convolution");
+  auto convolution = make_convolution(gaussians, K, compress_result, compress_convolution_result, op, precision, "convolution");
 
 #if 0
   /**
@@ -94,9 +101,9 @@ void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T 
   });
 #endif // 0
 
-  auto norm  = make_norm(N, K, compress_convolution_result, norm_result);
+  auto norm  = make_norm(gaussians, K, compress_convolution_result, norm_result);
   // final check
-  auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
+  auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& norms){
     // TODO: check for the norm within machine precision
     auto norms_arr = norms.buffer().current_device_ptr();
     for (size_type i = 0; i < N; ++i) {
@@ -116,7 +123,7 @@ void test_convolution(int nrep, std::size_t N, std::size_t K, Dimension axis, T 
     if (ttg::default_execution_context().rank() == 0) {
         beg = std::chrono::high_resolution_clock::now();
         // This kicks off the entire computation
-        start->invoke(mra::Key<NDIM>(0, {0}));
+        start->invoke();
     }
     ttg::execute();
     ttg::fence();
@@ -137,12 +144,13 @@ int main(int argc, char **argv) {
   int N = opt.parse("-N", 1);
   int K = opt.parse("-K", 10);
   int cores   = opt.parse("-c", -1); // -1: use all cores
-  int axis    = opt.parse("-a", 0);
   int log_precision = opt.parse("-p", 8); // default: 1e-4
   int max_level = opt.parse("-l", -1);
   int initial_level = opt.parse("-i", 2);
   bool norand = opt.exists("-norand");
+  int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
   int seed = opt.parse("-s", norand ? 0 : 5551212); // seed for random number generator, 0 for deterministic
+  double root_radius = opt.parse("-r", 2.0); // radius of the root domain cube
   int domain = opt.parse("-d", 6);
   bool print_dot = opt.exists("-dot");
   int nrep = opt.parse("-n", 3);
@@ -150,7 +158,9 @@ int main(int argc, char **argv) {
 
   mra::initialize(argc, argv, cores);
 
-  test_convolution<double, 3>(nrep, N, K, axis, expnt_arg, seed, std::pow(10, -log_precision), max_level, domain, initial_level, print_dot);
+  test_convolution<double, 3>(nrep, N, K, num_batches, seed,
+                              max_level, initial_level, std::pow(10, -log_precision),
+                              root_radius, expnt_arg, domain, print_dot);
 
   mra::finalize();
 }

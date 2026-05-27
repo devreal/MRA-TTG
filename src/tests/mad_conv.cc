@@ -28,6 +28,7 @@ template<typename T, Dimension NDIM>
 void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precision = 1e-15) {
   bool check = true;
   bool all_zero = true;
+  Batch batch = mramap.begin() != mramap.end() ? mramap.begin()->first.batch() : 0; // assume all keys in MRA map have the same batch as MADNESS key
   const auto &coeffs = madfunc.get_impl()->get_coeffs();
   for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
     std::array<Translation,NDIM> l;
@@ -35,7 +36,7 @@ void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precis
       l[i] = it->first.translation()[i];
     }
     auto mad_coeff = it->second;
-    Key<NDIM> key = Key<NDIM>(it->first.level(), l);
+    Key<NDIM> key = Key<NDIM>(batch,it->first.level(), l);
     auto mra_coeff = mramap.find(key);
     auto mad_norm = mad_coeff.coeff().svd_normf();
     if (mra_coeff != mramap.end()) {
@@ -98,7 +99,7 @@ auto compute_conv_madness(madness::World& world, size_type k, T thresh, int doma
 }
 
 template <typename T, mra::Dimension NDIM>
-void compute_conv_mra(size_type N, size_type K, T precision, int domain, int max_level,
+void compute_conv_mra(size_type N, size_type K, int num_batches, T precision, int domain, int max_level,
                       T verification_precision, int argc, char** argv) {
 
   auto functiondata = mra::FunctionData<T,NDIM>(K);
@@ -113,21 +114,27 @@ void compute_conv_mra(size_type N, size_type K, T precision, int domain, int max
   // std::map<mra::Key<NDIM>, mra::FunctionsCompressedNode<T,NDIM>> cmap;
   std::map<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> rmap;
 
-  auto gaussians = std::make_unique<mra::Gaussian<T, NDIM>[]>(N);
+  auto pmap = make_procmap<NDIM>(N, num_batches);
+  auto dmap = make_devicemap<NDIM>(pmap);
 
-  for (size_type n=0; n<N; ++n) {
-    mra::Coordinate<T, NDIM> r;
-    for (size_type d=0; d<NDIM; ++d) r[d] = 0.0;
-    gaussians[n] = mra::Gaussian<T,NDIM>(D[0], expnt, r, init_lev);
+  // define N Gaussians
+  auto gaussians = make_functionset<mra::Gaussian<T, NDIM>>(pmap.batch_manager());
+  auto gaussians_view = gaussians->current_view(); // host view
+  // define N Gaussians
+  for (int i = 0; i < gaussians->num_functions(); ++i) {
+    mra::Coordinate<T,NDIM> r;
+    for (size_t d=0; d<NDIM; d++) {
+      r[d] = 0.0;
+    }
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
   }
 
-  auto gauss_buffer = ttg::Buffer<mra::Gaussian<T,NDIM>>(std::move(gaussians), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
 
-  auto start = make_start(project_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto compress = make_compress(N, K, false, functiondata, project_result, compress_result, "compress");
-  auto reconstruct = make_reconstruct(N, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto start = make_start(gaussians, project_control);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
+  auto compress = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress");
+  auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
   auto extract = make_extract(reconstruct_result, rmap);
 
   auto connected = make_graph_executable(start.get());
@@ -137,7 +144,7 @@ void compute_conv_mra(size_type N, size_type K, T precision, int domain, int max
   if (ttg::default_execution_context().rank() == 0) {
       beg = std::chrono::high_resolution_clock::now();
       // This kicks off the entire computation
-      start->invoke(mra::Key<NDIM>(0, {0}));
+      start->invoke();
   }
   ttg::execute();
   ttg::fence();
@@ -154,6 +161,7 @@ void compute_conv_mra(size_type N, size_type K, T precision, int domain, int max
 int main(int argc, char** argv) {
 
   auto opt = mra::OptionParser(argc, argv);
+  int num_batches = opt.parse("-b", 1);
   size_type N = opt.parse("-N", 1);
   size_type K = opt.parse("-K", 8);
   expnt = opt.parse("-e", expnt); // default: 1500
@@ -171,7 +179,7 @@ int main(int argc, char** argv) {
 #endif // TTG_PARSEC_IMPORTED
   madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
 
-  compute_conv_mra<double, 3>(N, K, std::pow(10, -log_precision), domain, max_level,
+  compute_conv_mra<double, 3>(N, K, num_batches, std::pow(10, -log_precision), domain, max_level,
                               std::pow(10, -verification_log_precision), argc, argv);
 
   madness::finalize();

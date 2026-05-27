@@ -32,11 +32,11 @@ namespace mra{
       const size_type dimk,
       const size_type mu,
       const T mufac,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& trans,
-      const TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& result,
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2)
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& trans,
+      const concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& result,
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2)
     {
       size_type rank = dimk; // doing computation assuming full rank
       size_type size = 1;
@@ -129,17 +129,17 @@ namespace mra{
       const T mufac,
       const T tol,
       const std::array<bool, 2>& at,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transr,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transs,
-      const TensorView<T, 3>& opnorms,
-      TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& f0,
-      TensorView<T, NDIM>& resultc,
-      TensorView<T, NDIM>& result,
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2,
-      TensorView<T, NDIM>& work1_k,
-      TensorView<T, NDIM>& work2_k)
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<3> auto& opnorms,
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2,
+      concepts::TensorView<NDIM> auto& work1_k,
+      concepts::TensorView<NDIM> auto& work2_k)
     {
       // R term
       double Rnorm = 1.0;
@@ -164,23 +164,23 @@ namespace mra{
       size_type K,
       const T fac,
       const T tol,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transr,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transs,
-      const TensorView<T, 3>& opnorms,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<3> auto& opnorms,
       const std::array<bool, 2>& at,
-      TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& f0,
-      TensorView<T, NDIM>& resultc,
-      TensorView<T, NDIM>& result,  // size K, stores the sum
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2)
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,  // size K, stores the sum
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2)
     {
-      SHARED TensorView<T, NDIM> work1_k, work2_k;
+      SHARED DenseTensorView<T, NDIM> work1_k, work2_k;
       SHARED std::array<Slice,NDIM> s0;
       if (is_team_lead()) {
         s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
-        work1_k = TensorView<T, NDIM>(work1.data(), K);
-        work2_k = TensorView<T, NDIM>(work2.data(), K);
+        work1_k = DenseTensorView<T, NDIM>(work1.data(), K);
+        work2_k = DenseTensorView<T, NDIM>(work2.data(), K);
       }
 
       size_type rank = transr[0].dim(0); // doing computation assuming full rank
@@ -207,8 +207,8 @@ namespace mra{
         T munorm = opnorms(mu, 0, (size_type)NormId::MUnorm);
         if (munorm > optol) {
           T fac = opnorms(mu, 0, (size_type)NormId::Fac);
-          muopxv_fast(K, mu, fac, tol/std::abs(fac), at, transr, transs, opnorms, f, f0,
-                      resultc, result, work1, work2, work1_k, work2_k);
+          muopxv_fast<T, NDIM>(K, mu, fac, tol/std::abs(fac), at, transr, transs, opnorms, f, f0,
+                               resultc, result, work1, work2, work1_k, work2_k);
         }
       }
       //r(s0).gaxpy(1.0,r0,1.0);
@@ -228,17 +228,17 @@ namespace mra{
       const T opnorm,
       const T fac,
       const T tol,
-      const std::array<TensorView<T, 3>, NDIM>& transr,
-      const std::array<TensorView<T, 3>, NDIM>& transs,
-      const TensorView<T, 3>& opnorms,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<3> auto& opnorms,
       const std::array<bool, 2>& at,
-      TensorView<T, NDIM>& in,
-      TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& f0,
-      TensorView<T, NDIM>& resultc,
-      TensorView<T, NDIM>& result,  // size K, stores the sum
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2,
+      concepts::TensorView<NDIM> auto& in,
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,  // size K, stores the sum
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2,
       T* resnorm_out)
     {
       SYNCTHREADS();
@@ -250,7 +250,7 @@ namespace mra{
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
 
-        apply_conv(K, fac, (tol / fac / cnorm), transr, transs,
+        apply_conv<T, NDIM>(K, fac, (tol / fac / cnorm), transr, transs,
                    opnorms, at, f, f0, resultc,
                    result, work1, work2);
 
@@ -300,18 +300,18 @@ namespace mra{
       const T opnorm,
       const T fac,
       const T tol,
-      const TensorView<T, NDIM+1> in_view,
-      const TensorView<T, NDIM+1> f_view,
-      TensorView<T, NDIM+1> result_view,
-      TensorView<T, 1>& resnorms,
-      const std::array<TensorView<T, 3>, (size_t)NDIM> transr,
-      const std::array<TensorView<T, 3>, (size_t)NDIM> transs,
-      const TensorView<T, 3>& opnorms,
+      const concepts::TensorView<NDIM+1> auto in_view,
+      const concepts::TensorView<NDIM+1> auto f_view,
+      concepts::TensorView<NDIM+1> auto result_view,
+      concepts::TensorView<1> auto resnorms,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto transr,
+      const concepts::TensorViewArray<3, (size_t)NDIM> auto transs,
+      const concepts::TensorView<3> auto opnorms,
       const std::array<bool, 2> at,
       T* tmp)
     {
-      SHARED TensorView<T, NDIM> f0, resultc, work1, work2;
-      SHARED TensorView<T, NDIM> f, result, in;
+      SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, result;
+      SHARED DenseTensorView<const T, NDIM> f, in;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp[blockId*convolution_tmp_size<NDIM>(K)];
@@ -320,10 +320,10 @@ namespace mra{
 
       if (is_team_lead()) {
         // construct temporaries and pass them to conv_transform
-        f0        = TensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
-        resultc   = TensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
-        work1     = TensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
-        work2     = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
+        f0        = DenseTensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
+        resultc   = DenseTensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
+        work1     = DenseTensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
+        work2     = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
       }
 
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
@@ -351,13 +351,13 @@ namespace mra{
     const T opnorm,
     const T fac,
     const T tol,
-    const TensorView<T, NDIM+1>& in,
-    const TensorView<T, NDIM+1>& f,
-    TensorView<T, NDIM+1>& result,
-    TensorView<T, 1>& resnorms,
-    const std::array<TensorView<T, 3>, (size_t)NDIM>& transr,
-    const std::array<TensorView<T, 3>, (size_t)NDIM>& transs,
-    const TensorView<T, 3>& opnorms,
+    const concepts::TensorView<NDIM+1> auto& in_view,
+    const concepts::TensorView<NDIM+1> auto& f_view,
+    concepts::TensorView<NDIM+1> auto& result_view,
+    concepts::TensorView<1> auto& resnorms,
+    const concepts::TensorViewArray<3, (size_t)NDIM> auto& transr,
+    const concepts::TensorViewArray<3, (size_t)NDIM> auto& transs,
+    const concepts::TensorView<3> auto& opnorms,
     const std::array<bool, 2>& at,
     T* tmp,
     ttg::device::Stream stream)
@@ -367,7 +367,7 @@ namespace mra{
 
     CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
-                (key, displacement, K, N, opnorm, fac, tol, in, f, result,
+                (key, displacement, K, N, opnorm, fac, tol, in_view, f_view, result_view,
                  resnorms, transr, transs, opnorms, at, tmp));
     checkSubmit();
   }
@@ -383,13 +383,13 @@ namespace mra{
     const double opnorm,
     const double fac,
     const double tol,
-    const TensorView<double, 3+1>& in,
-    const TensorView<double, 3+1>& contribution,
-    TensorView<double, 3+1>& result,
-    TensorView<double, 1>& resnorms,
-    const std::array<TensorView<double, 3>, 3>& transr,
-    const std::array<TensorView<double, 3>, 3>& transs,
-    const TensorView<double, 3>& opnorms,
+    const SparseTensorView<double, 3+1>& in,
+    const SparseTensorView<double, 3+1>& contribution,
+    SparseTensorView<double, 3+1>& result,
+    SparseTensorView<double, 1>& resnorms,
+    const std::array<SparseTensorView<double, 3>, 3>& transr,
+    const std::array<SparseTensorView<double, 3>, 3>& transs,
+    const DenseTensorView<double, 3>& opnorms,
     const std::array<bool, 2>& at,
     double* tmp,
     ttg::device::Stream stream);
