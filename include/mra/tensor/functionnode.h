@@ -3,6 +3,7 @@
 
 #include "mra/misc/key.h"
 #include "mra/ops/functions.h"
+#include "mra/tensor/leafstatus.h"
 #include "mra/tensor/tensor.h"
 
 #include <ttg/serialization/std/vector.h>
@@ -44,6 +45,15 @@ namespace mra {
 #ifdef MRA_CHECK_NORMS
         norm_tensor_type m_norms;
 #endif // MRA_CHECK_NORMS
+
+
+        /**
+         * Non-const sparsity accessor, not public.
+         */
+        sparsity_type& sparsity() {
+          return m_coeffs.sparsity();
+        }
+
 
       public:
 
@@ -251,15 +261,16 @@ namespace mra {
         constexpr static Dimension ndim() { return NDIM; }
 
       private:
+
         struct function_metadata {
           T sum = 0.0;
-          bool is_leaf = false;
-          std::array<bool, Key<NDIM>::num_children()> is_child_leaf = { false };
+          LeafStatus status = LeafStatus::Inner;
+          //std::array<bool, Key<NDIM>::num_children()> is_child_leaf = { false };
           template<typename Archive>
           void serialize(Archive& ar){
             ar & sum;
-            ar & is_leaf;
-            ar & is_child_leaf;
+            ar & status;
+            //ar & is_child_leaf;
           }
         };
 
@@ -315,22 +326,46 @@ namespace mra {
         }
 #endif // 0
 
+        const auto& sparsity() const {
+          return base_type::sparsity();
+        }
+
         bool has_children(size_type i) const {
-          return !m_metadata[i].is_leaf;
+          return m_metadata[i].status == LeafStatus::Inner;
         }
 
         bool any_have_children() const {
-          return !is_all_leaf();
+          return std::any_of(m_metadata.begin(), m_metadata.end(), [](const function_metadata& data){
+                    return data.status == LeafStatus::Inner;
+                  });
         }
 
 
-        void set_leaf(size_type i, bool val) {
-          m_metadata[i].is_leaf = val;
+        /**
+         * Set the status of the function.
+         * Updates the host-side sparsity accordingly. The device-side sparsity must be handled separately.
+         */
+        void set_leaf(size_type i, LeafStatus status = LeafStatus::Leaf) {
+          m_metadata[i].status = status;
         }
 
-        void set_all_leaf(bool val) {
+        /**
+         * Set the status of all functions.
+         */
+        void set_all_leaf(LeafStatus status = LeafStatus::Leaf) {
           for (auto& data : m_metadata) {
-            data.is_leaf = val;
+            data.status = status;
+          }
+        }
+
+        /**
+         * Evaluates the given function on all functions and sets the leaf status to its returned value.
+         */
+        template<typename Fn>
+        requires std::invocable<Fn, size_type>
+        void set_all_leaf(Fn&& fn){
+          for (size_type i = 0; i < m_metadata.size(); ++i) {
+            set_leaf(i, fn(i));
           }
         }
 
@@ -338,43 +373,48 @@ namespace mra {
          * Returns true if all nonzero nodes are leaf nodes.
          */
         bool is_all_leaf() const {
-          bool all_leaf = true;
-          size_type i = 0;
-          for (auto& data : m_metadata) {
-            all_leaf &= data.is_leaf;
-            ++i;
-          }
-          return all_leaf;
+          return std::all_of(m_metadata.begin(), m_metadata.end(), [](const function_metadata& data){
+                    return data.status != LeafStatus::Inner;
+                  });
         }
 
         /**
-         * Returns true if any nonzero node is a leaf node.
+         * Returns true if all nodes are either leaf nodes or invalid (zero) nodes.
          */
-        bool is_any_leaf() const {
-          bool any_leaf = false;
-          size_type i = 0;
-          for (auto& data : m_metadata) {
-            any_leaf |= data.is_leaf;
-            ++i;
-          }
-          return any_leaf;
+        bool is_all_leaf_or_invalid() const {
+          return std::all_of(m_metadata.begin(), m_metadata.end(), [](const function_metadata& data){
+                    return data.status == LeafStatus::Leaf || data.status == LeafStatus::Invalid;
+                  });
         }
 
-        bool& is_leaf(size_type i) {
-          return m_metadata[i].is_leaf;
+        /**
+         * Returns true if any node is a leaf node (i.e., nonzero).
+         */
+        bool is_any_leaf() const {
+          return std::any_of(m_metadata.begin(), m_metadata.end(), [](const function_metadata& data){
+                    return data.status == LeafStatus::Leaf;
+                  });
         }
 
         bool is_leaf(size_type i) const {
-          return m_metadata[i].is_leaf;
+          return m_metadata[i].status == LeafStatus::Leaf;
         }
 
-        bool& is_child_leaf(size_type i, size_type child) {
-          return m_metadata[i].is_child_leaf[child];
+        bool is_invalid(size_type i) const {
+          return m_metadata[i].status == LeafStatus::Invalid;
         }
 
-        bool is_leaf(size_type i, size_type child) const {
+        LeafStatus leaf_status(size_type i) const {
+          return m_metadata[i].status;
+        }
+
+#if 0
+        // TODO: needed?
+
+        bool is_child_leaf(size_type i, size_type child) {
           return m_metadata[i].is_child_leaf[child];
         }
+#endif // 0
 
         T& sum(size_type i) {
           return m_metadata[i].sum;
@@ -396,15 +436,15 @@ namespace mra {
         }
 
         bool is_nonzero(size_type i) const {
-          return !this->sparsity().is_zero(i);
+          return !base_type::sparsity().is_zero(i);
         }
 
         bool is_any_nonzero() const {
-          return this->sparsity().is_any_nonzero();
+          return base_type::sparsity().is_any_nonzero();
         }
 
         bool is_all_nonzero() const {
-          return this->sparsity().is_all_nonzero();
+          return base_type::sparsity().is_all_nonzero();
         }
 
     };
@@ -422,7 +462,7 @@ namespace mra {
         using norm_tensor_view_type = typename base_type::norm_tensor_view_type;
 
       private:
-        std::vector<std::array<bool, Key<NDIM>::num_children()>> m_is_child_leafs; //< True if that child is leaf on tree
+        std::vector<std::array<LeafStatus, Key<NDIM>::num_children()>> m_child_leaf_status; //< True if that child is leaf on tree
         bool m_ns = false; //< True if node is non-standard
 
       public:
@@ -439,21 +479,24 @@ namespace mra {
         /* constructs a node for N functions with zero coefficients */
         FunctionsCompressedNode(const Key<NDIM>& key, size_type N)
         : base_type(key, N)
-        , m_is_child_leafs(N)
+        , m_child_leaf_status(N)
         {
-          set_all_child_leafs(true);
+          set_all_child_leaf(LeafStatus::Leaf);
         }
 
         FunctionsCompressedNode(const Key<NDIM>& key, size_type N, size_type K, ttg::scope scope = ttg::scope::SyncIn)
         : base_type(key, N, 2*K, scope)
-        , m_is_child_leafs(N)
+        , m_child_leaf_status(N)
         { }
 
         FunctionsCompressedNode(const Key<NDIM>& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
         : base_type(key, sparsity, 2*K, scope)
-        , m_is_child_leafs(sparsity.dim(0))
+        , m_child_leaf_status(sparsity.dim(0))
         { }
 
+        const auto& sparsity() const {
+          return base_type::sparsity();
+        }
 
         /**
          * Allocate space for coefficients using K.
@@ -477,39 +520,53 @@ namespace mra {
         FunctionsCompressedNode& operator=(FunctionsCompressedNode&& other) = default;
         FunctionsCompressedNode& operator=(const FunctionsCompressedNode& other) = delete;
 
+#if 0
         bool has_children(size_type i, int childindex) const {
             assert(childindex < Key<NDIM>::num_children());
-            assert(i < m_is_child_leafs.size());
-            return !m_is_child_leafs[i][childindex];
+            assert(i < m_child_leaf_status.size());
+            return !m_child_leaf_status[i][childindex];
+        }
+#endif // 0
+
+        std::array<LeafStatus, Key<NDIM>::num_children()>& child_leaf_status(size_type i) {
+          return m_child_leaf_status[i];
         }
 
-        std::array<bool, Key<NDIM>::num_children()>& is_child_leaf(size_type i) {
-          return m_is_child_leafs[i];
-        }
-
-        const std::array<bool, Key<NDIM>::num_children()>& is_child_leaf(size_type i) const {
-          return m_is_child_leafs[i];
+        const std::array<LeafStatus, Key<NDIM>::num_children()>& child_leaf_status(size_type i) const {
+          return m_child_leaf_status[i];
         }
 
         bool is_child_leaf(size_type i, size_type child) const {
-          return m_is_child_leafs[i][child];
+          return m_child_leaf_status[i][child] == LeafStatus::Leaf;
         }
 
-        bool is_child_leaf(const Key<NDIM>& child) const {
+        bool is_child_leaf_or_invalid(size_type i, size_type child) const {
+          return m_child_leaf_status[i][child] == LeafStatus::Leaf || m_child_leaf_status[i][child] == LeafStatus::Invalid;
+        }
+
+        bool is_child_all_leaf(const Key<NDIM>& child) const {
           bool result = true;
-          for (size_type i = 0; i < m_is_child_leafs.size(); ++i) {
+          for (size_type i = 0; i < m_child_leaf_status.size(); ++i) {
             result &= is_child_leaf(i, child.childindex());
           }
           return result;
         }
 
-
-        void set_child_leaf(size_type i, size_type child, bool arg = true) {
-          m_is_child_leafs[i][child] = arg;
+        bool is_child_all_leaf_or_invalid(const Key<NDIM>& child) const {
+          bool result = true;
+          for (size_type i = 0; i < m_child_leaf_status.size(); ++i) {
+            result &= is_child_leaf_or_invalid(i, child.childindex());
+          }
+          return result;
         }
 
-        void set_all_child_leafs(bool arg = true) {
-          for (auto& node : m_is_child_leafs) {
+
+        void set_child_leaf(size_type i, size_type child, LeafStatus arg = LeafStatus::Leaf) {
+          m_child_leaf_status[i][child] = arg;
+        }
+
+        void set_all_child_leaf(LeafStatus arg = LeafStatus::Leaf) {
+          for (auto& node : m_child_leaf_status) {
             for (auto& c : node) {
               c = arg;
             }
@@ -526,7 +583,7 @@ namespace mra {
 
         void clear() {
           base_type::clear();
-          set_all_child_leafs(false);
+          set_all_child_leaf(LeafStatus::Inner);
         }
 
         void make_empty() {
@@ -535,9 +592,9 @@ namespace mra {
 
         bool is_all_child_leaf() const {
           bool result = true;
-          for (const auto& node : m_is_child_leafs) {
+          for (const auto& node : m_child_leaf_status) {
             for (const auto& c : node) {
-              result &= c;
+              result &= c == LeafStatus::Leaf;
             }
           }
           return result;
@@ -546,7 +603,7 @@ namespace mra {
         template <typename Archive>
         void serialize(Archive& ar) {
           base_type::serialize(ar);
-          ar& this->m_is_child_leafs;
+          ar& this->m_child_leaf_status;
           ar& this->m_ns;
         }
 
@@ -566,7 +623,13 @@ namespace mra {
           && sizeof...(Nodes) > 0)
     void apply_leaf_info(FunctionsReconstructedNode<T, NDIM>& target, Nodes&&... src) {
       for (size_type i = 0; i < target.count(); ++i) {
-        target.is_leaf(i) = (src.is_leaf(i) && ...);
+        bool any_is_leaf = (src.is_leaf(i) || ...); // actual leaf
+        bool any_is_inner = (src.is_invalid(i) || ...); // inner node
+        if (any_is_leaf || any_is_inner) {
+          target.set_leaf(i, LeafStatus::Inner);
+        } else { // TODO: not sure what to set here, since we don't know what the status of the current node is
+          target.set_leaf(i, LeafStatus::Invalid);
+        }
       }
     }
 
@@ -581,33 +644,37 @@ namespace mra {
     void apply_leaf_info(FunctionsCompressedNode<T, NDIM>& target, Nodes&&... src) {
       for (size_type i = 0; i < target.count(); ++i) {
         for (size_type j = 0; j < Key<NDIM>::num_children(); ++j) {
-          target.is_child_leaf(i)[j] = (src.is_child_leaf(i)[j] && ...);
+          bool is_child_leaf = (src.is_child_leaf_or_invalid(i, j) && ...);
+          target.child_leaf_status(i)[j] = is_child_leaf ? LeafStatus::Leaf : LeafStatus::Inner;
         }
       }
     }
 
     template<typename T, Dimension NDIM, typename... Nodes>
     requires((std::is_same_v<FunctionsReconstructedNode<T, NDIM>, std::decay_t<Nodes>> && ...)
-          && sizeof...(Nodes) == Key<NDIM>::num_children())
+          && sizeof...(Nodes) >= Key<NDIM>::num_children())
     void apply_leaf_info(FunctionsCompressedNode<T, NDIM>& target, Nodes&&... src) {
       for (std::size_t i = 0; i < target.count(); ++i) {
-        target.is_child_leaf(i) = std::array{src.is_leaf(i)...};
+        target.child_leaf_status(i) = std::array{src.leaf_status(i)...};
       }
     }
 
     template <typename T, Dimension NDIM, typename ostream>
     ostream& operator<<(ostream& s, const FunctionsReconstructedNode<T,NDIM>& node) {
-      for (size_type i = 0; i < node.count(); ++i) {
-        s << "FunctionsReconstructedNode[" << i << "](" << node.key() << ", leaf " << node.is_leaf(i) << ", norm " << mra::normf(node.coeffs_view(i)) << ")";
-      }
+      std::cout << "FunctionsReconstructedNode(" << node.key() << ", all_leafs " << node.is_all_leaf() << ", " << node.coeffs().dims() << ", " << node.sparsity() << ")";
+      //for (size_type i = 0; i < node.count(); ++i) {
+      //  s << "FunctionsReconstructedNode[" << i << "](" << node.key() << ", leaf " << node.is_leaf(i) << ", norm " << mra::normf(node.coeffs_view(i)) << ")";
+      //}
       return s;
     }
 
     template <typename T, Dimension NDIM, typename ostream>
     ostream& operator<<(ostream& s, const FunctionsCompressedNode<T,NDIM>& node) {
-      for (size_type i = 0; i < node.count(); ++i) {
-        s << "FunctionsCompressedNode[" << i << "](" << node.key() << ", norm " << mra::normf(node.coeffs_view(i)) << ")";
-      }
+      std::cout << "FunctionsCompressedNode(" << node.key() << ", ns " << node.is_ns() << ", all_child_leaf "
+                << node.is_all_child_leaf() << ", norm " << mra::normf(node.coeffs_view(0)) << ", " << node.coeffs().dims() << ", " << node.sparsity() << ")";
+      //for (size_type i = 0; i < node.count(); ++i) {
+      //  s << "FunctionsCompressedNode[" << i << "](" << node.key() << ", norm " << mra::normf(node.coeffs_view(i)) << ")";
+      //}
       return s;
     }
 

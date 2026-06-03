@@ -42,7 +42,7 @@ namespace mra{
         /* root node: need to send an empty node as the parent to do_reconstruct */
         size_type N = fns->num_functions(key);
         auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
-        r_empty.set_all_leaf(false);
+        r_empty.set_all_leaf(LeafStatus::Inner);
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::send<0>(key, std::move(r_empty));
 #else
@@ -67,7 +67,7 @@ namespace mra{
 
       // Send empty interior node to result tree
       auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
-      r_empty.set_all_leaf(false);
+      r_empty.set_all_leaf(LeafStatus::Inner);
       //std::cout << name << " " << key << " node norm " << normf(node.coeffs().current_view()) << " from_parent norm " << normf(from_parent.coeffs().current_view())  << std::endl;
 #ifndef MRA_ENABLE_HOST
       // forward() returns a vector that we can push into
@@ -82,7 +82,7 @@ namespace mra{
       };
 #endif // MRA_ENABLE_HOST
 
-      SparsityInfo sparsity(N);
+      SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
       sparsity.nonzero_if_any(node, from_parent);
       std::cout << name << ": " << key << " sparsity " << sparsity << std::endl;
 
@@ -101,7 +101,12 @@ namespace mra{
         r = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
         // collect leaf information
         for (std::size_t i = 0; i < N; ++i) {
-          r.is_leaf(i) = node.is_child_leaf(i, it.index());
+          if (from_parent.is_invalid(i) || from_parent.is_leaf(i)) {
+            r.set_leaf(i, LeafStatus::Invalid); // parent is invalid, so the child must be too
+          } else {
+            // parent is a leaf, so the child must be zero (but not necessarily a leaf)
+            r.set_leaf(i, node.child_leaf_status(i)[it.index()]);
+          }
         }
       }
 
@@ -111,7 +116,7 @@ namespace mra{
         for (auto it=children.begin(); it!=children.end(); ++it) {
           const mra::Key<NDIM> child= *it;
           auto& r = r_arr[it.index()];
-          if (r.is_all_leaf()) {
+          if (r.is_all_leaf_or_invalid()) {
             do_send.template operator()<1>(child, std::move(r));
           } else {
             do_send.template operator()<0>(child, std::move(r));
@@ -183,7 +188,7 @@ namespace mra{
         mra::FunctionsReconstructedNode<T,NDIM>& r = r_arr[it.index()];
         r.key() = child;
         //std::cout << name << " " << key << " norm " << normf(node_view) << " child " << child << " r norm " << normf(r.coeffs().current_view()) << std::endl;
-        if (r.is_all_leaf()) {
+        if (r.is_all_leaf_or_invalid()) {
           do_send.template operator()<1>(child, std::move(r));
         } else {
           do_send.template operator()<0>(child, std::move(r));

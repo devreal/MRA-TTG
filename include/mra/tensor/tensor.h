@@ -206,6 +206,10 @@ namespace mra {
       return view_type(m_buffer.device_ptr_on(device), m_dims);
     }
 
+    auto host_view() const {
+      return view_on(ttg::device::Device::host());
+    }
+
     bool empty() const {
       return size() == 0;
     }
@@ -231,6 +235,10 @@ namespace mra {
     template<typename S>
     void update_sparsity_info(S&& sparsity_info) {
       sparsity_type::apply_sparsity(std::forward<S>(sparsity_info));
+    }
+
+    sparsity_type& sparsity() {
+      return *this;
     }
 
     const sparsity_type& sparsity() const {

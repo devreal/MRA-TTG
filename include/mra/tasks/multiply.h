@@ -80,7 +80,7 @@ namespace mra{
       } else {
         auto keyA = t1.key();
         auto keyB = t2.key();
-        SparsityInfo sparsity(N);
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
         sparsity.nonzero_if_all(t1, t2);
         auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, sparsity, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);

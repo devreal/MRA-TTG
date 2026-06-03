@@ -11,6 +11,12 @@ namespace mra {
     using base_type = RangeSparsityBase<SparsityInfo, void>;
     using value_type = void;
 
+    enum class InitType {
+      AllZero,
+      AllNonZero,
+      Allocated
+    };
+
     static constexpr Dimension ndim() {
       return 1;
     }
@@ -20,11 +26,11 @@ namespace mra {
      * If all_zero is true, all functions are marked as zero.
      * Otherwise, all functions are marked as non-zero.
      */
-    SparsityInfo(size_type num_functions, bool all_zero = true)
+    SparsityInfo(size_type num_functions, InitType init_type)
     : base_type()
     , m_num_functions(num_functions)
     {
-      if (all_zero) {
+      if (init_type == InitType::AllZero) {
         base_type::set_all_zero();
       } else {
         base_type::set_all_nonzero();
@@ -48,10 +54,13 @@ namespace mra {
     template<typename... Nodes>
     void nonzero_if_any(const Nodes&... nodes) {
       for (size_type i = 0; i < m_num_functions; ++i) {
-        if ((nodes.sparsity().is_nonzero(i) || ...)) {
+        bool any_nonzero = (nodes.sparsity().is_nonzero(i) || ...);
+        std::array<bool, sizeof...(Nodes)> nonzero_array = { nodes.sparsity().is_nonzero(i)... };
+        std::array<size_type, sizeof...(Nodes)> size_array = { static_cast<size_type>(nodes.sparsity().count())... };
+        if (any_nonzero) {
           base_type::set_nonzero(i);
         } else {
-          base_type::set_zero(i);
+          base_type::remove(i);
         }
       }
     }
@@ -62,7 +71,7 @@ namespace mra {
         if ((nodes.sparsity().is_nonzero(i) && ...)) {
           base_type::set_nonzero(i);
         } else {
-          base_type::set_zero(i);
+          base_type::remove(i);
         }
       }
     }

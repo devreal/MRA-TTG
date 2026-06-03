@@ -638,12 +638,12 @@ namespace mra {
     requires(sizeof...(Dims) == NDIM && (std::is_integral_v<Dims>&&...))
     SCOPE const_value_type operator()(Dims... idxs) const {
       if (this->data() == nullptr) {
-        return T(0);
+        return T{};
       } else {
         // let's hope the compiler will hoist this out of loops
         std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
         if (is_sparse() && this->is_zero(indices[0])) {
-          return T(0);
+          return T{};
         }
         for (size_type i = 0; i < indices.size(); ++i) {
           assert(indices[i] < dim(i));
@@ -722,7 +722,7 @@ namespace mra {
     SCOPE TensorView& operator=(const TensorView& other) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (other.data() == nullptr) {
-        foreach_idx(*this, [&](size_type i){ this->operator[](i) = 0; });
+        foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
       } else {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
       }
@@ -736,7 +736,7 @@ namespace mra {
     SCOPE TensorView& operator=(const concepts::DenseTensorView<NDIM> auto& other) requires(!std::is_const_v<T>) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (other.data() == nullptr) {
-        foreach_idx(*this, [&](size_type i){ this->operator[](i) = 0; });
+        foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
       } else {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
       }

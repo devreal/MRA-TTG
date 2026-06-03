@@ -64,6 +64,7 @@ namespace mra {
       size_type N,
       size_type K,
       bool is_ns,
+      const concepts::TensorView<NDIM+1> auto node_in,
       concepts::TensorView<NDIM+1> auto p_in,
       concepts::TensorView<NDIM+1> auto result_in,
       const concepts::TensorView<2> auto hgT,
@@ -75,6 +76,7 @@ namespace mra {
       const size_type TWOK2NDIM = std::pow(2*K,NDIM);
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
       SHARED T* workspace;
+      SHARED DenseTensorView<const T, NDIM> node;
       SHARED DenseTensorView<T, NDIM> s, p, d;
       int blockId = blockIdx.x;
       T* block_tmp = &tmp[blockId*compress_tmp_size<NDIM>(K)];
@@ -83,9 +85,9 @@ namespace mra {
         s = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
         workspace = &block_tmp[TWOK2NDIM];
       }
-      assert(result_in.is_any_nonzero() && "why did we even get here?!");
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x) {
-        if (result_in.is_zero(fnid)) {
+        if (result_in.is_zero(fnid) && p_in.is_zero(fnid)) {
+          std::cout << "COMPRESS skipping fnid " << fnid << " because result and p are zero" << std::endl;
           continue; // output is zero so skip computation and leave it zero
         }
         if (is_team_lead()) {
@@ -93,10 +95,18 @@ namespace mra {
             block_in_views[i] = in_views[i](fnid);
           }
           p = p_in(fnid);
-          d = result_in(fnid);
+          if (!result_in.is_zero(fnid)) {
+            d = result_in(fnid);
+          }
+          node = node_in(fnid);
         }
         SYNCTHREADS();
-
+        if (result_in.is_zero(fnid) && !p_in.is_zero(fnid)) {
+          p = node; // pass through the input to the output
+          std::cout << "COMPRESS pass through fnid " << fnid << " because result is zero but p is not zero" << std::endl;
+          continue; // output is zero so skip computation and leave it zero
+        }
+        assert(!result_in.is_zero(fnid) && !p_in.is_zero(fnid) && "expected result_in and p_in to be non-zero!");
         compress_kernel_impl(key, K, is_ns, p, d, hgT, s, workspace,
                              &d_sumsq[fnid], block_in_views);
       }
@@ -109,6 +119,7 @@ namespace mra {
     size_type N,
     size_type K,
     bool is_ns,
+    const concepts::TensorView<NDIM+1> auto& in_view,
     concepts::TensorView<NDIM+1> auto& p_view,
     concepts::TensorView<NDIM+1> auto& result_view,
     const concepts::TensorView<2> auto& hgT_view,
@@ -122,7 +133,7 @@ namespace mra {
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::compress_kernel, N, thread_dims, smem_size, stream,
-      (key, N, K, is_ns, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
+      (key, N, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
     checkSubmit();
   }
 
@@ -134,6 +145,7 @@ void submit_compress_kernel<double, 3>(
     size_type N,
     size_type K,
     bool is_ns,
+    const SparseTensorView<const double, 3+1>& in_view,
     SparseTensorView<double, 3+1>& p_view,
     SparseTensorView<double, 3+1>& result_view,
     const SparseTensorView<double, 2>& hgT_view,

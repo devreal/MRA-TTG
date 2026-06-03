@@ -10,6 +10,7 @@ namespace mra {
     size_type N,
     size_type K,
     bool is_ns,
+    const SparseTensorView<const double, 3+1>& in_view,
     SparseTensorView<double, 3+1>& p_view,
     SparseTensorView<double, 3+1>& result_view,
     const SparseTensorView<double, 2>& hgT_view,

@@ -39,7 +39,7 @@ namespace mra{
     /**
      * We need to track which functions have reached their leaf level at each position in the tree.
      */
-    using LeafInfo = typename mra::DenseTensor<bool, 1>;
+    using LeafInfo = typename mra::DenseTensor<LeafStatus, 1>;
     ttg::Edge<mra::Key<NDIM>, LeafInfo> refine("refine");
 
     /**
@@ -48,7 +48,8 @@ namespace mra{
     auto dispatch_fn = [fns](const Key<NDIM>& key) {
       LeafInfo leaf_info(fns->num_functions(key), ttg::scope::SyncIn);
       auto host_ptr = leaf_info.buffer().host_ptr();
-      std::fill(host_ptr, host_ptr + leaf_info.size(), false);
+      assert(host_ptr != nullptr);
+      std::fill(host_ptr, host_ptr + leaf_info.size(), LeafStatus::Inner);
       ttg::send<0>(key, std::move(leaf_info));
     };
     auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn), ttg::edges(control), edges(refine), std::string(name) + "-dispatch");
@@ -61,11 +62,9 @@ namespace mra{
       using function_type = typename FunctionSetT::function_type;
 
       size_type N = fns->num_functions(key);
-      SparsityInfo sparsity(N);
-      LeafInfo result_leaf_info;
+      SparsityInfo sparsity(N, SparsityInfo::InitType::AllNonZero); // start with all non-zero, we'll remove the zero ones as we go
       node_type result(key, N); // empty for fast-paths, no need to zero out
 
-      sparsity.set_all_nonzero();
 #ifndef MRA_ENABLE_HOST
       auto outputs = ttg::device::forward();
 #endif // MRA_ENABLE_HOST
@@ -74,12 +73,14 @@ namespace mra{
       for (std::size_t i = 0; i < N; ++i) {
         if (key.level() >= initial_level(fn_host_view[i])) {
           all_initial_level = false;
-          sparsity.set_nonzero(i);
           break;
+        } else {
+          // above initial level, mark as zero
+          sparsity.remove(i);
         }
       }
       if (all_initial_level) {
-        //std::cout << "project " << key << " all initial " << std::endl;
+        std::cout << "project " << key << " all initial " << std::endl;
         std::vector<mra::Key<NDIM>> bcast_keys;
         /* TODO: children() returns an iteratable object but broadcast() expects a contiguous memory range.
                   We need to fix broadcast to support any ranges */
@@ -90,16 +91,35 @@ namespace mra{
 #else
         ttg::broadcast<0>(std::move(bcast_keys), leaf_info);
 #endif
-        result.set_all_leaf(false);
+        result.set_all_leaf(LeafStatus::Inner); // set to inner since we haven't computed coeffs yet, the kernel will update this for the children
       } else {
         bool all_negligible = true;
+        bool all_leaf_or_invalid = true;
         auto trunc = mra::truncate_tol(key,thresh);
+        LeafInfo result_leaf_info;
+        auto leaf_info_view = leaf_info.current_view();
         for (std::size_t i = 0; i < N; ++i) {
+          if (leaf_info_view[i] == LeafStatus::Leaf || leaf_info_view[i] == LeafStatus::Invalid) {
+            /* if the parent is a leaf, then this must be a zero child */
+            result.set_leaf(i, LeafStatus::Invalid);
+            sparsity.remove(i);
+            continue;
+          }
+          if (sparsity.is_zero(i)) {
+            /* already marked as zero by the check for initial level, skip */
+            continue;
+          }
           bool is_negligible = mra::is_negligible<function_type,T,NDIM>(
                                       fn_host_view[i], db.host_ptr()->template bounding_box<T>(key), trunc);
           if (is_negligible) {
             // don't set the function as sparse, we still need to get to the kernel to set the leaf info correctly for the children
-            result.set_leaf(i, true);
+
+            // if the parent is an inner node and we are negligible we mark as leaf
+            result.set_leaf(i, LeafStatus::Leaf);
+
+            // set node as zero and don't allocate
+            sparsity.remove(i);
+          } else {
           }
           all_negligible &= is_negligible;
         }
@@ -112,7 +132,7 @@ namespace mra{
           result.allocate(sparsity, K, ttg::scope::Allocate);
           auto& coeffs = result.coeffs();
 
-          result_leaf_info = LeafInfo(N, TempScope); // TOOD: TTG should allocate on the host with Allocate
+          result_leaf_info = LeafInfo(N, ttg::scope::Allocate);
 
           std::cout << name << " " << key << " all negligible " << all_negligible << " sparsity: " << sparsity << std::endl;
 
@@ -160,10 +180,11 @@ namespace mra{
 #endif
 
           result_norms.verify(); // extracts the norms and stores them in the node
-          const bool* is_leafs_arr = result_leaf_info.buffer().host_ptr();
+          const LeafStatus* is_leafs_arr = result_leaf_info.buffer().host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
-            result.is_leaf(i) = is_leafs_arr[i];
+            result.set_leaf(i, is_leafs_arr[i]);
           }
+          all_leaf_or_invalid = result.is_all_leaf_or_invalid();
           /**
            * END FCOEFFS HERE
            */
@@ -174,14 +195,14 @@ namespace mra{
          */
         if (max_level > 0) {
           if (key.level() == max_level) {
-            result.set_all_leaf(true);
+            result.set_all_leaf(LeafStatus::Leaf);
           }
           else {
-            result.set_all_leaf(false);
+            result.set_all_leaf(LeafStatus::Inner);
           }
         }
 
-        if (!result.is_all_leaf()) {
+        if (!all_leaf_or_invalid) {
           if (!result.is_any_leaf()) {
             result = node_type(key, N); // drop coeffs if none of the functions are leafs
           }

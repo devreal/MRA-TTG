@@ -112,7 +112,6 @@ namespace mra {
 
     SparsityManager(TensorTypes&... tensors)
     : m_tensors(construct_mocktensors(std::forward_as_tuple(tensors...), std::make_index_sequence<sizeof...(TensorTypes)>{}))
-    , m_buffers(construct_buffers(std::forward_as_tuple(tensors...), std::make_index_sequence<sizeof...(TensorTypes)>{}))
     { }
 
 
@@ -121,7 +120,6 @@ namespace mra {
      */
     SparsityManager(std::tuple<TensorTypes...>& tensors)
     : m_tensors(construct_mocktensors(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
-    , m_buffers(construct_buffers(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
     { }
 
     /**
@@ -129,7 +127,6 @@ namespace mra {
      */
     SparsityManager(const std::tuple<TensorTypes&...>& tensors)
     : m_tensors(construct_mocktensors(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
-    , m_buffers(construct_buffers(tensors, std::make_index_sequence<sizeof...(TensorTypes)>{}))
     { }
 
 
@@ -145,7 +142,6 @@ namespace mra {
 
   private:
     mocktensor_tuple_type m_tensors;
-    buffer_tuple_type m_buffers;
   };
 
 

@@ -233,7 +233,7 @@ namespace mra{
            */
           if ((!left.empty() || key.is_left_boundary(axis)) && (!right.empty() || key.is_right_boundary(axis))){
 
-            SparsityInfo sparsity(N);
+            SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
             sparsity.nonzero_if_any(left, center, right);
 
             mra::FunctionsReconstructedNode<T, NDIM> result(key, sparsity, K, ttg::scope::Allocate);

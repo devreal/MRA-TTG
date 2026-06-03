@@ -45,7 +45,7 @@ namespace mra
      */
     auto filter_fn = [fns, K, name](const mra::Key<NDIM>& key,
                                     const mra::FunctionsReconstructedNode<T, NDIM>& in) -> TASKTYPE {
-      if (!in.is_all_leaf()) {
+      if (!in.is_all_leaf_or_invalid()) {
         /* otherwise send to the compress task */
         ttg::send<0>(key, in);
       }
@@ -83,41 +83,55 @@ namespace mra
         mra::FunctionsReconstructedNode<T, NDIM> p(key, N);
 
         /* check if all inputs are empty */
-        bool all_empty = in0.empty() && in1.empty() && in2.empty() && in3.empty() &&
-                        in4.empty() && in5.empty() && in6.empty() && in7.empty();
+        bool all_empty = in.empty() && in0.empty() && in1.empty() && in2.empty() && in3.empty() &&
+                         in4.empty() && in5.empty() && in6.empty() && in7.empty();
 
         if (all_empty) {
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
+          //mra::apply_leaf_info(p, in, in0, in1, in2, in3, in4, in5, in6, in7);
           /* all data is still on the host so the coefficients are zero */
           for (std::size_t i = 0; i < N; ++i) {
             p.sum(i) = 0.0;
           }
-          p.set_all_leaf(false);
           // std::cout << name << " " << key << " all empty, all children leafs " << result.is_all_child_leaf() << " ["
           //           << in0.is_all_leaf() << ", " << in1.is_all_leaf() << ", "
           //           << in2.is_all_leaf() << ", " << in3.is_all_leaf() << ", "
           //           << in4.is_all_leaf() << ", " << in5.is_all_leaf() << ", "
           //           << in6.is_all_leaf() << ", " << in7.is_all_leaf() << "] "
           //           << std::endl;
+          // p.set_all_leaf(LeafStatus::Invalid);
         } else {
 
           /* some inputs are on the device so submit a kernel */
 
-          SparsityInfo sparsity(N);
-          sparsity.nonzero_if_any(in, in0, in1, in2, in3, in4, in5, in6, in7);
-          //std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
+          SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
+          /**
+           * We only produce a result if at least one of the children is non-zero.
+           */
+          sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
 
           // allocate the result
           result.allocate(sparsity, K, ttg::scope::Allocate);
 
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
-          p.allocate(sparsity, K, ttg::scope::Allocate);
-          p.set_all_leaf(false);
-          assert(p.is_all_leaf() == false);
-          FunctionNorms<T, NDIM> norms(name, in0, in1, in2, in3, in4, in5, in6, in7, result);
 
+          /**
+           * Allocate the reconstructed node to send up to the parent.
+           */
+          // we don't care about leaf info here
+          sparsity.set_all_nonzero(); // reset
+          sparsity.nonzero_if_any(in, in0, in1, in2, in3, in4, in5, in6, in7);
+          p.allocate(sparsity, K, ttg::scope::Allocate);
+          if (sparsity.is_any_nonzero()) {
+            assert(!p.empty());
+          }
+          //std::cout << name << " " << key << ", p before apply_leaf_info " << p.sparsity() << " " << std::endl;
+          //mra::apply_leaf_info(p, in, in0, in1, in2, in3, in4, in5, in6, in7);
+          //std::cout << name << " " << key << ", p after apply_leaf_info " << p.sparsity() << " " << std::endl;
+
+          FunctionNorms<T, NDIM> norms(name, in, in0, in1, in2, in3, in4, in5, in6, in7, result);
 
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
@@ -135,6 +149,7 @@ namespace mra
               input.add(in.coeffs().buffer());
             }
           };
+          select_in(in);
           select_in(in0); select_in(in1);
           select_in(in2); select_in(in3);
           select_in(in4); select_in(in5);
@@ -155,6 +170,7 @@ namespace mra
           auto input_views = std::array{in0.coeffs().current_view(), in1.coeffs().current_view(), in2.coeffs().current_view(), in3.coeffs().current_view(),
                                         in4.coeffs().current_view(), in5.coeffs().current_view(), in6.coeffs().current_view(), in7.coeffs().current_view()};
 
+          auto in_view = in.coeffs().current_view();
           auto sparseman = make_sparsity_manager(d, p);
           sparseman.populate_device_sparsity();
 
@@ -162,7 +178,7 @@ namespace mra
           auto rcoeffs_view = d.current_view();
           auto hgT_view = hgT.current_view();
 
-          submit_compress_kernel(key, N, K, is_ns, coeffs_view, rcoeffs_view, hgT_view,
+          submit_compress_kernel(key, N, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
                                 tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
                                 ttg::device::current_stream());
           norms.compute();
