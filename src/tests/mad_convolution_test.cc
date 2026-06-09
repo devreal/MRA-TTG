@@ -11,6 +11,16 @@
 
 #include "compare_mad_mra.h"
 
+
+std::vector<ttg::TTBase*> all_tts;
+
+void print_incomplete_tasks() {
+  std::cout << "Incomplete tasks:" << std::endl;
+  for (auto tt : all_tts) {
+    tt->print_incomplete_tasks();
+  }
+}
+
 using namespace mra;
 
 static double Length = 6.0;
@@ -50,7 +60,7 @@ auto compute_conv_madness(real_convolution_t& mad_conv) {
 
 template<typename T, mra::Dimension NDIM>
 void test_convolution(int num_batches, std::size_t N, size_type K, T precision, int max_level,
-                     T verification_precision, real_convolution_t& mad_conv) {
+                     T verification_precision, real_convolution_t& mad_conv, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto functiondata2 = mra::FunctionData<T,NDIM>(2*K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
@@ -88,22 +98,42 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   mra::GaussianConvolutionOperator<T, NDIM> op(mad_conv);
 
   // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
-  auto db            = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
-  auto start         = make_start(gaussians, project_control);
-  auto project       = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
-  auto extract_project = make_extract(project_result, projmap);
-  auto compress      = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress");
-  auto extract_compress = make_extract(compress_result, cmap);
-  auto reconstruct     = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
-  auto extract_reconstruct = make_extract(reconstruct_result, rmap);
-  auto compress_r   = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
-  auto extract_ns = make_extract(compress_r_result, nsmap);
-  auto convolve      = make_convolution(gaussians, K, compress_r_result, convolution_result, op, precision, "convolution");
-  auto extract_conv  = make_extract(convolution_result, convmap);
+  auto db               = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
+  auto start            = make_start(gaussians, project_control);
+  auto project          = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
+  auto extract_project  = make_extract(project_result, projmap, "extract_project");
+  auto compress         = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress");
+  auto extract_compress = make_extract(compress_result, cmap, "extract_compress");
+  auto reconstruct      = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
+  auto extract_reconstruct = make_extract(reconstruct_result, rmap, "extract_reconstruct");
+  auto compress_r       = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
+  auto extract_ns       = make_extract(compress_r_result, nsmap, "extract_ns");
+  auto convolve         = make_convolution(gaussians, K, compress_r_result, convolution_result, op, precision, "convolution");
+  auto extract_conv     = make_extract(convolution_result, convmap, "extract_conv");
   auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
-  auto extract_rconv  = make_extract(reconstruct_conv_result, rconvmap);
-  auto connected     = make_graph_executable(start.get());
+  auto extract_rconv    = make_extract(reconstruct_conv_result, rconvmap, "extract_rconv");
+  auto connected        = make_graph_executable(start.get());
   assert(connected);
+
+  all_tts.push_back(start.get());
+  all_tts.push_back(std::get<0>(project).get());
+  all_tts.push_back(extract_project.get());
+  all_tts.push_back(std::get<1>(compress).get());
+  all_tts.push_back(extract_compress.get());
+  all_tts.push_back(reconstruct.get());
+  all_tts.push_back(extract_reconstruct.get());
+  all_tts.push_back(std::get<1>(compress_r).get());
+  all_tts.push_back(extract_ns.get());
+  all_tts.push_back(convolve.get());
+  all_tts.push_back(extract_conv.get());
+  all_tts.push_back(reconstruct_conv.get());
+  all_tts.push_back(extract_rconv.get());
+
+  if (print_dot) {
+    std::cout << "==== begin dot ====\n";
+    std::cout << ttg::Dot(true)(start.get()) << std::endl;
+    std::cout << "====  end dot  ====\n";
+  }
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
   if (ttg::default_execution_context().rank() == 0) {
@@ -165,6 +195,7 @@ int main(int argc, char **argv) {
   int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
   Length = opt.parse("-d", Length);
   bool norand = opt.exists("-norand");
+  bool print_dot = opt.exists("-dot");
   /**
    * Adaptively set log precision based on the K the user selected.
    * NOTE: MRA/TTG does not use low-rank operator matrices and instead
@@ -210,7 +241,7 @@ int main(int argc, char **argv) {
   }
 
   test_convolution<double, 3>(num_batches, N, K, precision, max_level,
-                             std::pow(10, -verification_log_precision), mad_conv);
+                             std::pow(10, -verification_log_precision), mad_conv, print_dot);
 
   mra::finalize();
 }

@@ -229,6 +229,24 @@ namespace mra {
           clear();
         }
 
+        bool is_nonzero(size_type i) const {
+          return !sparsity().is_zero(i);
+        }
+
+        bool is_zero(size_type i) const {
+          return sparsity().is_zero(i);
+        }
+
+
+        bool is_any_nonzero() const {
+          return sparsity().is_any_nonzero();
+        }
+
+        bool is_all_nonzero() const {
+          return sparsity().is_all_nonzero();
+        }
+
+
         template <typename Archive>
         void serialize(Archive& ar) {
           ar& this->m_key;
@@ -435,18 +453,6 @@ namespace mra {
           serialize(ar);
         }
 
-        bool is_nonzero(size_type i) const {
-          return !base_type::sparsity().is_zero(i);
-        }
-
-        bool is_any_nonzero() const {
-          return base_type::sparsity().is_any_nonzero();
-        }
-
-        bool is_all_nonzero() const {
-          return base_type::sparsity().is_all_nonzero();
-        }
-
     };
 
 
@@ -534,6 +540,10 @@ namespace mra {
 
         const std::array<LeafStatus, Key<NDIM>::num_children()>& child_leaf_status(size_type i) const {
           return m_child_leaf_status[i];
+        }
+
+        LeafStatus child_leaf_status(size_type i, size_type child) const {
+          return m_child_leaf_status[i][child];
         }
 
         bool is_child_leaf(size_type i, size_type child) const {

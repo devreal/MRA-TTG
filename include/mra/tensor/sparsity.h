@@ -26,12 +26,14 @@ namespace mra {
       return (static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b)) != 0;
     }
 
-    inline SparsityState operator|=(SparsityState a, SparsityState b) {
-      return static_cast<SparsityState>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
+    inline SparsityState& operator|=(SparsityState& a, SparsityState b) {
+      a = static_cast<SparsityState>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
+      return a;
     }
 
-    inline SparsityState operator&=(SparsityState a, SparsityState b) {
-      return static_cast<SparsityState>(static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b));
+    inline SparsityState& operator&=(SparsityState& a, SparsityState b) {
+      a = static_cast<SparsityState>(static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b));
+      return a;
     }
 
     /**
@@ -444,20 +446,28 @@ namespace mra {
       , to(to)
       { }
 
-      void add(size_type i) {
+      void append(ssize_type i) {
         if (from == -1) {
           from = i;
           to   = i;
-        } else {
+        } else if (i == to + 1) {
           to = i;
+        } else if (i == from - 1) {
+          from = i;
+        } else {
+          throw std::invalid_argument("Cannot append non-contiguous index to range");
         }
       }
 
-      bool is_contiguous(size_type i) const {
-        return to == i-1 || from == i+1;
+      bool is_contiguous(ssize_type i) const {
+        return is_empty() || from-1 == i || to+1 == i;
       }
 
-      bool contains(size_type i) const {
+      bool is_empty() const {
+        return from == -1 && to == -1;
+      }
+
+      bool contains(ssize_type i) const {
         return from <= i && i <= to;
       }
 
@@ -471,12 +481,15 @@ namespace mra {
         serialize(ar);
       }
 
-      std::ostream& operator<<(std::ostream& os) const {
-        os << "[" << from << ", " << to << "]";
-        return os;
-      }
-
     }; // class Range
+
+
+
+    inline std::ostream& operator<<(std::ostream& os, const Range& r) {
+      os << "[" << r.from << ", " << r.to << "]";
+      return os;
+    }
+
 
   } // namespace detail
 
@@ -541,14 +554,40 @@ namespace mra {
         if (it->contains(id)) {
           return;
         }
-        if (it->from > id) {
+        if (it->is_contiguous(id)) {
+          // extend existing range
+          it->append(id);
+          // check for possible merge with previous range first
+          if (it != ranges.begin()) {
+            auto prev = std::prev(it);
+            if (prev->is_contiguous(it->from)) {
+              // merge with previous range; it is now invalid, use prev
+              prev->to = it->to;
+              it = ranges.erase(it);  // it now points to element after the erased one
+              it = prev;              // step back so the next-merge check uses the merged range
+            }
+          }
+          // check for possible merge with next range
+          auto next = std::next(it);
+          if (next != ranges.end() && it->is_contiguous(next->from)) {
+            // merge with next range
+            it->to = next->to;
+            ranges.erase(next);
+          }
+          return;
+        }
+        if (id < it->from) {
+          // insert before the current range
           auto next = ++it;
           auto prev = --it;
           if (next != ranges.end() && next->from == id+1) {
+            // append to front
             next->from = id;
           } else if (it != ranges.begin() && prev->to == id-1) {
+            // append to back
             prev->to = id;
           } else {
+            // insert new range
             ranges.insert(it, detail::Range(id));
           }
           return;
@@ -571,17 +610,19 @@ namespace mra {
             /* remove from end of range */
             it->to--;
           } else {
-            /* split the range */
+            /* split the range: save original end before modifying it */
+            auto original_to = it->to;
             auto next = it + 1;
-            it->to = id-1;
-            ranges.insert(next, detail::Range(id+1, it->to));
+            it->to = id - 1;
+            ranges.insert(next, detail::Range(id + 1, original_to));
           }
+          return;
         }
-        return;
       }
     }
 
     bool contains(size_type id, const std::vector<detail::Range>& ranges) const {
+      assert(count() > 0 || ranges.empty());
       for (const auto& r : ranges) {
         if (r.contains(id)) {
           return true;
@@ -691,9 +732,15 @@ namespace mra {
       add(id, m_allocated_ranges);
     }
 
+    /* Mark all as zero */
     void set_all_zero() {
       m_non_zero_ranges.clear();
       m_allocated_ranges.clear();
+    }
+
+    /* Mark all as zero */
+    void reset() {
+      set_all_zero();
     }
 
     /**
@@ -701,9 +748,9 @@ namespace mra {
      */
     void set_all_nonzero() {
       m_non_zero_ranges.clear();
-      m_non_zero_ranges.emplace_back(0, count());
+      m_non_zero_ranges.emplace_back(0, count() - 1);
       m_allocated_ranges.clear();
-      m_allocated_ranges.emplace_back(0, count());
+      m_allocated_ranges.emplace_back(0, count() - 1);
       assert(m_allocated_ranges.size() == 1);
     }
 
@@ -712,7 +759,7 @@ namespace mra {
      */
     void set_all_allocated() {
       m_allocated_ranges.clear();
-      m_allocated_ranges.emplace_back(0, count());
+      m_allocated_ranges.emplace_back(0, count() - 1);
       assert(m_allocated_ranges.size() == 1);
     }
 
@@ -743,9 +790,9 @@ namespace mra {
       detail::Range rnz = {-1, -1}; // range for nonzero entries
       auto add_to_range = [&](size_type i, detail::Range& r, std::vector<detail::Range>& ranges) {
         if (r.is_contiguous(i)) {
-          r.add(i);
+          r.append(i);
         } else {
-          if (r.from != -1) {
+          if (!r.is_empty()) {
             ranges.push_back(r);
           }
           r = detail::Range(i);
@@ -983,10 +1030,9 @@ namespace mra {
   constexpr bool is_sparsity_view_v = sparsity_traits<std::decay_t<T>>::is_sparse();
 
 
-
   inline std::ostream& operator<<(std::ostream& os, const concepts::SparsityBase auto& si) {
-    os << "[";
     auto count = si.count();
+    os << "[" << count << ": ";
     for (size_type i = 0; i < count; ++i) {
       if (si.is_nonzero(i)) {
         os << "N";

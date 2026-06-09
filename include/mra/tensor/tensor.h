@@ -217,11 +217,13 @@ namespace mra {
     void clear() {
       m_buffer.clear();
       std::fill(m_dims.begin(), m_dims.end(), 0);
+      /* clear out the sparsity */
+      sparsity().reset();
     }
 
     template <typename Archive>
     void serialize(Archive &ar) {
-      ar &m_dims &m_buffer;
+      ar &m_dims &m_buffer & static_cast<sparsity_type&>(*this);
     }
 
     template <typename Archive>
