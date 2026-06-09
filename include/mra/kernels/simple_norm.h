@@ -8,18 +8,6 @@
 
 namespace mra {
   namespace detail {
-    template <typename T, Dimension NDIM>
-    DEVSCOPE void simple_norm_kernel_impl(
-      const concepts::TensorView<NDIM> auto& n,
-      T* result_norm)
-    {
-      const bool is_t0 = (0 == thread_id());
-      T norm = normf(n);
-      if (is_t0) {
-        *result_norm = norm;
-      }
-    }
-
     template <Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void simple_norm_kernel(
@@ -29,14 +17,19 @@ namespace mra {
       size_type N)
     {
       using T = typename std::remove_reference_t<decltype(node)>::value_type;
-      const bool is_t0 = (0 == thread_id());
       SHARED DenseTensorView<const T, NDIM> n;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
-        if (is_t0) {
-          n = node(blockid);
+        T norm = 0.0;
+        if (!node.is_zero(blockid)) {
+          if (is_team_lead()) {
+            n = node(blockid);
+          }
+          SYNCTHREADS();
+          norm = normf(n);
         }
-        SYNCTHREADS();
-        simple_norm_kernel_impl<T, NDIM>(n, &result_norms[blockid]);
+        if (is_team_lead()) {
+          result_norms[blockid] = norm;
+        }
       }
     }
   } // namespace detail
