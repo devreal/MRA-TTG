@@ -87,7 +87,7 @@ namespace mra {
       }
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x) {
         if (result_in.is_zero(fnid) && p_in.is_zero(fnid)) {
-          std::cout << "COMPRESS skipping fnid " << fnid << " because result and p are zero" << std::endl;
+          std::cout << "COMPRESS " << key << " skipping fnid " << fnid << " because result and p are zero" << std::endl;
           continue; // output is zero so skip computation and leave it zero
         }
         if (is_team_lead()) {
@@ -103,7 +103,7 @@ namespace mra {
         SYNCTHREADS();
         if (result_in.is_zero(fnid) && !p_in.is_zero(fnid)) {
           p = node; // pass through the input to the output
-          std::cout << "COMPRESS pass through fnid " << fnid << " because result is zero but p is not zero" << std::endl;
+          std::cout << "COMPRESS " << key << " pass through fnid " << fnid << " because result is zero but p is not zero" << std::endl;
           continue; // output is zero so skip computation and leave it zero
         }
         assert(!result_in.is_zero(fnid) && !p_in.is_zero(fnid) && "expected result_in and p_in to be non-zero!");

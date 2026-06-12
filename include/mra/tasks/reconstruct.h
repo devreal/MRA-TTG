@@ -65,6 +65,8 @@ namespace mra{
       const auto& hg = functiondata.get_hg();
       mra::KeyChildren<NDIM> children(key);
 
+      std::cout << name << " " << key << " node " << node << " from_parent " << from_parent << std::endl;
+
       // Send empty interior node to result tree
       auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
       r_empty.set_all_leaf(LeafStatus::Inner);
@@ -98,15 +100,44 @@ namespace mra{
       for (auto it=children.begin(); it!=children.end(); ++it) {
         const mra::Key<NDIM> child= *it;
         auto& r = r_arr[it.index()];
-        r = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
+        r = mra::FunctionsReconstructedNode<T,NDIM>(child, N);
         // collect leaf information
         for (std::size_t i = 0; i < N; ++i) {
+          std::cout << name << " " << key << " child " << child << " function " << i
+                    << " from_parent is_invalid " << from_parent.is_invalid(i)
+                    << " from_parent is_leaf " << from_parent.is_leaf(i)
+                    << " node is_child_leaf " << node.is_child_leaf(i, *it)
+                    << std::endl;
           if (from_parent.is_invalid(i) || from_parent.is_leaf(i)) {
+            std::cout << name << " " << key << " child " << child << " function " << i
+                      << " from_parent is_invalid " << from_parent.is_invalid(i)
+                      << " or leaf " << from_parent.is_leaf(i) << " so child is invalid" << std::endl;
             r.set_leaf(i, LeafStatus::Invalid); // parent is invalid, so the child must be too
+          //} else if (node.is_zero(i)) {
+          //  std::cout << name << " " << key << " child " << child << " function " << i
+          //            << " node is zero so child is invalid" << std::endl;
+          //  // parent is a leaf and the compressed node is zero, so the child must be a invalid
+          //  r.set_leaf(i, LeafStatus::Invalid); // node is zero, so the child must be a leaf (but not necessarily invalid)
+          } else if (node.is_child_leaf(i, *it)) {
+            std::cout << name << " " << key << " child " << child << " function " << i
+                      << " node is child leaf so child is leaf" << std::endl;
+            // parent is not a leaf/invalid, the compressed node has coefficients, and its child is empty, so we are the leaf
+            r.set_leaf(i, LeafStatus::Leaf);
           } else {
-            // parent is a leaf, so the child must be zero (but not necessarily a leaf)
-            r.set_leaf(i, node.child_leaf_status(i)[it.index()]);
+            std::cout << name << " " << key << " child " << child << " function " << i
+                      << " child is inner" << std::endl;
+            // parent is not a leaf/invalid and the compressed node is not empty, so we are the inner node
+            r.set_leaf(i, LeafStatus::Inner);
           }
+        }
+        /**
+         * Sanity check: if this is the last node in reconstructed form then the child of the compressed node must be empty.
+         * TOOD: Is this sanity check valid? It appears that convolution may produce empty compressed nodes with non-empty children...
+         */
+        std::cout << name << " " << key << " child " << child << " " << r << std::endl;
+        if (r.is_all_leaf_or_invalid()) {
+          //assert(node.is_child_empty(*it) &&
+          //       "if a reconstructed child is all leaf or invalid, the corresponding compressed node child should be empty");
         }
       }
 
@@ -187,7 +218,7 @@ namespace mra{
         const mra::Key<NDIM> child= *it;
         mra::FunctionsReconstructedNode<T,NDIM>& r = r_arr[it.index()];
         r.key() = child;
-        //std::cout << name << " " << key << " norm " << normf(node_view) << " child " << child << " r norm " << normf(r.coeffs().current_view()) << std::endl;
+        std::cout << name << " " << key << " child " << child << " " << r << std::endl;
         if (r.is_all_leaf_or_invalid()) {
           do_send.template operator()<1>(child, std::move(r));
         } else {

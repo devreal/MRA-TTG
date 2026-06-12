@@ -71,12 +71,21 @@ void test_pcr(std::size_t N, std::size_t K,
   auto start = make_start(gaussians, project_control);
   all_tts.push_back(start.get());
   auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
+
   all_tts.push_back(std::get<0>(project).get());
   all_tts.push_back(std::get<1>(project).get());
   // C(P)
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
   all_tts.push_back(std::get<0>(compress).get());
   all_tts.push_back(std::get<1>(compress).get());
+
+  auto print_sparsity_tt = ttg::make_tt([&](const mra::Key<NDIM>& key, const auto& node){
+    auto& sparsity = node.sparsity();
+    std::cout << "Sparsity for "  << key << " : " << sparsity << std::endl;
+  }, ttg::edges(compress_result), ttg::edges(), "print_sparsity");
+  all_tts.push_back(print_sparsity_tt.get());
+
+
   // R(C(P))
   auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
   all_tts.push_back(reconstruct.get());

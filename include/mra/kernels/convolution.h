@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <iostream>
 #include "mra/ops/mxm.h"
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
@@ -254,33 +255,32 @@ namespace mra{
                    opnorms, at, f, f0, resultc,
                    result, work1, work2);
 
-        // set to zero if norm is below threshold; this is the aggressive screening analogous to MADNESS
         resnorm = normf(result);
       }
 
       bool above_threshold = (resnorm > (0.3 * tol / fac));
 
-      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement
-      //          << ", in " << normf(in)
-      //          << ", tol " << tol << ", fac " << fac
-      //          << ", result " << resnorm
-      //          << " above threshold " << above_threshold << std::endl;
+      std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " cnorm " << cnorm
+                << " opnorm " << opnorm << " tol " << tol << " resnorm " << resnorm
+                << (above_threshold ? " above threshold" : " below threshold, dropping result") << std::endl;
 
-      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement << " result \n" << result << std::endl;
-
-      // if not above the threshold in FunctionImpl::do_apply we drop the result
-      if (!above_threshold) {
-        /* reset result to 0 */
-        result = 0.0;
-      }
       // Accumulate input if not empty
       if (!in.empty()) {
-        /* add input values */
-        result += in;
-      }
-
-      if (resnorm_out != nullptr) {
+        if (above_threshold) {
+          /* add input values */
+          result += in;
+        } else {
+          /* if input is empty, we can just copy the result to it */
+          result = in;
+        }
         resnorm = normf(result);
+      } else if (!above_threshold) {
+        /* if input is empty and result is below threshold, we can just leave it zero */
+        result = 0.0;
+      }
+      std::cout << "MRA_OP_APPLY " << key << " disp " << displacement
+                << " after accumulation resnorm " << normf(result) << " in empty " << in.empty() << " in norm " << normf(in) << std::endl;
+      if (resnorm_out != nullptr) {
         if (is_team_lead()) {
           *resnorm_out = resnorm;
         }
@@ -326,13 +326,22 @@ namespace mra{
         work2     = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
       }
 
-      for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
+      for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x) {
+        if (result_view.is_zero(blockId)) {
+          // nothing to do
+          continue;
+        }
         if (is_team_lead()) {
           in     = in_view(blockId);
           f      = f_view(blockId);
           result = result_view(blockId);
         }
         SYNCTHREADS();
+        if (f_view.is_zero(blockId)) {
+          /* copy input to output */
+          result = in;
+          continue;
+        }
 
         convolution_kernel_impl<T, NDIM>(key, displacement, K, opnorm, fac, tol,
                                          transr, transs, opnorms, at, in, f, f0,

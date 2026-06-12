@@ -946,6 +946,14 @@ namespace mra {
     }
 
     /**
+     * Returns the size of the sparse dimension (dimension 0).
+     */
+    SCOPE std::size_t count() const {
+      return dim0();
+    }
+
+
+    /**
      * Returns true if the i'th entry in the sparse dimension is allocated (non-zero or zero).
      */
     SCOPE bool is_allocated(std::size_t i) const {

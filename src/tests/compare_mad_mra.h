@@ -57,7 +57,11 @@ namespace mra {
       const auto& mra_coeff = mramap.find(key);
       const auto& mad_norm = mad_coeff.coeff().svd_normf();
       if (mra_coeff != mramap.end()) {
+        const auto& mra_node = mra_coeff->second;
         auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
+        if (mra_node.is_zero(0)) {
+          assert(mra_norm == 0.0);
+        }
         T absdiff = std::abs(mad_norm - mra_norm);
         if (mra_norm != 0.0) {
           all_zero = false;
@@ -88,7 +92,7 @@ namespace mra {
         bool mra_is_all_child_leafs = false;
         if constexpr(std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
           auto parent_coeff = mramap.find(key.parent());
-          if (parent_coeff != mramap.end() && parent_coeff->second.is_child_leaf(0, key.childindex())) {
+          if (parent_coeff != mramap.end() && parent_coeff->second.is_all_child_leaf(key)) {
             mra_is_all_child_leafs = true; // for compressed nodes, we don't want to check leaf nodes since they won't be in the MRA map
           }
         }

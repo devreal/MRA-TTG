@@ -9,6 +9,7 @@
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
 #include "mra/misc/functionset.h"
+#include "mra/ops/functions.h"
 #include "mra/tensor/sparsitymanager.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"
@@ -82,6 +83,17 @@ namespace mra
         // create empty, may be reset if needed
         mra::FunctionsReconstructedNode<T, NDIM> p(key, N);
 
+        std::cout << name << " in " << in << std::endl;
+        std::cout << name << " in0 " << in0 << std::endl;
+        std::cout << name << " in1 " << in1 << std::endl;
+        std::cout << name << " in2 " << in2 << std::endl;
+        std::cout << name << " in3 " << in3 << std::endl;
+        std::cout << name << " in4 " << in4 << std::endl;
+        std::cout << name << " in5 " << in5 << std::endl;
+        std::cout << name << " in6 " << in6 << std::endl;
+        std::cout << name << " in7 " << in7 << std::endl;
+
+
         /* check if all inputs are empty */
         bool all_empty = in.empty() && in0.empty() && in1.empty() && in2.empty() && in3.empty() &&
                          in4.empty() && in5.empty() && in6.empty() && in7.empty();
@@ -94,13 +106,13 @@ namespace mra
           for (std::size_t i = 0; i < N; ++i) {
             p.sum(i) = 0.0;
           }
-          // std::cout << name << " " << key << " all empty, all children leafs " << result.is_all_child_leaf() << " ["
-          //           << in0.is_all_leaf() << ", " << in1.is_all_leaf() << ", "
-          //           << in2.is_all_leaf() << ", " << in3.is_all_leaf() << ", "
-          //           << in4.is_all_leaf() << ", " << in5.is_all_leaf() << ", "
-          //           << in6.is_all_leaf() << ", " << in7.is_all_leaf() << "] "
-          //           << std::endl;
           // p.set_all_leaf(LeafStatus::Invalid);
+          std::cout << name << " " << key << " all empty, all children leafs " << result.is_all_child_leaf() << " ["
+                     << in.is_all_leaf() << ", " << in0.is_all_leaf() << ", " << in1.is_all_leaf() << ", "
+                     << in2.is_all_leaf() << ", " << in3.is_all_leaf() << ", "
+                     << in4.is_all_leaf() << ", " << in5.is_all_leaf() << ", "
+                     << in6.is_all_leaf() << ", " << in7.is_all_leaf() << "] "
+                     << std::endl;
         } else {
 
           /* some inputs are on the device so submit a kernel */
@@ -110,12 +122,15 @@ namespace mra
            * We only produce a result if at least one of the children is non-zero.
            */
           sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
+          std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
 
           // allocate the result
           result.allocate(sparsity, K, ttg::scope::Allocate);
+          std::cout << name << " " << key << " result before apply_leaf_info " << result.sparsity() << " " << std::endl;
 
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
+          std::cout << name << " " << key << " result after apply_leaf_info " << result.sparsity() << " " << std::endl;
 
           /**
            * Allocate the reconstructed node to send up to the parent.
@@ -124,6 +139,7 @@ namespace mra
           sparsity.set_all_nonzero(); // reset
           sparsity.nonzero_if_any(in, in0, in1, in2, in3, in4, in5, in6, in7);
           p.allocate(sparsity, K, ttg::scope::Allocate);
+          std::cout << name << " " << key << " p " << p.sparsity() << " " << std::endl;
           if (sparsity.is_any_nonzero()) {
             assert(!p.empty());
           }
@@ -194,11 +210,13 @@ namespace mra
                                     in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
             auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
             p.sum(i) = d_sumsq_arr[i] + child_sumsq; // result sumsq is last element in sumsqs
-            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
-            //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
+            std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
+                      << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
           }
-
         }
+
+
+        std::cout << name << " " << key << " result norm " << normf(result.coeffs().current_view()) << std::endl;
 
         // Recur up
         if (key.level() > 0) {
@@ -238,7 +256,7 @@ namespace mra
                                ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name),
                                ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), name + "-filter"));
 
-    // set maps if provided
+      // set maps if provided
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       std::get<0>(ttt)->set_keymap(procmap);
       std::get<1>(ttt)->set_keymap(procmap);

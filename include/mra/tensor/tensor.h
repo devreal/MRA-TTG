@@ -104,6 +104,18 @@ namespace mra {
       return std::array{dim0, ((void)Is, dim)...};
     }
 
+    template<typename S>
+    static void populate_host_sparsity(S&& tensor) {
+      if constexpr (sparsity_traits<view_sparsity_type>::is_sparse()) {
+
+        // The TTG Buffer claims that empty buffers are current on all devices. Not sure that is correct...
+        if (!tensor.buffer().empty() && tensor.buffer().is_current_on(ttg::device::Device::host())) {
+          // cast away const so we can populate the sparsity information (which is logically mutable even in const tensors)
+          make_sparsity_manager(const_cast<std::decay_t<S>&>(tensor)).populate_device_sparsity();
+        }
+      }
+    }
+
 
   public:
     Tensor() = default;
@@ -182,27 +194,27 @@ namespace mra {
       return m_buffer;
     }
 
-    /* returns a view for the current memory space
-     * TODO: handle const correctness (const Tensor should return a const TensorView)*/
+    /* returns a view for the current memory space */
     view_type current_view() {
+      populate_host_sparsity(*this);
       return view_type(m_buffer.current_device_ptr(), m_dims);
     }
 
-    /* returns a view for the current memory space
-     * TODO: handle const correctness (const Tensor should return a const TensorView)*/
+    /* returns a view for the current memory space */
     const view_type current_view() const {
+      populate_host_sparsity(*this);
       return view_type(m_buffer.current_device_ptr(), m_dims);
     }
 
-    /* returns a view for the current memory space
-     * TODO: handle const correctness (const Tensor should return a const TensorView)*/
+    /* returns a view for the current memory space */
     view_type view_on(const ttg::device::Device& device) {
+      populate_host_sparsity(*this);
       return view_type(m_buffer.device_ptr_on(device), m_dims);
     }
 
-    /* returns a view for the current memory space
-     * TODO: handle const correctness (const Tensor should return a const TensorView)*/
+    /* returns a view for the current memory space */
     const view_type view_on(const ttg::device::Device& device) const {
+      populate_host_sparsity(*this);
       return view_type(m_buffer.device_ptr_on(device), m_dims);
     }
 
