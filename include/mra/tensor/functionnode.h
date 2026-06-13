@@ -795,8 +795,8 @@ namespace mra {
       for (size_type i = 0; i < target.count(); ++i) {
         bool any_is_leaf = (src.is_leaf(i) || ...); // actual leaf
         bool any_is_inner = (src.is_invalid(i) || ...); // inner node
-        std::cout << "apply_leaf_info for function " << target.key() << " index " << i
-                  << ": any_is_leaf " << any_is_leaf << ", any_is_inner " << any_is_inner << std::endl;
+        //std::cout << "apply_leaf_info for function " << target.key() << " index " << i
+        //          << ": any_is_leaf " << any_is_leaf << ", any_is_inner " << any_is_inner << std::endl;
         if (any_is_leaf || any_is_inner) {
           target.set_leaf(i, LeafStatus::Inner);
         } else { // TODO: not sure what to set here, since we don't know what the status of the current node is
@@ -817,8 +817,8 @@ namespace mra {
       for (size_type i = 0; i < target.count(); ++i) {
         for (int c = 0; c < Key<NDIM>::num_children(); ++c) {
           bool all_is_leaf = ((src.invalid() || src.is_child_leaf(i, c)) && ...); // actual leaf
-          std::cout << "apply_leaf_info for compressed node " << target.key() << " index " << i << " child " << c
-                    << ": any_is_child_leaf " << all_is_leaf << std::endl;
+          //std::cout << "apply_leaf_info for compressed node " << target.key() << " index " << i << " child " << c
+          //          << ": any_is_child_leaf " << all_is_leaf << std::endl;
           target.set_child_leaf(i, c, all_is_leaf);
         }
       }
@@ -832,8 +832,8 @@ namespace mra {
         std::array<bool, Key<NDIM>::num_children()> is_child_leaf = {src.is_leaf_or_invalid(i)...};
         for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
           target.set_child_leaf(i, c, is_child_leaf[c]);
-          std::cout << "apply_leaf_info for compressed node " << target.key() << " index " << i << " child " << c
-                    << ": is_child_leaf " << is_child_leaf[c] << std::endl;
+          //std::cout << "apply_leaf_info for compressed node " << target.key() << " index " << i << " child " << c
+          //          << ": is_child_leaf " << is_child_leaf[c] << std::endl;
         }
       }
     }

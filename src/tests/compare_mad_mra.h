@@ -25,95 +25,133 @@ namespace mra {
   } // namespace detail
 
   template<typename T, typename NodeT, Dimension NDIM>
-  void compare_mra_madness(const auto& madfunc, const std::map<Key<NDIM>, NodeT>& mramap, std::string name, T precision = 1e-15)
+  inline void compare_mra_madness(const auto& madfunc, const std::map<Key<NDIM>, NodeT>& mramap, std::string name, T precision = 1e-15)
   {
     bool check = true;
     bool all_zero = true;
-    const auto &coeffs = madfunc.get_impl()->get_coeffs();
     Batch batch = mramap.begin() != mramap.end() ? mramap.begin()->first.batch() : 0; // assume all keys in MRA map have the same batch as MADNESS key
-    std::cout << name << " MRA: " << mramap.size() << " nodes; MAD: " << madfunc.min_nodes() << " nodes" << std::endl;
-#if 0
-    if constexpr (std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
-      if (!madfunc.is_compressed() && !madfunc.is_nonstandard()) {
-        std::cout << name << ": MADNESS function expected as compressed or nonstandard but found "
-                  << detail::madfunc_state(madfunc) << std::endl;
-        throw std::runtime_error(name + ": expected MADNESS function to be either compressed or nonstandard");
-      }
-    } else if constexpr (std::is_same_v<NodeT, mra::FunctionsReconstructedNode<T, NDIM>>) {
-      if (!madfunc.is_reconstructed()) {
-        std::cout << name << ": MADNESS function expected as reconstructed but found "
-                  << detail::madfunc_state(madfunc) << std::endl;
-        throw std::runtime_error(name + ": expected MADNESS function to be reconstructed");
-      }
+    int num_functions = 0;
+    if (mramap.begin() != mramap.end()) {
+      batch = mramap.begin()->first.batch();
+      num_functions = mramap.begin()->second.count();
     }
-#endif // 0
-    for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
-      std::array<Translation,NDIM> l;
-      for (int i=0; i<NDIM; ++i){
-        l[i] = it->first.translation()[i];
+
+
+    auto compare_single_mad_func = [&](auto& madfunc, auto& mramap, size_type func_idx = 0, bool verbose = false) {
+      std::cout << name << "Function " << func_idx << " MRA: " << mramap.size() << " nodes; MAD: " << madfunc.min_nodes() << " nodes" << std::endl;
+
+      /**
+       * Sanity check for the right format
+       */
+      if constexpr (std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
+        if (!madfunc.is_compressed() && !madfunc.is_nonstandard()) {
+          std::cout << name << ": MADNESS function expected as compressed or nonstandard but found "
+                    << detail::madfunc_state(madfunc) << std::endl;
+          throw std::runtime_error(name + ": expected MADNESS function to be either compressed or nonstandard");
+        }
+      } else if constexpr (std::is_same_v<NodeT, mra::FunctionsReconstructedNode<T, NDIM>>) {
+        if (!madfunc.is_reconstructed()) {
+          std::cout << name << ": MADNESS function expected as reconstructed but found "
+                    << detail::madfunc_state(madfunc) << std::endl;
+          throw std::runtime_error(name + ": expected MADNESS function to be reconstructed");
+        }
       }
-      auto mad_coeff = it->second;
-      Key<NDIM> key = Key<NDIM>(batch, it->first.level(), l);
-      const auto& mra_coeff = mramap.find(key);
-      const auto& mad_norm = mad_coeff.coeff().svd_normf();
-      if (mra_coeff != mramap.end()) {
-        const auto& mra_node = mra_coeff->second;
-        auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
-        if (mra_node.is_zero(0)) {
-          assert(mra_norm == 0.0);
+
+      /**
+       * Compare each MADNESS node to MRA node, and check that all MRA nodes are in MADNESS map.
+       * We allow missing leaf nodes in MRA since MADNESS stores them but MRA does not, but only if they are zero in MADNESS.
+       */
+      const auto &coeffs = madfunc.get_impl()->get_coeffs();
+      for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
+        std::array<Translation,NDIM> l;
+        for (int i=0; i<NDIM; ++i){
+          l[i] = it->first.translation()[i];
         }
-        T absdiff = std::abs(mad_norm - mra_norm);
-        if (mra_norm != 0.0) {
-          all_zero = false;
-        }
-        if (absdiff > precision) {
-          check = false;
-          std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
-                    << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
-          auto mra_view = mra_coeff->second.coeffs().current_view();
-          if (mad_coeff.coeff().size() == mra_view.size()) {
-            for (int i = 0; i < mad_coeff.coeff().dim(0); ++i) {
-              for (int j = 0; j < mad_coeff.coeff().dim(1); ++j) {
-                for (int k = 0; k < mad_coeff.coeff().dim(2); ++k) {
-                  if (std::abs(mad_coeff.coeff()(i, j, k) - mra_view(0, i, j, k)) > precision) {
-                    std::cout << "    DIFF at coeff (" << i << ", " << j << ", " << k << "): MAD " << mad_coeff.coeff()(i, j, k)
-                              << " vs MRA " << mra_view(0, i, j, k) << " DIFF " << mad_coeff.coeff()(i, j, k) - mra_view(0, i, j, k) << std::endl;
+        auto mad_coeff = it->second;
+        Key<NDIM> key = Key<NDIM>(batch, it->first.level(), l);
+        const auto& mra_coeff = mramap.find(key);
+        const auto& mad_norm = mad_coeff.coeff().svd_normf();
+        if (mra_coeff != mramap.end()) {
+          const auto& mra_node = mra_coeff->second;
+          auto mra_coeffs = mra_node.coeffs().current_view()(func_idx);
+          auto mra_norm = mra_node.is_zero(func_idx) ? 0.0 : mra::normf(mra_coeffs);
+          T absdiff = std::abs(mad_norm - mra_norm);
+          if (mra_norm != 0.0) {
+            all_zero = false;
+          }
+          if (absdiff > precision) {
+            check = false;
+            std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
+                      << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
+            if (verbose) {
+              if (mad_coeff.coeff().size() == mra_coeffs.size()) {
+                for (int i = 0; i < mad_coeff.coeff().dim(0); ++i) {
+                  for (int j = 0; j < mad_coeff.coeff().dim(1); ++j) {
+                    for (int k = 0; k < mad_coeff.coeff().dim(2); ++k) {
+                      if (std::abs(mad_coeff.coeff()(i, j, k) - mra_coeffs(i, j, k)) > precision) {
+                        std::cout << "    DIFF at coeff (" << i << ", " << j << ", " << k << "): MAD " << mad_coeff.coeff()(i, j, k)
+                                  << " vs MRA " << mra_coeffs(i, j, k) << " DIFF " << mad_coeff.coeff()(i, j, k) - mra_coeffs(i, j, k) << std::endl;
+                      }
+                    }
                   }
                 }
+              } else if (mra_norm != mad_norm) {
+                std::cout << "    MADNESS coeff size: " << mad_coeff.coeff().size() << " with norm " << mad_norm << " vs MRA coeff size: " << mra_coeffs.size() << " with norm " << mra_norm << std::endl;
+                throw std::runtime_error(name + ": mismatch in coefficient sizes between MADNESS and MRA");
               }
             }
+          } else {
+            std::cout << name << ": " << it->first << " with norm " << mad_norm
+                      << " matches MRA norm " << mra_norm << std::endl;
           }
         } else {
-          std::cout << name << ": " << it->first << " with norm " << mad_norm
-                    << " matches MRA norm " << mra_norm << std::endl;
-        }
-      } else {
-        // check whether the missing node is a leaf node; MADNESS stores them, MRA does not.
-        bool mra_is_all_child_leafs = false;
-        if constexpr(std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
-          auto parent_coeff = mramap.find(key.parent());
-          if (parent_coeff != mramap.end() && parent_coeff->second.is_all_child_leaf(key)) {
-            mra_is_all_child_leafs = true; // for compressed nodes, we don't want to check leaf nodes since they won't be in the MRA map
+          // check whether the missing node is a leaf node; MADNESS stores them, MRA does not.
+          bool mra_is_child_leaf = false;
+          if constexpr(std::is_same_v<NodeT, mra::FunctionsCompressedNode<T, NDIM>>) {
+            auto parent_coeff = mramap.find(key.parent());
+            if (parent_coeff != mramap.end() && parent_coeff->second.is_child_leaf(func_idx, key)) {
+              mra_is_child_leaf = true; // for compressed nodes, we don't want to check leaf nodes since they won't be in the MRA map
+            }
           }
+          if (!(mad_norm == 0.0 && mad_coeff.is_leaf() && mra_is_child_leaf)) {
+            std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
+            check = false;
+          }
+          //throw std::runtime_error(name + ": mismatch in tree nodes between MADNESS and MRA");
         }
-        if (!(mad_norm == 0.0 && mad_coeff.is_leaf() && mra_is_all_child_leafs)) {
-          std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
-          check = false;
+      }
+      // check if all MRA keys are in the madness map
+      for (auto it = mramap.begin(); it != mramap.end(); ++it) {
+        madness::Vector<Translation, 3UL> l(it->first.translation());
+        auto mad_key = madness::Key<NDIM>(it->first.level(), l);
+        auto mad_coeff = coeffs.find(mad_key);
+        auto mra_coeffs = it->second.coeffs().current_view()(func_idx);
+        if (mad_coeff.get() == coeffs.end()) {
+          if (mra::normf(mra_coeffs) > precision) check = false;
+          std::cout << name << ": missing node in MADNESS: " << it->first << " norm "
+                    << mra::normf(mra_coeffs) << std::endl;
         }
-        //throw std::runtime_error(name + ": mismatch in tree nodes between MADNESS and MRA");
       }
-    }
-    // check if all MRA keys are in the madness map
-    for (auto it = mramap.begin(); it != mramap.end(); ++it) {
-      madness::Vector<Translation, 3UL> l(it->first.translation());
-      auto mad_key = madness::Key<NDIM>(it->first.level(), l);
-      auto mad_coeff = coeffs.find(mad_key);
-      if (mad_coeff.get() == coeffs.end()) {
-      if (mra::normf(it->second.coeffs().current_view()) > precision) check = false;
-        std::cout << name << ": missing node in MADNESS: " << it->first << " norm "
-                  << mra::normf(it->second.coeffs().current_view()) << std::endl;
+    };
+
+    /**
+     * Support both vector
+     */
+    if constexpr (std::is_same_v<std::decay_t<decltype(madfunc)>, std::vector<madness::Function<T, NDIM>>>) {
+      if (num_functions != madfunc.size()) {
+        std::cout << name << ": number of functions in MRA map (" << num_functions << ") does not match number of MADNESS functions (" << madfunc.size() << ")" << std::endl;
+        throw std::runtime_error(name + ": mismatch in number of functions between MADNESS and MRA");
       }
+      for (size_type func_idx = 0; func_idx < num_functions; ++func_idx) {
+        compare_single_mad_func(madfunc[func_idx], mramap, func_idx);
+      }
+    } else {
+      compare_single_mad_func(madfunc, mramap);
     }
+
+    /**
+     * Summary
+     */
     if (all_zero) {
       std::cout << name << ": all existing nodes are zero in MRA, something is weird" << std::endl;
     } else if (check) {

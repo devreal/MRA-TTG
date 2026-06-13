@@ -126,20 +126,22 @@ namespace mra
 
           // allocate the result
           result.allocate(sparsity, K, ttg::scope::Allocate);
-          std::cout << name << " " << key << " result before apply_leaf_info " << result.sparsity() << " " << std::endl;
 
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
-          std::cout << name << " " << key << " result after apply_leaf_info " << result.sparsity() << " " << std::endl;
+          std::cout << name << " " << key << " result after apply_leaf_info " << result << " " << std::endl;
 
           /**
            * Allocate the reconstructed node to send up to the parent.
            */
           // we don't care about leaf info here
-          sparsity.set_all_nonzero(); // reset
-          sparsity.nonzero_if_any(in, in0, in1, in2, in3, in4, in5, in6, in7);
+          sparsity.set_all_zero(); // reset
+          sparsity.nonzero_if_any(result); // set based on result since that's what we send up
+
+          // NOTE: we don't care about leaf info for p since it is a temporary only
+          //mra::apply_leaf_info(p, result); // set leaf info on p since that's what we send up
           p.allocate(sparsity, K, ttg::scope::Allocate);
-          std::cout << name << " " << key << " p " << p.sparsity() << " " << std::endl;
+          std::cout << name << " " << key << " p " << p << " " << std::endl;
           if (sparsity.is_any_nonzero()) {
             assert(!p.empty());
           }

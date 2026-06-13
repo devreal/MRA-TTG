@@ -1,5 +1,6 @@
 #include <ttg.h>
 #include "mra/mra.h"
+#include "compare_mad_mra.h"
 #include <any>
 #include <numbers>
 #include <madness/mra/mra.h>
@@ -22,63 +23,6 @@ template <typename T>
 static T u(const coordT &pt) {
   auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
   return fac*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
-}
-
-template<typename T, Dimension NDIM>
-void compare_mra_madness(auto& madfunc, auto& mramap, std::string name, T precision = 1e-15) {
-  bool check = true;
-  bool all_zero = true;
-  Batch batch = mramap.begin() != mramap.end() ? mramap.begin()->first.batch() : 0; // assume all keys in MRA map have the same batch as MADNESS key
-  const auto &coeffs = madfunc.get_impl()->get_coeffs();
-  for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
-    std::array<Translation,NDIM> l;
-    for (int i=0; i<NDIM; ++i){
-      l[i] = it->first.translation()[i];
-    }
-    auto mad_coeff = it->second;
-    Key<NDIM> key = Key<NDIM>(batch,it->first.level(), l);
-    auto mra_coeff = mramap.find(key);
-    auto mad_norm = mad_coeff.coeff().svd_normf();
-    if (mra_coeff != mramap.end()) {
-      auto mra_norm = mra::normf(mra_coeff->second.coeffs().current_view());
-      T absdiff = std::abs(mad_norm - mra_norm);
-      if (mra_norm != 0.0) {
-        all_zero = false;
-      }
-      if (absdiff > precision) {
-        check = false;
-        std::cout << "" << name << ": " << it->first << " with norm " << mad_norm
-                  << " DOES NOT MATCH MRA norm " << mra_norm << " (absdiff: " << absdiff << ")" << std::endl;
-        //throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
-      } else {
-        //std::cout << name << ": " << it->first << " with norm " << mad_norm
-        //          << " matches MRA norm " << mra_norm << std::endl;
-      }
-    } else {
-      std::cout << name << ": missing node in MRA: " << it->first << " with norm " << mad_norm << std::endl;
-      check = false;
-      //throw std::runtime_error(name + ": mismatch in tree nodes between MADNESS and MRA");
-    }
-  }
-  // check if all MRA keys are in the madness map
-  for (auto it = mramap.begin(); it != mramap.end(); ++it) {
-    madness::Vector<Translation, 3UL> l(it->first.translation());
-    auto mad_key = madness::Key<NDIM>(it->first.level(), l);
-    auto mad_coeff = coeffs.find(mad_key);
-    if (mad_coeff.get() == coeffs.end()) {
-      if (mra::normf(it->second.coeffs().current_view()) > precision) check = false;
-      std::cout << name << ": missing node in MADNESS: " << it->first << " norm "
-                << mra::normf(it->second.coeffs().current_view()) << std::endl;
-    }
-  }
-  if (all_zero) {
-    std::cout << name << ": all existing nodes are zero in MRA, something is weird" << std::endl;
-  } else if (check) {
-    std::cout << name << ": all nodes match between MADNESS and MRA" << std::endl;
-  } else {
-    std::cout << name << ": some nodes match between MADNESS and MRA, but not all" << std::endl;
-    throw std::runtime_error(name + ": mismatch in norms between MADNESS and MRA");
-  }
 }
 
 template <typename T>

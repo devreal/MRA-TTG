@@ -784,6 +784,7 @@ namespace mra {
         bool empty = true;
         auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
         for (size_type i = 0; i < N; ++i) {
+          std::cout << "ACCUMULATE " << key << " result norm for function " << i << ": " << resnorms_host_view(i) << std::endl;
           if (resnorms_host_view(i) != 0.0) {
             assert(out.is_nonzero(i) && "if the norm is non-zero we should have non-zero coefficients");
             empty = false;
@@ -795,8 +796,7 @@ namespace mra {
         }
 
         /**
-         * TOOD: we should not drop the coefficient here. We need that information in reconstruct
-         *       to know for which functions we have children.
+         * Drop the coefficients if the node is empty to save memory.
          */
         if (empty) {
           out.make_empty(); // drop the memory but keep child info
@@ -868,7 +868,7 @@ namespace mra {
         for (size_type i = 0; i < N; ++i) {
           for (size_type c = 0; c < num_children; ++c) {
             bool is_child_leaf = false;
-            if (children[c]->invalid() || (children[c]->is_all_child_leaf(i) && children[c]->is_zero(i))) {
+            if (children[c]->empty() || (children[c]->is_all_child_leaf(i) && children[c]->is_zero(i))) {
               is_child_leaf = true;
             }
             node.set_child_leaf(i, c, is_child_leaf);

@@ -34,27 +34,57 @@ using real_function_t = madness::Function<double, 3>;
 using real_convolution_t = madness::SeparatedConvolution<double, 3>;
 
 template <typename T>
-static T u_exact(const coord_t &pt) {
+static T u_exact(const coord_t &pt, T expnt) {
   auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
   return fac*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
 }
 
+
+template <typename T>
+static T u1(const coord_t &pt) {
+  return u_exact(pt, expnt);
+}
+
+template <typename T>
+static T u2(const coord_t &pt) {
+  return u_exact(pt, expnt/10);
+}
+
 template <typename T, Dimension NDIM>
-auto compute_conv_madness(real_convolution_t& mad_conv) {
+auto compute_conv_madness(size_type N, real_convolution_t& mad_conv) {
 
   //madness::FunctionDefaults<3>::set_truncate_on_project(false);
 
-  real_function_t f = real_factory_t(mad_conv.get_world()).f(u_exact);
-  f.set_autorefine(true);
+  if (N > 2) {
+    throw std::runtime_error("compute_conv_madness: only support N=1 or 2 for now");
+  }
+
+  std::vector<real_function_t> functions(N);
+  functions[0] = real_factory_t(mad_conv.get_world()).f(u1);
+  if (N == 2) {
+    functions[1] = real_factory_t(mad_conv.get_world()).f(u2);
+  }
+
+  madness::World& world = mad_conv.get_world();
+  for (auto& f : functions) {
+    f.set_autorefine(false);
+    f.make_nonstandard(false, false);
+  }
+  // wait for everything to complete before starting convolution
+  world.gop.fence();
+
+  //real_function_t f = real_factory_t(mad_conv.get_world()).f(u_exact);
+  //f.set_autorefine(true);
 
 
-  std::cout << "MAD function has " << f.min_nodes() << " nodes before convolution" << std::endl;
+  std::cout << "MAD function has " << functions[0].min_nodes() << " nodes before convolution" << std::endl;
 
-  f.make_nonstandard(false, true);
+  //f.make_nonstandard(false, true);
+  //madness::make_nonstandard(world, functions);
 
-  real_function_t opf = mad_conv(f);
+  std::vector<real_function_t> opf = mad_conv(functions);
   // std::cout << "Tree State of f: " << f.get_impl()->get_tree_state() << std::endl;
-  return std::make_tuple(std::move(f), std::move(opf));
+  return std::make_tuple(std::move(functions), std::move(opf));
 }
 
 
@@ -90,7 +120,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     for (size_t d=0; d<NDIM; d++) {
       r[d] = 0.0;
     }
-    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt, r, init_lev);
+    gaussians_view[i] = mra::Gaussian<T, NDIM>(D[0], expnt/(i+1), r, init_lev);
   }
 
   std::cout << N << " Gaussians with expnt " << expnt << std::endl;
@@ -146,7 +176,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   ttg::fence();
 
   {
-    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(mad_conv);
+    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(N, mad_conv);
     // std::cout << "Tree State of madfunc: " << madfunc.get_impl()->get_tree_state() << std::endl;
     // auto madkey = madness::Key<NDIM>(0, {0, 0, 0});
     // const auto &madcoeffs = madfunc.get_impl()->get_coeffs();
@@ -175,7 +205,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     //compare_mra_madness(madfunc, rmap, "reconstruct_result", verification_precision);
     //madfunc.compress();
     //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
-    madfunc.make_nonstandard(false, true);
+    madness::make_nonstandard(mad_conv.get_world(), madfunc, true);
     compare_mra_madness(madfunc, nsmap, "nonstandard_result", verification_precision);
     compare_mra_madness(madconv, rconvmap, "conv_result", verification_precision);
   }
@@ -193,6 +223,7 @@ int main(int argc, char **argv) {
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
   int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
+  int num_ops = opt.parse("-o", 1); // number of times to repeat the test for timing purposes
   Length = opt.parse("-d", Length);
   bool norand = opt.exists("-norand");
   bool print_dot = opt.exists("-dot");
@@ -225,8 +256,10 @@ int main(int argc, char **argv) {
 
   double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   madness::World world(SafeMPI::COMM_WORLD);
-  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
-  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, madness::LatticeRange()));
+  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(num_ops);
+  for (int i = 0; i < num_ops; ++i) {
+    ops[i].reset(new madness::GaussianConvolution1D<double>(K, 1/(i+1)*coeff, 1/(i+1)*expnt, 0, madness::LatticeRange()));
+  }
   real_convolution_t mad_conv(world, ops, K);
 
 

@@ -277,6 +277,7 @@ namespace mra{
       } else if (!above_threshold) {
         /* if input is empty and result is below threshold, we can just leave it zero */
         result = 0.0;
+        resnorm = 0.0;
       }
       std::cout << "MRA_OP_APPLY " << key << " disp " << displacement
                 << " after accumulation resnorm " << normf(result) << " in empty " << in.empty() << " in norm " << normf(in) << std::endl;

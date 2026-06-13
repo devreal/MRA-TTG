@@ -50,7 +50,9 @@ namespace mra {
       transform(s, hgT, d, workspace);
 
       auto child_slice = get_child_slice<NDIM>(key, K, 0);
-      p = d(child_slice);
+      if (!p.empty()) {
+        p = d(child_slice);
+      }
 
       if (key.level() > 0 && !is_ns) d(child_slice) = 0.0;
 
@@ -92,7 +94,11 @@ namespace mra {
         }
         if (is_team_lead()) {
           for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
-            block_in_views[i] = in_views[i](fnid);
+            if (in_views[i].is_zero(fnid)) {
+              block_in_views[i] = DenseTensorView<const T, NDIM>(); // dummy view since compress_kernel_impl expects a non-const view for all children
+            } else {
+              block_in_views[i] = in_views[i](fnid);
+            }
           }
           p = p_in(fnid);
           if (!result_in.is_zero(fnid)) {
