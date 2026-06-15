@@ -109,6 +109,7 @@ namespace mra {
         SYNCTHREADS();
         if (result_in.is_zero(fnid) && !p_in.is_zero(fnid)) {
           p = node; // pass through the input to the output
+          d_sumsq[fnid] = 0.0;
           std::cout << "COMPRESS " << key << " pass through fnid " << fnid << " because result is zero but p is not zero" << std::endl;
           continue; // output is zero so skip computation and leave it zero
         }

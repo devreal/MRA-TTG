@@ -67,26 +67,18 @@ namespace mra{
 
       std::cout << name << " " << key << " node " << node << " from_parent " << from_parent << std::endl;
 
-      // Send empty interior node to result tree
-      auto r_empty = mra::FunctionsReconstructedNode<T,NDIM>(key, N);
-      r_empty.set_all_leaf(LeafStatus::Inner);
       //std::cout << name << " " << key << " node norm " << normf(node.coeffs().current_view()) << " from_parent norm " << normf(from_parent.coeffs().current_view())  << std::endl;
 #ifndef MRA_ENABLE_HOST
       // forward() returns a vector that we can push into
-      auto sends = ttg::device::forward(ttg::device::send<1>(key, std::move(r_empty)));
+      auto sends = ttg::device::forward();
       auto do_send = [&]<std::size_t I, typename S>(auto& child, S&& node) {
             sends.push_back(ttg::device::send<I>(child, std::forward<S>(node)));
       };
 #else
-      ttg::send<1>(key, std::move(r_empty));
       auto do_send = []<std::size_t I, typename S>(auto& child, S&& node) {
         ttg::send<I>(child, std::forward<S>(node));
       };
 #endif // MRA_ENABLE_HOST
-
-      SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
-      sparsity.nonzero_if_any(node, from_parent);
-      std::cout << name << ": " << key << " sparsity " << sparsity << std::endl;
 
       /* if the parent is a leaf then we mark the child as zero */
       //for (std::size_t i = 0; i < N; ++i) {
@@ -97,21 +89,24 @@ namespace mra{
 
       // array of child nodes
       std::array<mra::FunctionsReconstructedNode<T,NDIM>, mra::Key<NDIM>::num_children()> r_arr;
+      std::array<SparsityInfo, mra::Key<NDIM>::num_children()> child_sparsity_arr;
       for (auto it=children.begin(); it!=children.end(); ++it) {
         const mra::Key<NDIM> child= *it;
         auto& r = r_arr[it.index()];
         r = mra::FunctionsReconstructedNode<T,NDIM>(child, N);
+
+        child_sparsity_arr[it.index()] = SparsityInfo(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
         // collect leaf information
         for (std::size_t i = 0; i < N; ++i) {
-          std::cout << name << " " << key << " child " << child << " function " << i
-                    << " from_parent is_invalid " << from_parent.is_invalid(i)
-                    << " from_parent is_leaf " << from_parent.is_leaf(i)
-                    << " node is_child_leaf " << node.is_child_leaf(i, *it)
-                    << std::endl;
+          //std::cout << name << " " << key << " child " << child << " function " << i
+          //          << " from_parent is_invalid " << from_parent.is_invalid(i)
+          //          << " from_parent is_leaf " << from_parent.is_leaf(i)
+          //          << " node is_child_leaf " << node.is_child_leaf(i, *it)
+          //          << std::endl;
           if (from_parent.is_invalid(i) || from_parent.is_leaf(i)) {
-            std::cout << name << " " << key << " child " << child << " function " << i
-                      << " from_parent is_invalid " << from_parent.is_invalid(i)
-                      << " or leaf " << from_parent.is_leaf(i) << " so child is invalid" << std::endl;
+            //std::cout << name << " " << key << " child " << child << " function " << i
+            //          << " from_parent is_invalid " << from_parent.is_invalid(i)
+            //          << " or leaf " << from_parent.is_leaf(i) << " so child is invalid" << std::endl;
             r.set_leaf(i, LeafStatus::Invalid); // parent is invalid, so the child must be too
           //} else if (node.is_zero(i)) {
           //  std::cout << name << " " << key << " child " << child << " function " << i
@@ -119,22 +114,23 @@ namespace mra{
           //  // parent is a leaf and the compressed node is zero, so the child must be a invalid
           //  r.set_leaf(i, LeafStatus::Invalid); // node is zero, so the child must be a leaf (but not necessarily invalid)
           } else if (node.is_child_leaf(i, *it)) {
-            std::cout << name << " " << key << " child " << child << " function " << i
-                      << " node is child leaf so child is leaf" << std::endl;
+            //std::cout << name << " " << key << " child " << child << " function " << i
+            //          << " node is child leaf so child is leaf" << std::endl;
             // parent is not a leaf/invalid, the compressed node has coefficients, and its child is empty, so we are the leaf
             r.set_leaf(i, LeafStatus::Leaf);
+            child_sparsity_arr[it.index()].set_nonzero(i);
           } else {
-            std::cout << name << " " << key << " child " << child << " function " << i
-                      << " child is inner" << std::endl;
+            //std::cout << name << " " << key << " child " << child << " function " << i
+            //          << " child is inner" << std::endl;
             // parent is not a leaf/invalid and the compressed node is not empty, so we are the inner node
             r.set_leaf(i, LeafStatus::Inner);
+            child_sparsity_arr[it.index()].set_nonzero(i);
           }
         }
         /**
          * Sanity check: if this is the last node in reconstructed form then the child of the compressed node must be empty.
          * TOOD: Is this sanity check valid? It appears that convolution may produce empty compressed nodes with non-empty children...
          */
-        std::cout << name << " " << key << " child " << child << " " << r << std::endl;
         if (r.is_all_leaf_or_invalid()) {
           //assert(node.is_child_empty(*it) &&
           //       "if a reconstructed child is all leaf or invalid, the corresponding compressed node child should be empty");
@@ -164,12 +160,27 @@ namespace mra{
 
       /* once we are here we know we need to invoke the reconstruct kernel */
 
+      /**
+       * The result that contains the coefficients of leaf nodes only.
+       * We cannot forward the full child nodes because they might contain coefficients
+       * for non-leaf nodes that we don't want to leave the reconstruct operation.
+       */
+      SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
+      for (std::size_t i = 0; i < N; ++i) {
+        if (from_parent.is_leaf(i)) {
+          // leafs are nonzero
+          sparsity.set_nonzero(i);
+        }
+      }
+      mra::FunctionsReconstructedNode<T,NDIM> result(key, sparsity, K, ttg::scope::Allocate);
+      mra::apply_leaf_info(result, from_parent);
+
       /* populate the vector of r's
       * TODO: TTG/PaRSEC supports only a limited number of inputs so for higher dimensions
       *       we may have to consolidate the r's into a single buffer and pick them apart afterwards.
       *       That will require the ability to ref-count 'parent buffers'. */
       for (int i = 0; i < key.num_children(); ++i) {
-        r_arr[i].allocate(sparsity, K, ttg::scope::Allocate);
+        r_arr[i].allocate(child_sparsity_arr[i], K, ttg::scope::Allocate);
       }
 
       // compute norms
@@ -186,14 +197,14 @@ namespace mra{
       inputs.add(from_parent.coeffs().buffer());
       inputs.add(node.coeffs().buffer());
       inputs.add(norms.buffer());
+      inputs.add(result.coeffs().buffer());
       /* select a device */
       co_await ttg::device::select(inputs);
 #endif
 
 
-      auto sparseman = make_sparsity_manager(r_arr);
+      auto sparseman = make_sparsity_manager(r_arr, result);
       sparseman.populate_device_sparsity();
-
 
       // pick apart the std::array
       auto r_ptrs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
@@ -202,8 +213,10 @@ namespace mra{
       auto node_view = node.coeffs().current_view();
       auto hg_view = hg.current_view();
       auto from_parent_view = from_parent.coeffs().current_view();
+      auto result_view = result.coeffs().current_view();
       submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
-                                r_ptrs, tmp_scratch.current_device_ptr(), ttg::device::current_stream());
+                                r_ptrs, result_view, tmp_scratch.current_device_ptr(),
+                                ttg::device::current_stream());
 
 #ifdef MRA_CHECK_NORMS
       norms.compute();
@@ -214,16 +227,37 @@ namespace mra{
       norms.verify();
 #endif // MRA_CHECK_NORMS
 
+      // send result to the output
+      std::cout << name << " " << key << " result " << result << std::endl;
+      do_send.template operator()<1>(key, std::move(result));
+
+      /**
+       * For each child, either recurse down (if there not all nodes are leaf/invalid) or send to the output (if they are all leaf/invalid).
+       * Note that we have to wait until the end to send to the output because we need to have the full child node ready to determine if it's all leaf/invalid or not.
+       */
       for (auto it=children.begin(); it!=children.end(); ++it) {
         const mra::Key<NDIM> child= *it;
         mra::FunctionsReconstructedNode<T,NDIM>& r = r_arr[it.index()];
         r.key() = child;
-        std::cout << name << " " << key << " child " << child << " " << r << std::endl;
+        std::cout << name << " " << key << " child " << r << std::endl;
         if (r.is_all_leaf_or_invalid()) {
+          // if the child is all leaf or invalid then we can send it directly to the output
           do_send.template operator()<1>(child, std::move(r));
         } else {
+          // recurse down
           do_send.template operator()<0>(child, std::move(r));
         }
+#if 0
+        if (!r.is_all_leaf_or_invalid()) {
+          ttg::broadcast<0, 1>(std::make_tuple(child, child), std::move(r));
+        } else if (r.is_any_leaf()) {
+          // send to result tree as this node contains leafs
+          do_send.template operator()<1>(child, std::move(r));
+        } else if (!r.is_all_leaf_or_invalid()) {
+          // recur down
+          do_send.template operator()<0>(child, std::move(r));
+        }
+#endif // 0
       }
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);

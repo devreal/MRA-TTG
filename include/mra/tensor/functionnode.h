@@ -805,6 +805,20 @@ namespace mra {
       }
     }
 
+
+    /**
+     * Copy the leaf information the source to the target node.
+     */
+    template<typename T, Dimension NDIM>
+    void apply_leaf_info(FunctionsReconstructedNode<T, NDIM>& target, const FunctionsReconstructedNode<T, NDIM>& src) {
+      for (size_type i = 0; i < target.count(); ++i) {
+        //std::cout << "apply_leaf_info for function " << target.key() << " index " << i
+        //          << ": any_is_leaf " << any_is_leaf << ", any_is_inner " << any_is_inner << std::endl;
+        target.set_leaf(i, src.leaf_status(i));
+      }
+    }
+
+
     /**
      * Takes one or more compressed function nodes and applies the child information to the target node.
      * If the children of all functions of the source nodes are leafs then the children of the target

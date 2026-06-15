@@ -11,6 +11,16 @@ namespace mra {
     using base_type = RangeSparsityBase<SparsityInfo, void>;
     using value_type = void;
 
+  private:
+
+    void check_valid() {
+      if (m_num_functions == 0) {
+        throw std::logic_error("SparsityInfo must have positive number of functions");
+      }
+    }
+
+  public:
+
     enum class InitType {
       AllZero,
       AllNonZero,
@@ -20,6 +30,12 @@ namespace mra {
     static constexpr Dimension ndim() {
       return 1;
     }
+
+    /**
+     * Creates an invalid SparsityInfo with zero functions. Must be assigned to a valid SparsityInfo before use.
+      * This is needed for default construction in arrays (e.g., reconstruct()).
+     */
+    SparsityInfo() = default;
 
     /**
      * Constructs sparsity info for num_functions functions.
@@ -53,6 +69,7 @@ namespace mra {
 
     template<typename... Nodes>
     void nonzero_if_any(const Nodes&... nodes) {
+      check_valid();
       for (size_type i = 0; i < m_num_functions; ++i) {
         bool any_nonzero = (nodes.sparsity().is_nonzero(i) || ...);
         std::array<bool, sizeof...(Nodes)> nonzero_array = { nodes.sparsity().is_nonzero(i)... };
@@ -69,6 +86,7 @@ namespace mra {
 
     template<typename... Nodes>
     void nonzero_if_all(const Nodes&... nodes) {
+      check_valid();
       for (size_type i = 0; i < m_num_functions; ++i) {
         if ((nodes.sparsity().is_nonzero(i) && ...)) {
           base_type::set_nonzero(i);

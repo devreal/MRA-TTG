@@ -47,7 +47,7 @@ static T u1(const coord_t &pt) {
 
 template <typename T>
 static T u2(const coord_t &pt) {
-  return u_exact(pt, expnt/10);
+  return u_exact(pt, expnt/2);
 }
 
 template <typename T, Dimension NDIM>
@@ -258,7 +258,7 @@ int main(int argc, char **argv) {
   madness::World world(SafeMPI::COMM_WORLD);
   std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(num_ops);
   for (int i = 0; i < num_ops; ++i) {
-    ops[i].reset(new madness::GaussianConvolution1D<double>(K, 1/(i+1)*coeff, 1/(i+1)*expnt, 0, madness::LatticeRange()));
+    ops[i].reset(new madness::GaussianConvolution1D<double>(K, 1/(i+1)*100, 1/(i+1)*100, 0, madness::LatticeRange()));
   }
   real_convolution_t mad_conv(world, ops, K);
 

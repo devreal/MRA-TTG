@@ -35,7 +35,8 @@ namespace mra {
       concepts::TensorView<NDIM> auto& s,
       concepts::TensorView<NDIM> auto& tmp_node,
       T* workspace,
-      concepts::TensorViewArray<NDIM, Key<NDIM>::num_children()> auto& r_arr)
+      concepts::TensorViewArray<NDIM, Key<NDIM>::num_children()> auto& r_arr,
+      concepts::TensorView<NDIM> auto& result)
     {
       s = 0.0;
       tmp_node = node;
@@ -63,7 +64,16 @@ namespace mra {
         auto child_slice = get_child_slice<NDIM>(key, K, i);
         /* tmp layout: 2K^NDIM for s, K^NDIM for workspace, [K^NDIM]* for r fields */
         auto& r = r_arr[i];
+        if (r.empty()) {
+          /* child is zero so skip */
+          continue;
+        }
         r = s(child_slice);
+      }
+
+      // extract the result from the input node
+      if (!result.empty()) {
+        result = from_parent;
       }
     }
 
@@ -80,7 +90,8 @@ namespace mra {
       T* tmp_ptr,
       const concepts::TensorView<2> auto hg,
       const concepts::TensorView<NDIM+1> auto from_parent_view,
-      concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr)
+      concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
+      concepts::TensorView<NDIM+1> auto& result_view)
     {
       const bool is_t0 = (0 == thread_id());
 
@@ -90,6 +101,7 @@ namespace mra {
       SHARED T* workspace;
       SHARED DenseTensorView<const T, NDIM> node;
       SHARED DenseTensorView<const T, NDIM> from_parent;
+      SHARED DenseTensorView<T, NDIM> result;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp_ptr[blockId*reconstruct_tmp_size<NDIM>(K)];
@@ -110,11 +122,20 @@ namespace mra {
           node = node_view(fnid);
           from_parent = from_parent_view(fnid);
           for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
-            block_r_arr[i] = r_arr[i](fnid);
+            if (r_arr[i].is_zero(fnid)) {
+              block_r_arr[i] = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl expects a non-const view for all children
+            } else {
+              block_r_arr[i] = r_arr[i](fnid);
+            }
+          }
+          if (!result_view.is_zero(fnid)) {
+            result = result_view(fnid);
+          } else {
+            result = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl
           }
         }
         SYNCTHREADS();
-        reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr);
+        reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr, result);
       }
     }
   } // namespace detail
@@ -129,6 +150,7 @@ namespace mra {
     const concepts::TensorView<2> auto& hg,
     const concepts::TensorView<NDIM+1> auto& from_parent,
     const concepts::TensorViewArray<NDIM+1, mra::Key<NDIM>::num_children()> auto& r_arr,
+    concepts::TensorView<NDIM+1> auto& result,
     T* tmp,
     ttg::device::Stream stream)
   {
@@ -136,7 +158,7 @@ namespace mra {
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, smem_size, stream,
-      (key, N, K, accumulate_NS, node, tmp, hg, from_parent, r_arr));
+      (key, N, K, accumulate_NS, node, tmp, hg, from_parent, r_arr, result));
     checkSubmit();
   }
 
@@ -152,6 +174,7 @@ namespace mra {
     const SparseTensorView<double, 2>& hg,
     const SparseTensorView<double, 3+1>& from_parent,
     const std::array<SparseTensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,
+    SparseTensorView<double, 3+1>& result,
     double* tmp,
     ttg::device::Stream stream);
 
