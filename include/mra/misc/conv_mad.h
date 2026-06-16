@@ -107,7 +107,8 @@ namespace mra {
           auto data = make_op1d(n, disp.translation()[d], d);
           cachemutex.lock();
           // check if someone else generated this data
-          if (_opcache.find(key_1d) == _opcache.end()) {
+          it = _opcache.find(key_1d);
+          if (it == _opcache.end()) {
             auto [it_, inserted] = _opcache.insert(std::make_pair(key_1d, std::move(data)));
             it = it_;
           }
