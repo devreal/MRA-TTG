@@ -121,6 +121,10 @@ if (HAVE_CUDA)
                  tests/mad_derivative_test.cu)
   target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra libmra-cuda-parsec)
 
+  add_executable(mra-mad-conv-device-cuda-parsec
+                tests/mad_convolution_test.cc autocorr.cc)
+  target_link_libraries(mra-mad-conv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra libmra-cuda-parsec)
+
   if (TARGET Kokkos::kokkos)
     add_executable(transformbench-cuda-kokkos-parsec benchmarks/transformbench/transformbench.cu)
     target_link_libraries(transformbench-cuda-kokkos-parsec PUBLIC libmra-cuda-base-parsec Kokkos::kokkos)
@@ -162,6 +166,11 @@ if (HAVE_HIP)
 
   add_executable(mra-unit-device-hip-parsec examples/unit/test_unit.hip)
   target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)
+
+  add_executable(mra-mad-conv-device-hip-parsec
+                tests/mad_convolution_test.cc autocorr.cc)
+  target_link_libraries(mra-mad-conv-device-hip-parsec PUBLIC MADworld MADtensor MADmra libmra-hip-parsec)
+
 
   add_executable(mra-mad-deriv-device-hip-parsec
                  tests/mad_derivative_test.hip)
