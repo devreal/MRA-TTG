@@ -55,12 +55,15 @@ namespace mra
     constexpr const std::size_t num_children = mra::Key<NDIM>::num_children();
     // creates the right number of edges for nodes to flow from send_leafs_up to compress
     // send_leafs_up will select the right input for compress
-    auto create_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-      return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})..., filter_in);
-    };
-    auto send_to_compress_edges = create_edges(std::make_index_sequence<num_children>{});
+    auto send_to_compress_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})..., filter_in);
+      }(std::make_index_sequence<num_children>{});
+    // output edges for the send_leafs_up tasks, one for each child
+    auto send_leaves_up_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+      return ttg::edges((std::get<Is>(send_to_compress_edges))...);
+    }(std::make_index_sequence<num_children>{});
     /* append out edge to set of edges */
-    auto compress_out_edges = std::tuple_cat(send_to_compress_edges, std::make_tuple(out));
+    auto compress_out_edges = std::tuple_cat(send_leaves_up_edges, std::make_tuple(out));
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
     auto do_compress = [&, fns, K, is_ns, name](const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
@@ -78,20 +81,20 @@ namespace mra
       //typename ::detail::tree_types<T,K,NDIM>::compress_out_type& out) {
         size_type N = fns->num_functions(key);
         constexpr const auto num_children = mra::Key<NDIM>::num_children();
-        constexpr const auto out_terminal_id = num_children + 1;
+        constexpr const auto out_terminal_id = num_children;
         mra::FunctionsCompressedNode<T,NDIM> result(key, N); // The eventual result
         // create empty, may be reset if needed
         mra::FunctionsReconstructedNode<T, NDIM> p(key, N);
 
-        std::cout << name << " in " << in << std::endl;
-        std::cout << name << " in0 " << in0 << std::endl;
-        std::cout << name << " in1 " << in1 << std::endl;
-        std::cout << name << " in2 " << in2 << std::endl;
-        std::cout << name << " in3 " << in3 << std::endl;
-        std::cout << name << " in4 " << in4 << std::endl;
-        std::cout << name << " in5 " << in5 << std::endl;
-        std::cout << name << " in6 " << in6 << std::endl;
-        std::cout << name << " in7 " << in7 << std::endl;
+        //std::cout << name << " in " << in << std::endl;
+        //std::cout << name << " in0 " << in0 << std::endl;
+        //std::cout << name << " in1 " << in1 << std::endl;
+        //std::cout << name << " in2 " << in2 << std::endl;
+        //std::cout << name << " in3 " << in3 << std::endl;
+        //std::cout << name << " in4 " << in4 << std::endl;
+        //std::cout << name << " in5 " << in5 << std::endl;
+        //std::cout << name << " in6 " << in6 << std::endl;
+        //std::cout << name << " in7 " << in7 << std::endl;
 
 
         /* check if all inputs are empty */
@@ -107,12 +110,12 @@ namespace mra
             p.sum(i) = 0.0;
           }
           // p.set_all_leaf(LeafStatus::Invalid);
-          std::cout << name << " " << key << " all empty, all children leafs " << result.is_all_child_leaf() << " ["
-                     << in.is_all_leaf() << ", " << in0.is_all_leaf() << ", " << in1.is_all_leaf() << ", "
-                     << in2.is_all_leaf() << ", " << in3.is_all_leaf() << ", "
-                     << in4.is_all_leaf() << ", " << in5.is_all_leaf() << ", "
-                     << in6.is_all_leaf() << ", " << in7.is_all_leaf() << "] "
-                     << std::endl;
+          //std::cout << name << " " << key << " all empty, all children leafs " << result.is_all_child_leaf() << " ["
+          //           << in.is_all_leaf() << ", " << in0.is_all_leaf() << ", " << in1.is_all_leaf() << ", "
+          //           << in2.is_all_leaf() << ", " << in3.is_all_leaf() << ", "
+          //           << in4.is_all_leaf() << ", " << in5.is_all_leaf() << ", "
+          //           << in6.is_all_leaf() << ", " << in7.is_all_leaf() << "] "
+          //           << std::endl;
         } else {
 
           /* some inputs are on the device so submit a kernel */
@@ -122,7 +125,7 @@ namespace mra
            * We only produce a result if at least one of the children is non-zero.
            */
           sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
-          std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
+          //std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
 
           // allocate the result
           result.allocate(sparsity, K, ttg::scope::Allocate);
@@ -130,7 +133,7 @@ namespace mra
 
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
-          std::cout << name << " " << key << " result after apply_leaf_info " << result << " " << std::endl;
+          //std::cout << name << " " << key << " result after apply_leaf_info " << result << " " << std::endl;
 
           /**
            * Allocate the reconstructed node to send up to the parent.
@@ -212,13 +215,13 @@ namespace mra
                                     in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
             auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
             p.sum(i) = d_sumsq_arr[i] + child_sumsq; // result sumsq is last element in sumsqs
-            std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
-                      << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
+            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
+            //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
           }
         }
 
 
-        std::cout << name << " " << key << " result " << result << " p " << p << std::endl;
+        //std::cout << name << " " << key << " result " << result << " p " << p << std::endl;
 
         // Recur up
         if (key.level() > 0) {
@@ -254,9 +257,10 @@ namespace mra
 #endif
         }
     };
-    auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_to_compress_edges, name + "-send_leaves_up"),
-                               ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, name),
-                               ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), name + "-filter"));
+
+    auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_leaves_up_edges, "send_leaves_up"),
+                               ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, "compress"),
+                               ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), "filter"));
 
       // set maps if provided
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
@@ -270,7 +274,14 @@ namespace mra
       std::get<2>(ttt)->set_devicemap(devicemap);
     }
 
-    return ttt;
+    auto ins = std::make_tuple(std::get<2>(ttt)->template in<0>());
+    auto outs = std::make_tuple(std::get<1>(ttt)->template out<8>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(3);
+    ops[0] = std::move(std::get<0>(ttt));
+    ops[1] = std::move(std::get<1>(ttt));
+    ops[2] = std::move(std::get<2>(ttt));
+
+    return make_ttg(std::move(ops), ins, outs, name);
   }
 
 }

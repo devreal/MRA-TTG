@@ -74,8 +74,6 @@ namespace mra {
         bool any_nonzero = (nodes.sparsity().is_nonzero(i) || ...);
         std::array<bool, sizeof...(Nodes)> nonzero_array = { nodes.sparsity().is_nonzero(i)... };
         std::array<size_type, sizeof...(Nodes)> size_array = { static_cast<size_type>(nodes.sparsity().count())... };
-        std::cout << "nonzero_if_any: function " << i << " any_nonzero " << any_nonzero << ", nonzero_array "
-                  << nonzero_array << ", size_array " << size_array << std::endl;
         if (any_nonzero) {
           base_type::set_nonzero(i);
         } else {

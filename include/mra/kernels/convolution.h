@@ -260,9 +260,9 @@ namespace mra{
 
       bool above_threshold = (resnorm > (0.3 * tol / fac));
 
-      std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " cnorm " << cnorm
-                << " opnorm " << opnorm << " tol " << tol << " resnorm " << resnorm
-                << (above_threshold ? " above threshold" : " below threshold, dropping result") << std::endl;
+      //std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " cnorm " << cnorm
+      //          << " opnorm " << opnorm << " tol " << tol << " resnorm " << resnorm
+      //          << (above_threshold ? " above threshold" : " below threshold, dropping result") << std::endl;
 
       // Accumulate input if not empty
       if (!in.empty()) {
@@ -279,8 +279,6 @@ namespace mra{
         result = 0.0;
         resnorm = 0.0;
       }
-      std::cout << "MRA_OP_APPLY " << key << " disp " << displacement
-                << " after accumulation resnorm " << normf(result) << " in empty " << in.empty() << " in norm " << normf(in) << std::endl;
       if (resnorm_out != nullptr) {
         if (is_team_lead()) {
           *resnorm_out = resnorm;

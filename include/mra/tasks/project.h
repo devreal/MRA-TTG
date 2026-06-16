@@ -80,7 +80,7 @@ namespace mra{
         }
       }
       if (all_initial_level) {
-        std::cout << "project " << key << " all initial " << std::endl;
+        //std::cout << "project " << key << " all initial " << std::endl;
         std::vector<mra::Key<NDIM>> bcast_keys;
         /* TODO: children() returns an iteratable object but broadcast() expects a contiguous memory range.
                   We need to fix broadcast to support any ranges */
@@ -101,7 +101,7 @@ namespace mra{
         for (std::size_t i = 0; i < N; ++i) {
           if (leaf_info_view[i] == LeafStatus::Leaf || leaf_info_view[i] == LeafStatus::Invalid) {
             /* if the parent is a leaf, then this must be a zero child */
-            std::cout << name << " " << key << " function " << i << " is leaf or invalid, setting to invalid" << std::endl;
+            //std::cout << name << " " << key << " function " << i << " is leaf or invalid, setting to invalid" << std::endl;
             result.set_leaf(i, LeafStatus::Invalid);
             sparsity.remove(i);
             continue;
@@ -120,9 +120,9 @@ namespace mra{
 
             // set node as zero and don't allocate
             sparsity.remove(i);
-            std::cout << "" << name << " " << key << " function " << i << " is negligible, setting to zero" << std::endl;
+            //std::cout << "" << name << " " << key << " function " << i << " is negligible, setting to zero" << std::endl;
           } else {
-            std::cout << "" << name << " " << key << " function " << i << " is non-negligible" << std::endl;
+            //std::cout << "" << name << " " << key << " function " << i << " is non-negligible" << std::endl;
           }
           all_negligible &= is_negligible;
         }
@@ -137,7 +137,7 @@ namespace mra{
 
           result_leaf_info = LeafInfo(N, ttg::scope::Allocate);
 
-          std::cout << name << " " << key << " all negligible " << all_negligible << " sparsity: " << sparsity << std::endl;
+          //std::cout << name << " " << key << " all negligible " << all_negligible << " sparsity: " << sparsity << std::endl;
 
           // compute the norm of functions
           auto result_norms = FunctionNorms(name, result);
@@ -185,8 +185,8 @@ namespace mra{
           result_norms.verify(); // extracts the norms and stores them in the node
           const LeafStatus* is_leafs_arr = result_leaf_info.buffer().host_ptr();
           for (std::size_t i = 0; i < N; ++i) {
-            std::cout << name << " " << key << ", function " << i << " leaf_info in " << (int)leaf_info_view[i]
-                      << " leaf_info out " << (int)is_leafs_arr[i] << std::endl;
+            //std::cout << name << " " << key << ", function " << i << " leaf_info in " << (int)leaf_info_view[i]
+            //          << " leaf_info out " << (int)is_leafs_arr[i] << std::endl;
             result.set_leaf(i, is_leafs_arr[i]);
           }
           all_leaf_or_invalid = result.is_all_leaf_or_invalid();
@@ -195,7 +195,7 @@ namespace mra{
            */
         }
 
-        std::cout << name << " " << key << " result " << result << ", sparsity " << sparsity << std::endl;
+        //std::cout << name << " " << key << " result " << result << ", sparsity " << sparsity << std::endl;
 
         /**
          * Handle forced level if provided by user.

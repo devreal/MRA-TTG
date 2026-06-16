@@ -136,7 +136,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   auto extract_compress = make_extract(compress_result, cmap, "extract_compress");
   auto reconstruct      = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct");
   auto extract_reconstruct = make_extract(reconstruct_result, rmap, "extract_reconstruct");
-  auto compress_r       = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_r_result, "compress_reconstruct");
+  auto compress_r       = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_r_result, "compress_nonstandard");
   auto extract_ns       = make_extract(compress_r_result, nsmap, "extract_ns");
   auto convolve         = make_convolution(gaussians, K, compress_r_result, convolution_result, op, precision, "convolution");
   auto extract_conv     = make_extract(convolution_result, convmap, "extract_conv");
@@ -146,13 +146,12 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   assert(connected);
 
   all_tts.push_back(start.get());
-  all_tts.push_back(std::get<0>(project).get());
+  all_tts.push_back(compress.get());
   all_tts.push_back(extract_project.get());
-  all_tts.push_back(std::get<1>(compress).get());
   all_tts.push_back(extract_compress.get());
   all_tts.push_back(reconstruct.get());
   all_tts.push_back(extract_reconstruct.get());
-  all_tts.push_back(std::get<1>(compress_r).get());
+  all_tts.push_back(compress_r.get());
   all_tts.push_back(extract_ns.get());
   all_tts.push_back(convolve.get());
   all_tts.push_back(extract_conv.get());

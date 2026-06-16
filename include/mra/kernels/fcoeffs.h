@@ -131,7 +131,7 @@ namespace mra {
         if ((key.level() < initial_level(f))) {
           // std::cout << "project: key " << key << " below intial level " << initial_level(f) << std::endl;
           if (is_team_lead()) {
-            std::cout << "FCOEFFS: key " << key << " function " << fnid << " above initial level, marking as Inner" << std::endl;
+            //std::cout << "FCOEFFS: key " << key << " function " << fnid << " above initial level, marking as Inner" << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Inner;
             coeffs_view.set_zero(fnid);
           }
@@ -140,7 +140,7 @@ namespace mra {
         if (is_negligible<Fn,T,NDIM>(f, D.template bounding_box<T>(key), mra::truncate_tol(key,thresh))) {
           /* set leaf status to Inner */
           if (is_team_lead()) {
-            std::cout << "FCOEFFS: key " << key << " negligible with tol " << mra::truncate_tol(key,thresh) << std::endl;
+            //std::cout << "FCOEFFS: key " << key << " negligible with tol " << mra::truncate_tol(key,thresh) << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Invalid;
             /* zero coeffs */
             coeffs_view.set_zero(fnid);
@@ -161,10 +161,10 @@ namespace mra {
                             phibar_view, hgT_view, coeffs, thresh);
         if (is_team_lead()) {
           if (is_leaf_val) {
-            std::cout << "FCOEFFS: key " << key << " function " << fnid << " is a leaf, zeroing coeffs" << std::endl;
+            //std::cout << "FCOEFFS: key " << key << " function " << fnid << " is a leaf, zeroing coeffs" << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Leaf;
           } else {
-            std::cout << "FCOEFFS: key " << key << " function " << fnid << " is not a leaf, marking as Inner" << std::endl;
+            //std::cout << "FCOEFFS: key " << key << " function " << fnid << " is not a leaf, marking as Inner" << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Inner;
             coeffs_view.set_zero(fnid);
           }

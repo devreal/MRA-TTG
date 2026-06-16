@@ -164,7 +164,7 @@ namespace mra {
         if (key.level() == 0) {
           // root has no neighbors and no parent, so forward the contributions to the down task
           ttg::send<0>(key, std::move(contributions));
-          std::cout << "UP " << key << " is root with " << contributions.size() << " contributions" << std::endl;
+          //std::cout << "UP " << key << " is root with " << contributions.size() << " contributions" << std::endl;
 
         } else {
 
@@ -289,7 +289,7 @@ namespace mra {
             send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
             child_empty[child.childindex()] = false;
             if (node.invalid() || node.is_all_child_leaf(child)) {
-              std::cout << "DOWN " << key << " child " << child << " is empty but receiving contributions" << std::endl;
+              //std::cout << "DOWN " << key << " child " << child << " is empty but receiving contributions" << std::endl;
               // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
               //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
               send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
@@ -297,7 +297,7 @@ namespace mra {
             }
           } else if (!node.is_all_child_leaf(child)) {
             // we have no contributions but an existing child, send down an empty contribution list to the child
-            std::cout << "DOWN " << key << " sending empty contributions to dest " << child << std::endl;
+            //std::cout << "DOWN " << key << " sending empty contributions to dest " << child << std::endl;
             send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
             child_empty[child.childindex()] = false;
           }
@@ -305,11 +305,11 @@ namespace mra {
 
         if (node.invalid()) {
           // the accumulate task won't receive a node from shell0, so we need to send down an empty node
-          std::cout << "DOWN " << key << " node is invalid, sending empty node to shellN" << std::endl;
+          //std::cout << "DOWN " << key << " node is invalid, sending empty node to shellN" << std::endl;
           send_out(key, node, std::integral_constant<std::size_t, 3>{});
         }
 
-        std::cout << "DOWN " << key << " sending child leaf info " << child_empty << " to adjust leaf task" << std::endl;
+        //std::cout << "DOWN " << key << " sending child leaf info " << child_empty << " to adjust leaf task" << std::endl;
         send_out(key, std::move(child_empty), std::integral_constant<std::size_t, 4>{});
 
         contributions.erase(backiter, contributions.end());
@@ -599,7 +599,7 @@ namespace mra {
           }
         }
         if (empty) {
-          std::cout << "SHELL0 " << key << " result is empty after applying shell 0 contribution, sending empty node" << std::endl;
+          //std::cout << "SHELL0 " << key << " result is empty after applying shell 0 contribution, sending empty node" << std::endl;
           out.make_empty();
         }
       }
@@ -703,8 +703,8 @@ namespace mra {
 
       size_type N = fns->num_functions(key);
 
-      std::cout << "ACCUMULATE " << key << " in_node " << in_node << " applying contribution " << contribution
-                << " with " << contribution_keys.size() << " contributions left" << std::endl;
+      //std::cout << "ACCUMULATE " << key << " in_node " << in_node << " applying contribution " << contribution
+      //          << " with " << contribution_keys.size() << " contributions left" << std::endl;
 
       assert(!contribution_keys.empty());
       assert(contribution_keys.back() == keypair);
@@ -784,7 +784,7 @@ namespace mra {
         bool empty = true;
         auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
         for (size_type i = 0; i < N; ++i) {
-          std::cout << "ACCUMULATE " << key << " result norm for function " << i << ": " << resnorms_host_view(i) << std::endl;
+          //std::cout << "ACCUMULATE " << key << " result norm for function " << i << ": " << resnorms_host_view(i) << std::endl;
           if (resnorms_host_view(i) != 0.0) {
             assert(out.is_nonzero(i) && "if the norm is non-zero we should have non-zero coefficients");
             empty = false;
@@ -804,7 +804,7 @@ namespace mra {
 
         // if this was the last contribution to apply, send the result to the output
         ttg::trace(name, key, ": last contribution, node empty: ", empty);
-        std::cout << "ACCUMULATE " << key << " last contribution applied, sending result to output" << out << std::endl;
+        //std::cout << "ACCUMULATE " << key << " last contribution applied, sending result to output" << out << std::endl;
         send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 2>{});
       } else {
         // send the result to the next contribution task or output
@@ -857,9 +857,9 @@ namespace mra {
                                     = {&child0, &child1, &child2, &child3, &child4, &child5, &child6, &child7};
 
 
-        for (auto child : mra::children(key)) {
-          std::cout << "ADJUST LEAF INFO " << key << " child " << child << " " << *children[child.childindex()] << std::endl;
-        }
+        //for (auto child : mra::children(key)) {
+        //  std::cout << "ADJUST LEAF INFO " << key << " child " << child << " " << *children[child.childindex()] << std::endl;
+        //}
 
         /**
          * For each function in each child, check if the children of the child are leafs and the child itself is empty.
@@ -875,7 +875,7 @@ namespace mra {
           }
         }
 
-        std::cout << "ADJUST LEAF INFO " << key << " after adjustment node " << node << std::endl;
+        //std::cout << "ADJUST LEAF INFO " << key << " after adjustment node " << node << std::endl;
 
         if (key.level() > 0) {
           if (!(node.is_all_child_leaf() && node.is_all_zero())) {

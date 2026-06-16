@@ -28,7 +28,7 @@ namespace mra{
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out,
-    const char* name = "reconstruct",
+    const std::string& name = "reconstruct",
     ProcMap procmap = {},
     DeviceMap devicemap = {})
   {
@@ -51,7 +51,7 @@ namespace mra{
       }
     };
 
-    auto p = ttg::make_tt(std::move(primer), ttg::edges(in), edges(P), std::string(name) + "-primer");
+    auto p = ttg::make_tt(std::move(primer), ttg::edges(in), edges(P), "primer");
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) p->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) p->set_devicemap(devicemap);
@@ -65,7 +65,7 @@ namespace mra{
       const auto& hg = functiondata.get_hg();
       mra::KeyChildren<NDIM> children(key);
 
-      std::cout << name << " " << key << " node " << node << " from_parent " << from_parent << std::endl;
+      //std::cout << name << " " << key << " node " << node << " from_parent " << from_parent << std::endl;
 
       //std::cout << name << " " << key << " node norm " << normf(node.coeffs().current_view()) << " from_parent norm " << normf(from_parent.coeffs().current_view())  << std::endl;
 #ifndef MRA_ENABLE_HOST
@@ -228,7 +228,7 @@ namespace mra{
 #endif // MRA_CHECK_NORMS
 
       // send result to the output
-      std::cout << name << " " << key << " result " << result << std::endl;
+      //std::cout << name << " " << key << " result " << result << std::endl;
       do_send.template operator()<1>(key, std::move(result));
 
       /**
@@ -239,7 +239,7 @@ namespace mra{
         const mra::Key<NDIM> child= *it;
         mra::FunctionsReconstructedNode<T,NDIM>& r = r_arr[it.index()];
         r.key() = child;
-        std::cout << name << " " << key << " child " << r << std::endl;
+        //std::cout << name << " " << key << " child " << r << std::endl;
         if (r.is_all_leaf_or_invalid()) {
           // if the child is all leaf or invalid then we can send it directly to the output
           do_send.template operator()<1>(child, std::move(r));
@@ -247,17 +247,6 @@ namespace mra{
           // recurse down
           do_send.template operator()<0>(child, std::move(r));
         }
-#if 0
-        if (!r.is_all_leaf_or_invalid()) {
-          ttg::broadcast<0, 1>(std::make_tuple(child, child), std::move(r));
-        } else if (r.is_any_leaf()) {
-          // send to result tree as this node contains leafs
-          do_send.template operator()<1>(child, std::move(r));
-        } else if (!r.is_all_leaf_or_invalid()) {
-          // recur down
-          do_send.template operator()<0>(child, std::move(r));
-        }
-#endif // 0
       }
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
@@ -280,7 +269,7 @@ namespace mra{
     ops[0] = std::move(s);
     ops[1] = std::move(p);
 
-    return ttg::make_ttg(std::move(ops), std::move(ins), std::move(outs), std::string(name) + " TTG");
+    return ttg::make_ttg(std::move(ops), std::move(ins), std::move(outs), std::string(name));
   }
 } // namespace mra
 
