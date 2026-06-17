@@ -5,15 +5,16 @@
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
 
+#include "conv_factory.h"
+
 using namespace mra;
 
 using coord_t = madness::Vector<double, 3>;
 using real_factory_t = madness::FunctionFactory<double, 3>;
 using real_function_t = madness::Function<double, 3>;
-using real_convolution_t = madness::SeparatedConvolution<double, 3>;
 
 template<typename T, mra::Dimension NDIM>
-void test_convolution(int nrep, int N, int K,
+void test_convolution(int nrep, int N, int K, int Nop,
                       int num_batches, int seed,
                       int max_level, int initial_level,
                       T precision,
@@ -55,13 +56,9 @@ void test_convolution(int nrep, int N, int K,
     if (seed == 0) std::cout << N << " Gaussians with expnt " << expnt << std::endl;
   }
 
-  double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
-  madness::World world(SafeMPI::COMM_WORLD);
-  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
-  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, madness::LatticeRange()));
-  real_convolution_t mad_conv(world, ops, K);
-
-  mra::GaussianConvolutionOperator<T, NDIM> op(mad_conv);
+  madness::World mad_world(SafeMPI::COMM_WORLD);
+  auto mad_conv = mra::make_mad_convolution(expnt, K, Nop, mad_world);
+  auto op = mra::GaussianConvolutionOperator<T, NDIM>{mad_conv};
 
   std::vector<std::unique_ptr<ttg::TTBase>> tts;
 
@@ -142,7 +139,8 @@ int main(int argc, char **argv) {
   /* options */
   auto opt = mra::OptionParser(argc, argv);
   int N = opt.parse("-N", 1);
-  int K = opt.parse("-K", 10);
+  int Nop = opt.parse("-O", 1);
+  int K = opt.parse("-K", 8);
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int log_precision = opt.parse("-p", 8); // default: 1e-4
   int max_level = opt.parse("-l", -1);
@@ -154,11 +152,11 @@ int main(int argc, char **argv) {
   int domain = opt.parse("-d", 6);
   bool print_dot = opt.exists("-dot");
   int nrep = opt.parse("-n", 3);
-  double expnt_arg = opt.parse("-e", 1000.0);
+  double expnt_arg = opt.parse("-e", 100.0);
 
   mra::initialize(argc, argv, cores);
 
-  test_convolution<double, 3>(nrep, N, K, num_batches, seed,
+  test_convolution<double, 3>(nrep, N, K, Nop, num_batches, seed,
                               max_level, initial_level, std::pow(10, -log_precision),
                               root_radius, expnt_arg, domain, print_dot);
 

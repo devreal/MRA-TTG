@@ -76,7 +76,7 @@ namespace mra {
     /**
      * Construct a convolution operator
      */
-    GaussianConvolutionOperator(madness::SeparatedConvolution<T, NDIM>& mad_conv_sep)
+    GaussianConvolutionOperator(const madness::SeparatedConvolution<T, NDIM>& mad_conv_sep)
     : mad_conv_sep(mad_conv_sep)
     { }
 
@@ -151,7 +151,7 @@ namespace mra {
     // convolution1d madness object
     //madness::GaussianConvolution1D<double> conv1d;
     // madness separate convolution object, provided by application
-    madness::SeparatedConvolution<T, NDIM>& mad_conv_sep;
+    const madness::SeparatedConvolution<T, NDIM>& mad_conv_sep;
     // our own cache of full operator data for each [Level, Translation] (encoded as Key)
     // includes all terms and dimensions
     mutable std::map<std::pair<Level, Translation>, std::shared_ptr<const ConvolutionData1D<T>>> _opcache;
