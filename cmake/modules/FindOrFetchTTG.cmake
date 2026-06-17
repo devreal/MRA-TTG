@@ -11,7 +11,7 @@ FetchContent_Declare(
       ttg
       GIT_REPOSITORY      https://github.com/devreal/ttg.git
 	  #GIT_TAG             ttg-for-mra
-      GIT_TAG             master
+      GIT_TAG             8de74cef3ea24f10f9f3fddc8ca782ebd3b1e5bf
   )
 
 #FetchContent_Declare(
