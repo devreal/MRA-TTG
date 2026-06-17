@@ -157,9 +157,14 @@ namespace mra{
       norm_tt->set_devicemap(devicemap);
       dispatch_tt->set_devicemap(devicemap);
     }
-    /* compile everything into tasks */
-    return std::make_tuple(std::move(norm_tt),
-                          std::move(dispatch_tt));
+
+    auto ins = std::make_tuple(dispatch_tt->template in<0>());
+    auto outs = std::make_tuple(norm_tt->template out<8>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(2);
+    ops[0] = std::move(dispatch_tt);
+    ops[1] = std::move(norm_tt);
+
+    return make_ttg(std::move(ops), ins, outs, name);
   }
 } // namespace mra
 

@@ -72,12 +72,10 @@ void test_pcr(std::size_t N, std::size_t K,
   all_tts.push_back(start.get());
   auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
 
-  all_tts.push_back(std::get<0>(project).get());
-  all_tts.push_back(std::get<1>(project).get());
+  all_tts.push_back(project.get());
   // C(P)
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
-  all_tts.push_back(std::get<0>(compress).get());
-  all_tts.push_back(std::get<1>(compress).get());
+  all_tts.push_back(compress.get());
 
   auto print_sparsity_tt = ttg::make_tt([&](const mra::Key<NDIM>& key, const auto& node){
     auto& sparsity = node.sparsity();
@@ -91,16 +89,14 @@ void test_pcr(std::size_t N, std::size_t K,
   all_tts.push_back(reconstruct.get());
   // C(R(C(P)))
   auto compress_r = make_compress(gaussians, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
-  all_tts.push_back(std::get<0>(compress_r).get());
-  all_tts.push_back(std::get<1>(compress_r).get());
+  all_tts.push_back(compress_r.get());
 
   // C(R(C(P))) - C(P)
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_reconstruct_result, compress_result, gaxpy_result, "gaxpy", pmap, dmap);
   all_tts.push_back(gaxpy.get());
   // | C(R(C(P))) - C(P) |
   auto norm  = make_norm(gaussians, K, gaxpy_result, norm_result, "norm", pmap, dmap);
-  all_tts.push_back(std::get<0>(norm).get());
-  all_tts.push_back(std::get<1>(norm).get());
+  all_tts.push_back(norm.get());
   // final check
   auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& norms){
     auto norms_view = norms.current_view();

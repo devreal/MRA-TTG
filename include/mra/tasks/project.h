@@ -239,7 +239,14 @@ namespace mra{
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       tt->set_devicemap(devicemap);
     }
-    return std::make_tuple(std::move(tt), std::move(dispatch_tt));
+
+    auto ins = std::make_tuple(dispatch_tt->template in<0>());
+    auto outs = std::make_tuple(tt->template out<1>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(2);
+    ops[0] = std::move(dispatch_tt);
+    ops[1] = std::move(tt);
+
+    return make_ttg(std::move(ops), ins, outs, name);
   }
 } // namespace mra
 
