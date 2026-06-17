@@ -9,7 +9,7 @@ namespace mra {
   namespace detail {
 
     template<typename T>
-    std::size_t align_to_type(std::size_t size) {
+    SCOPE std::size_t align_to_type(std::size_t size) {
       std::size_t mask = alignof(T) - 1;
       return size + (-size & mask);
     }
@@ -18,20 +18,20 @@ namespace mra {
 
     enum class SparsityState : std::uint8_t { NONZERO = 1, ALLOCATED = 2, NONZERO_ALLOCATED = 3, SPARSE = 0 };
 
-    inline bool operator&(SparsityState a, SparsityState b) {
+    SCOPE bool operator&(SparsityState a, SparsityState b) {
       return (static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b)) != 0;
     }
 
-    inline bool operator|(SparsityState a, SparsityState b) {
+    SCOPE bool operator|(SparsityState a, SparsityState b) {
       return (static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b)) != 0;
     }
 
-    inline SparsityState& operator|=(SparsityState& a, SparsityState b) {
+    SCOPE SparsityState& operator|=(SparsityState& a, SparsityState b) {
       a = static_cast<SparsityState>(static_cast<std::uint8_t>(a) | static_cast<std::uint8_t>(b));
       return a;
     }
 
-    inline SparsityState& operator&=(SparsityState& a, SparsityState b) {
+    SCOPE SparsityState& operator&=(SparsityState& a, SparsityState b) {
       a = static_cast<SparsityState>(static_cast<std::uint8_t>(a) & static_cast<std::uint8_t>(b));
       return a;
     }
@@ -39,7 +39,7 @@ namespace mra {
     /**
      * TODO: is that actually a good idea?
      */
-    inline SparsityState operator~(SparsityState a) {
+    SCOPE SparsityState operator~(SparsityState a) {
       return static_cast<SparsityState>(~static_cast<std::uint8_t>(a));
     }
 
