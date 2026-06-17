@@ -898,11 +898,8 @@ namespace mra {
 
 
   private:
-    const size_type dim0() {
-      return static_cast<Derived*>(this)->dim(0);
-    }
 
-    const size_type dim0() const {
+    size_type dim0() const {
       return static_cast<const Derived*>(this)->dim(0);
     }
 
