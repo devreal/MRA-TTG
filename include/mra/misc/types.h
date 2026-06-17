@@ -55,7 +55,7 @@ namespace mra {
     class Coordinate {
         std::array<T,NDIM> r = {0.0};
     public:
-        SCOPE Coordinate() = default;
+        Coordinate() = default;
         template <typename arg0T, typename...argsT>
         SCOPE Coordinate(arg0T arg0, argsT...args) : r{arg0,args...} {
             static_assert(sizeof...(argsT)==NDIM-1, "wrong number of initializers for coordinate");
