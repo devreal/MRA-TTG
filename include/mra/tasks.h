@@ -15,7 +15,6 @@
 #include "mra/tasks/derivative.h"
 #include "mra/tasks/extract.h"
 #include "mra/tasks/convolution.h"
-#include "mra/tasks/vmra.h"
 
 
 #endif // HAVE_TASKS_H

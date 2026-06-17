@@ -20,7 +20,7 @@
  * Tasks to load functions from MADNESS vmra into MRA FunctionNodes and feed them into TTG.
  */
 
-namespace mra {
+namespace mra::vmra {
 
 /**
  * Load a vector of MADNESS functions, aggregating nodes with the same key into a single
@@ -212,6 +212,6 @@ auto make_vmra_store(std::vector<madness::Function<T, NDIM>>& vmra,
   return store_tt;
 }
 
-} // namespace mra
+} // namespace mra::vmra
 
 #endif // MRA_TASKS_VMRA_H

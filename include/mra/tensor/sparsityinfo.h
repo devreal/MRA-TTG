@@ -1,3 +1,6 @@
+#ifndef MRA_TENSOR_SPARSITYINFO_H
+#define MRA_TENSOR_SPARSITYINFO_H
+
 #include "mra/tensor/sparsity.h"
 
 namespace mra {
@@ -104,3 +107,5 @@ namespace mra {
   }
 
 } // namespace mra
+
+#endif // MRA_TENSOR_SPARSITYINFO_H
