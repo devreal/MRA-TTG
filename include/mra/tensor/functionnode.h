@@ -122,7 +122,7 @@ namespace mra {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
 
-#ifndef MRA_ENABLE_HOST
+#ifdef MRA_ENABLE_HOST
           /**
            * Currently needed to ensure the buffer is allocated on the host.
            */
