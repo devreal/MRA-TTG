@@ -19,7 +19,12 @@
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
 
-namespace mra{
+namespace mra {
+
+  /**
+   * Multiply two sets of functions represented as FunctionsReconstructedNode objects.
+   * TODO: need to fix leaf information propagation!
+   */
   template<typename T, mra::Dimension NDIM, typename FunctionSetT,
            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_multiply(
@@ -57,7 +62,7 @@ namespace mra{
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
         auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
-        out.set_all_leaf(false);
+        out.set_all_leaf(LeafStatus::Leaf);
         send_out(std::move(out));
         if(!t1.empty()){
           std::vector<mra::Key<NDIM>> bcast_keys;
