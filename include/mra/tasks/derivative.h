@@ -233,11 +233,11 @@ namespace mra{
            */
           if ((!left.empty() || key.is_left_boundary(axis)) && (!right.empty() || key.is_right_boundary(axis))){
 
-            SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
+            SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
             sparsity.nonzero_if_any(left, center, right);
 
             mra::FunctionsReconstructedNode<T, NDIM> result(key, sparsity, K, ttg::scope::Allocate);
-            result.set_all_leaf(true);
+            result.set_all_leaf(LeafStatus::Leaf);
             auto tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*N, TempScope);
             const DenseTensor<T, 2+1>& operators = functiondata.get_operators();
             const DenseTensor<T, 2>& phibar= functiondata.get_phibar();
