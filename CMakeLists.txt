@@ -39,7 +39,7 @@ set(HAVE_HIP ${CMAKE_HIP_COMPILER} CACHE BOOL "True if we can compile .hip files
 # don't bother with Boost
 set(TTG_FETCH_BOOST OFF)
 set(TTG_PARSEC_USE_BOOST_SERIALIZATION OFF)
-set(TTG_EXAMPLES ON) # to pull in TA
+set(TTG_EXAMPLES OFF)
 
 # whoever thought enabling OpenMP by default should be tarred and feathered!
 set(use_openmp OFF)
@@ -57,6 +57,14 @@ endif (MRA_ENABLE_ASAN)
 set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
+
+##
+# BTAS is not needed for CUDA/HIP builds, since we don't BLAS on the host in that case.
+# TTG provides the mechanism to find blaspp.
+##
+if (NOT (HAVE_HIP OR HAVE_CUDA))
+  include(FindOrFetchBLASpp)
+endif (NOT (HAVE_HIP OR HAVE_CUDA))
 
 # look for Kokkos
 find_package(Kokkos COMPONENTS separable_compilation)
