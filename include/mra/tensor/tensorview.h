@@ -748,11 +748,11 @@ namespace mra {
      * be used directly except for low-level operations as the storage may contain
      * sparsity information. Use the sparsity base class data() methods instead.
      */
-    value_type* storage() {
+    SCOPE value_type* storage() {
       return m_ptr;
     }
 
-    const value_type* storage() const {
+    SCOPE const value_type* storage() const {
       return m_ptr;
     }
 
