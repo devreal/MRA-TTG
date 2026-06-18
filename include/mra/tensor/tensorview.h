@@ -111,11 +111,11 @@ namespace mra {
       /* distribute the last three dimensions across the z, y, x dimension of the block */
       if constexpr (I == NDIM-3) {
         for (size_type i = threadIdx.z; i < t.dim(I); i += blockDim.z) {
-          foreach_idxs_impl<NDIM, I+1>(t, std::forward<Fn>(fn), args..., i);
+          foreach_idxs_impl<I+1>(t, std::forward<Fn>(fn), args..., i);
         }
       } else if constexpr (I == NDIM-2) {
         for (size_type i = threadIdx.y; i < t.dim(I); i += blockDim.y) {
-          foreach_idxs_impl<NDIM, I+1>(t, std::forward<Fn>(fn), args..., i);
+          foreach_idxs_impl<I+1>(t, std::forward<Fn>(fn), args..., i);
         }
       } else if constexpr (I == NDIM-1) {
         for (size_type i = threadIdx.x; i < t.dim(I); i += blockDim.x) {
@@ -124,7 +124,7 @@ namespace mra {
       } else {
         /* general index (NDIM > 3)*/
         for (size_type i = 0; i < t.dim(I); ++i) {
-          foreach_idxs_impl<NDIM, I+1>(t, std::forward<Fn>(fn), args..., i);
+          foreach_idxs_impl<I+1>(t, std::forward<Fn>(fn), args..., i);
         }
       }
 #else  // HAVE_DEVICE_ARCH
