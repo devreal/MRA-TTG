@@ -155,7 +155,7 @@ using Dim3 = dim3;
 #endif
 
 
-#if defined(MRA_ENABLE_HOST)
+#if !defined(HAVE_DEVICE_ARCH)
 namespace mra {
   /* define our own thread layout (single thread) */
   static constexpr const mra::detail::dim3 threadIdx = {0, 0, 0};
@@ -163,7 +163,7 @@ namespace mra {
   static constexpr const mra::detail::dim3 gridDim   = {1, 1, 1};
   inline thread_local    mra::detail::dim3 blockIdx  = {0, 0, 0};
 } // namespace mra
-#endif // MRA_ENABLE_HOST
+#endif // HAVE_DEVICE_ARCH
 
 /**
  * Function returning the thread ID in a flat ID space.
