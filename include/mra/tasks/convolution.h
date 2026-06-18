@@ -853,6 +853,7 @@ namespace mra {
 
         size_type N = fns->num_functions(key);
         constexpr size_type num_children = mra::Key<NDIM>::num_children();
+        constexpr std::size_t result_terminal = mra::Key<NDIM>::num_children();
         std::array<const mra::FunctionsCompressedNode<T, NDIM>*, num_children> children
                                     = {&child0, &child1, &child2, &child3, &child4, &child5, &child6, &child7};
 
@@ -886,18 +887,18 @@ namespace mra {
             [&]<std::size_t... I>(std::index_sequence<I...>){
               auto bcast = [&]<std::size_t J>(){
 #ifndef MRA_ENABLE_HOST
-                sends.push_back(ttg::device::broadcast<J, num_children>(std::make_tuple(key.parent(), key),
-                                                                        std::move(node)));
+                sends.push_back(ttg::device::broadcast<J, result_terminal>(std::make_tuple(key.parent(), key),
+                                                                           std::move(node)));
 #else
-                ttg::broadcast<J, num_children>(std::make_tuple(key.parent(), key),
-                                                std::move(node));
+                ttg::broadcast<J, result_terminal>(std::make_tuple(key.parent(), key),
+                                                   std::move(node));
 #endif
                 return true;
               };
               ((
                 (I == key.childindex() ? bcast.template operator()<I>() : false)
               ), ...);
-            }(std::make_index_sequence<num_children>{});
+            }(std::make_index_sequence<result_terminal>{});
           } else {
 
             /**
@@ -917,7 +918,7 @@ namespace mra {
           }
         } else {
           // if we are the root we have no parent to send to, so we send the result directly to the output
-          send_out(key, std::move(node), std::integral_constant<std::size_t, num_children>{});
+          send_out(key, std::move(node), std::integral_constant<std::size_t, result_terminal>{});
         }
 
 #ifndef MRA_ENABLE_HOST
