@@ -179,7 +179,7 @@ namespace mra{
 
           /* wait and get is_leaf back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(result_leaf_info, result_norms.buffer());
+          co_await ttg::device::wait(result_leaf_info.buffer(), result_norms.buffer());
 #endif
 
           result_norms.verify(); // extracts the norms and stores them in the node
