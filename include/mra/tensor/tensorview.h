@@ -293,7 +293,7 @@ namespace mra {
     }
 
   public:
-    SCOPE TensorSlice() = delete; // slice is useless without a view
+    TensorSlice() = delete; // slice is useless without a view
 
     SCOPE TensorSlice(view_type& view, const std::array<Slice,ndim()>& slices)
     : m_ptr(view.data())
@@ -314,8 +314,8 @@ namespace mra {
       }
     }
 
-    SCOPE TensorSlice(TensorSlice&& other) = default;
-    SCOPE TensorSlice(const TensorSlice& other) = default;
+    TensorSlice(TensorSlice&& other) = default;
+    TensorSlice(const TensorSlice& other) = default;
 
     /// Returns the base pointer
     SCOPE value_type* data() {
@@ -525,12 +525,12 @@ namespace mra {
     : TensorView(const_cast<T*>(ptr), dims) // remove const, we store a non-const pointer internally
     { }
 
-    SCOPE TensorView(TensorView&& other) = default;
-    SCOPE TensorView(const TensorView& other) = default;
+    TensorView(TensorView&& other) = default;
+    TensorView(const TensorView& other) = default;
 
-    SCOPE ~TensorView() = default;
+    ~TensorView() = default;
 
-    SCOPE TensorView& operator=(TensorView&& other) = default;
+    TensorView& operator=(TensorView&& other) = default;
 
 #if 0
     /**
