@@ -2,7 +2,8 @@
 # define a base target for the MRA
 add_library(libmra-base-parsec INTERFACE)
 target_include_directories(libmra-base-parsec INTERFACE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(libmra-base-parsec INTERFACE MADworld MADchem MADtensor MADmra ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
+#target_link_libraries(libmra-base-parsec INTERFACE MADworld MADchem MADtensor MADmra ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
+target_link_libraries(libmra-base-parsec INTERFACE MADworld MADtensor MADmra ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
 target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
 
 set(MRA_SOURCES gl.cc init.cc twoscale.cc)
@@ -51,10 +52,6 @@ target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor libmra
 add_executable(mra-mad-conv-host-parsec
                tests/mad_convolution_test.cc autocorr.cc)
 target_link_libraries(mra-mad-conv-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
-
-add_executable(mra-mad-debug-host-parsec
-               tests/mad_conv.cc autocorr.cc)
-target_link_libraries(mra-mad-debug-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
 
 add_executable(mra-cycledimtest tests/cycledim_test.cc)
 target_link_libraries(mra-cycledimtest PUBLIC libmra-host-parsec)
