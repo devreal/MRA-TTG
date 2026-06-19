@@ -48,7 +48,11 @@ namespace mra
                                     const mra::FunctionsReconstructedNode<T, NDIM>& in) -> TASKTYPE {
       if (!in.is_all_leaf_or_invalid()) {
         /* otherwise send to the compress task */
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::send<0>(key, in);
+#else  // MRA_ENABLE_HOST
         ttg::send<0>(key, in);
+#endif // MRA_ENABLE_HOST
       }
     };
 

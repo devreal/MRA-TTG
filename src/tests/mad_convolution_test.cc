@@ -90,7 +90,7 @@ auto compute_conv_madness(size_type N, real_convolution_t& mad_conv) {
 
 template<typename T, mra::Dimension NDIM>
 void test_convolution(int num_batches, std::size_t N, size_type K, T precision, int max_level,
-                     T verification_precision, real_convolution_t& mad_conv, bool print_dot) {
+                     T verification_precision, std::shared_ptr<real_convolution_t> mad_conv, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto functiondata2 = mra::FunctionData<T,NDIM>(2*K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
@@ -175,7 +175,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   ttg::fence();
 
   {
-    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(N, mad_conv);
+    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(N, *mad_conv);
     // std::cout << "Tree State of madfunc: " << madfunc.get_impl()->get_tree_state() << std::endl;
     // auto madkey = madness::Key<NDIM>(0, {0, 0, 0});
     // const auto &madcoeffs = madfunc.get_impl()->get_coeffs();
@@ -199,16 +199,16 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     // fff.compress();
     //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
 
-
-    //madfunc.reconstruct();
+    //madness::World world(SafeMPI::COMM_WORLD);
+    //madness::reconstruct(world, madfunc);
     //compare_mra_madness(madfunc, rmap, "reconstruct_result", verification_precision);
     //madfunc.compress();
     //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
-    madness::make_nonstandard(mad_conv.get_world(), madfunc, true);
+    madness::make_nonstandard(mad_conv->get_world(), madfunc, true);
     compare_mra_madness(madfunc, nsmap, "nonstandard_result", verification_precision);
     compare_mra_madness(madconv, rconvmap, "conv_result", verification_precision);
   }
-  mad_conv.get_world().gop.fence();
+  mad_conv->get_world().gop.fence();
 }
 
 int main(int argc, char **argv) {
@@ -221,7 +221,8 @@ int main(int argc, char **argv) {
   int cores   = opt.parse("-c", -1); // -1: use all cores
   int log_precision = opt.parse("-p", 6); // default: 1e-6
   int max_level = opt.parse("-l", -1);
-  int num_batches = opt.parse("-b", 0); // batch size for the test, default is 0 (select automatically)
+  //int num_batches = opt.parse("-b", 1); // batch size for the test, default is 0 (select automatically)
+  int num_batches = 1; // for now the check only support num_batches=1, which means all functions are in the same batch. We will enable num_batches>1 later, which will require some changes in the test code to handle multiple batches and also changes in the MRA code to support convolution with functions in different batches (e.g., by doing batch-wise convolution and then merging results).
   int num_ops = opt.parse("-o", 1); // number of times to repeat the test for timing purposes
   Length = opt.parse("-d", Length);
   bool norand = opt.exists("-norand");
@@ -259,7 +260,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < num_ops; ++i) {
     ops[i].reset(new madness::GaussianConvolution1D<double>(K, 1/(i+1)*100, 1/(i+1)*100, 0, madness::LatticeRange()));
   }
-  real_convolution_t mad_conv(world, ops, K);
+  auto mad_conv = std::make_shared<real_convolution_t>(world, ops, K);
 
 
   if (ttg::default_execution_context().rank() == 0) {

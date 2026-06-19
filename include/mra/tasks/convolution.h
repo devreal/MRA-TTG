@@ -444,10 +444,14 @@ namespace mra {
            */
           for_each([&](const auto& disp_key, const auto& neighbor_key){
             auto op_data = op.get_op(key.level(), disp_key);
+            auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
             for (int i = 0; i < N; ++i) {
+              // we may have either one operator for all functions or one operator per function
+              auto opnorm = (opnorm_view.dim(0) == 1) ? opnorm_view(0, 0, 0, (int)NormId::Opnorm)
+                                                      : opnorm_view(i, 0, 0, (int)NormId::Opnorm);
               //std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
               //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
-              if (op_data->norm * cnorm_view(i) > tol / fac) {
+              if (opnorm * cnorm_view(i) > tol / fac) {
                 contributions.push_back({key, neighbor_key});
                 break; // if any of the coefficients pass the threshold we add the contribution
               }
@@ -544,7 +548,6 @@ namespace mra {
         //}
 
         DenseTensor<T, 1> resnorms(N, TempScope);
-        T opnorm = op_data->norm;
         T tol = truncate_tol(key, thresh);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
@@ -578,7 +581,7 @@ namespace mra {
 
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, fac, tol, /*in_node_view*/ empty_node_view,
+        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
                                             in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                             at, tmp.current_device_ptr(), ttg::device::current_stream());
 
@@ -729,7 +732,6 @@ namespace mra {
       mra::apply_leaf_info(out, in_node);
 
       DenseTensor<T, 1> resnorms;
-      T opnorm = op_data->norm;
       T tol = truncate_tol(key, thresh);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
       // if (key.level() == 0) at[1] = false; // do not apply S at level 0
@@ -766,7 +768,7 @@ namespace mra {
 
       auto sparseman = make_sparsity_manager(out);
       sparseman.populate_device_sparsity();
-      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, fac, tol, in_node_view,
+      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
                                           contribution_view, out_view, resnorms_view, transr, transs,
                                           opnorms_view, at,
                                           tmp.current_device_ptr(), ttg::device::current_stream());
