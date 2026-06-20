@@ -114,7 +114,7 @@ namespace mra {
       }
 
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
-        if (node.is_zero(fnid) && from_parent.is_zero(fnid)) {
+        if (node_view.is_zero(fnid) && from_parent_view.is_zero(fnid)) {
           /* no work to do */
           continue;
         }
