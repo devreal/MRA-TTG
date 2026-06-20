@@ -199,11 +199,10 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     // fff.compress();
     //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
 
-    //madness::World world(SafeMPI::COMM_WORLD);
-    //madness::reconstruct(world, madfunc);
-    //compare_mra_madness(madfunc, rmap, "reconstruct_result", verification_precision);
-    //madfunc.compress();
-    //compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
+    madness::compress(mad_conv->get_world(), madfunc);
+    compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
+    madness::reconstruct(mad_conv->get_world(), madfunc);
+    compare_mra_madness(madfunc, rmap, "reconstruct_result", verification_precision);
     madness::make_nonstandard(mad_conv->get_world(), madfunc, true);
     compare_mra_madness(madfunc, nsmap, "nonstandard_result", verification_precision);
     compare_mra_madness(madconv, rconvmap, "conv_result", verification_precision);

@@ -36,7 +36,7 @@ namespace mra{
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> P("Primer"); // primer for root
 
     auto primer = [&, fns, name](const mra::Key<NDIM>& key,
-                                    const mra::FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
+                                 const mra::FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
       //std::cout << name << " primer " << key << std::endl;
       if (key.level() == 0) {
         /* root node: need to send an empty node as the parent to do_reconstruct */
@@ -79,13 +79,6 @@ namespace mra{
         ttg::send<I>(child, std::forward<S>(node));
       };
 #endif // MRA_ENABLE_HOST
-
-      /* if the parent is a leaf then we mark the child as zero */
-      //for (std::size_t i = 0; i < N; ++i) {
-      //  if (from_parent.is_leaf(i)) {
-      //    sparsity.set_zero(i);
-      //  }
-      //}
 
       // array of child nodes
       std::array<mra::FunctionsReconstructedNode<T,NDIM>, mra::Key<NDIM>::num_children()> r_arr;
