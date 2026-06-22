@@ -162,6 +162,59 @@ namespace mra {
     }
   }
 
+
+  template<typename T, std::size_t NDIM>
+  inline void compare_mra_madness(const std::vector<madness::Function<T, NDIM>>& madfunc1,
+                                  const std::vector<madness::Function<T, NDIM>>& madfunc2,
+                                  const std::string name, T precision = 1e-15)
+  {
+    if (madfunc1.size() != madfunc2.size()) {
+      std::cout << name << ": number of functions in MADNESS vector 1 (" << madfunc1.size() << ") does not match number of functions in MADNESS vector 2 (" << madfunc2.size() << ")" << std::endl;
+      throw std::runtime_error(name + ": mismatch in number of functions between MADNESS vectors");
+    }
+    bool check = true;
+    for (std::size_t i = 0; i < madfunc1.size(); ++i) {
+      // TODO: check that both trees are in the same state
+      if (madfunc1[i].get_impl()->get_tree_state() != madfunc2[i].get_impl()->get_tree_state()) {
+        std::cout << name << ": MADNESS function " << i << " in vector 1 is in state "
+                  << detail::madfunc_state(madfunc1[i]) << " but in vector 2 is in state "
+                  << detail::madfunc_state(madfunc2[i]) << std::endl;
+        check = false;
+        continue;
+      }
+      for (auto& node1 : madfunc1[i].get_impl()->get_coeffs()) {
+        auto node2 = madfunc2[i].get_impl()->get_coeffs().find(node1.first);
+        if (node2.get() == madfunc2[i].get_impl()->get_coeffs().end()) {
+          std::cout << name << ": node " << node1.first << " in MADNESS vector 1 function " << i << " (norm " << node1.second.coeff().normf() << ") not found in MADNESS vector 2" << std::endl;
+          check = false;
+          continue;
+        }
+
+        if (node2.get()->second.has_children() != node1.second.has_children()) {
+          std::cout << name << ": node " << node1.first << " in MADNESS vector 1 function " << i
+                    << " has children " << node1.second.has_children() << " but in vector 2 has children "
+                    << node2.get()->second.has_children() << std::endl;
+          check = false;
+          /* non-fatal error */
+        }
+
+        auto norm1 = node1.second.coeff().normf();
+        auto norm2 = node2.get()->second.coeff().normf();
+        if (std::abs(norm1 - norm2) > precision) {
+          std::cout << name << ": node " << node1.first << " in MADNESS function " << i
+                    << " has norm " << norm1 << " in vector 1 but norm " << norm2 << " in vector 2" << std::endl;
+          check = false;
+          continue;
+        }
+      }
+    }
+    if (!check) {
+      throw std::runtime_error(name + ": mismatch in norms between MADNESS vectors");
+    } else {
+      std::cout << name << ": all nodes match between MADNESS vectors" << std::endl;
+    }
+  }
+
 } // namespace mra
 
 #endif // HAVE_COMPARE_MAD_MRA_H

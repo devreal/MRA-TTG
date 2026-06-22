@@ -38,19 +38,33 @@ namespace mra::vmra {
  * each rank enumerates its own local MADNESS nodes.
  */
 template<typename T, Dimension NDIM, typename NodeT>
-auto make_vmra_load(const std::vector<madness::Function<T, NDIM>>& vmra,
+auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
                     ttg::Edge<mra::Key<NDIM>, void>& control,
                     ttg::Edge<mra::Key<NDIM>, NodeT>& out,
                     const std::string& name = "vmra_load") {
 
   if (vmra.empty()) throw std::invalid_argument("make_vmra_load: empty function vector");
 
+  /**
+   * Sanity checks: support compressed, nonstandard, and reconstructed MADNESS trees.
+   */
+  if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
+    if (!((vmra.front().get_impl()->get_tree_state() == madness::TreeState::compressed) ||
+          (vmra.front().get_impl()->get_tree_state() == madness::TreeState::nonstandard))) {
+      throw std::invalid_argument("make_vmra_load: NodeT is FunctionsCompressedNode but vmra is not compressed");
+    }
+  } else {
+    if (vmra.front().get_impl()->get_tree_state() != madness::TreeState::reconstructed) {
+      throw std::invalid_argument("make_vmra_load: NodeT is FunctionsReconstructedNode but vmra is not reconstructed");
+    }
+  }
+
   ttg::Edge<mra::Key<NDIM>, void> dispatch_to_load("dispatch_to_load");
 
   /* All functions are assumed to share the same process map; use the first impl as keymap. */
   auto impl = vmra.front().get_impl();
   auto keymap = [impl](const mra::Key<NDIM>& key) {
-    return impl->owner(key.to_madness_key());
+    return impl->get_coeffs().owner(key.to_madness_key());
   };
 
   /* Dispatch task: iterate all locally owned MADNESS nodes across all functions and
@@ -94,10 +108,25 @@ auto make_vmra_load(const std::vector<madness::Function<T, NDIM>>& vmra,
       NodeT result(key, sparsity, K);
 
       for (size_type fnid = 0; fnid < N; ++fnid) {
-        if (sparsity.is_zero(fnid)) continue;
-
         const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
         auto accessor = coeffs.find(mad_key);
+
+        if (sparsity.is_zero(fnid)) {
+          /**
+           * Handle leaf information for reconstructed nodes.
+           */
+          if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
+            if (accessor.get() == coeffs.end()) {
+              result.set_leaf(fnid, LeafStatus::Invalid);
+            } else if (accessor.get()->second.is_leaf()) {
+              result.set_leaf(fnid, LeafStatus::Leaf);
+            } else {
+              result.set_leaf(fnid, LeafStatus::Inner);
+            }
+          }
+          continue;
+        }
+
         assert(accessor.get() != coeffs.end());
         const auto& mad_node = accessor.get()->second;
         const auto& mad_coeff = mad_node.coeff();
@@ -156,7 +185,7 @@ auto make_vmra_load(const std::vector<madness::Function<T, NDIM>>& vmra,
  * TODO: do we store the empty leaf nodes in MADNESS compressed form?
  */
 template<typename T, Dimension NDIM, typename NodeT>
-auto make_vmra_store(std::vector<madness::Function<T, NDIM>>& vmra,
+auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
                      ttg::Edge<mra::Key<NDIM>, NodeT>& in,
                      const std::string& name = "vmra_store") {
 
@@ -164,7 +193,7 @@ auto make_vmra_store(std::vector<madness::Function<T, NDIM>>& vmra,
 
   auto impl = vmra.front().get_impl();
   auto keymap = [impl](const mra::Key<NDIM>& key) {
-    return impl->owner(key.to_madness_key());
+    return impl->get_coeffs().owner(key.to_madness_key());
   };
 
   auto store_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
@@ -182,14 +211,18 @@ auto make_vmra_store(std::vector<madness::Function<T, NDIM>>& vmra,
       using nodeT  = madness::FunctionNode<T, NDIM>;
 
       for (size_type fnid = 0; fnid < N; ++fnid) {
-        if (node.is_zero(fnid)) continue;
+
+        // TODO: not if we can skip empty nodes
+        //if (node.is_zero(fnid)) continue;
 
         auto fn_impl = vmra[fnid].get_impl();
 
         /* Copy MRA coefficients (contiguous row-major) into a MADNESS Tensor. */
         madness::Tensor<T> mad_tensor(dims);
-        auto mra_subview = node.coeffs_view(fnid);
-        std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
+        if (!node.is_zero(fnid)) {
+          auto mra_subview = node.coeffs_view(fnid);
+          std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
+        }
 
         bool has_children;
         if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
