@@ -27,7 +27,7 @@ namespace mra {
 
 #if !defined(MRA_ENABLE_HOST) && defined(MRA_HAVE_SCRATCH_ALLOCATOR)
     // adjust the pinned memory allocator through TTG's environment settings
-    ttg::Env::initialize(ttg::get_default_world(), 1UL<<32, 1UL<<40);
+    ttg::Env::initialize(1UL<<32, 1UL<<40);
 #endif // MRA_ENABLE_HOST
   }
 

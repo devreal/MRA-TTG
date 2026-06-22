@@ -65,7 +65,7 @@ namespace mra {
     /**
      * Returns the number of functions. Used by the sparsity base type.
      */
-    size_type dim(Dimension d) const {
+    SCOPE size_type dim(Dimension d) const {
       assert(d == 0);
       return m_num_functions;
     }

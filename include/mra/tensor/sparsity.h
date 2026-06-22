@@ -899,7 +899,7 @@ namespace mra {
 
   private:
 
-    size_type dim0() const {
+    SCOPE size_type dim0() const {
       return static_cast<const Derived*>(this)->dim(0);
     }
 
