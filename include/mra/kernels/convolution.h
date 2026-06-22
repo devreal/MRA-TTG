@@ -29,7 +29,7 @@ namespace mra{
   namespace detail {
 
     template <typename T, Dimension NDIM>
-    SCOPE void conv_transform(
+    DEVSCOPE void conv_transform(
       int opid,
       const size_type dimk,
       const size_type mu,
@@ -125,7 +125,7 @@ namespace mra{
 #endif // 0
 
     template<typename T, Dimension NDIM>
-    void muopxv_fast(
+    DEVSCOPE void muopxv_fast(
       int opid,
       size_type K,
       const size_type mu,
@@ -180,9 +180,9 @@ namespace mra{
       concepts::TensorView<NDIM> auto& work2)
     {
       SHARED DenseTensorView<T, NDIM> work1_k, work2_k;
-      SHARED std::array<Slice,NDIM> s0;
+      // cannot be SHARED because ctors won't run
+      std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       if (is_team_lead()) {
-        s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
         work1_k = DenseTensorView<T, NDIM>(work1.data(), K);
         work2_k = DenseTensorView<T, NDIM>(work2.data(), K);
       }
@@ -377,7 +377,7 @@ namespace mra{
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
 
-    CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
                 (key, displacement, K, N, fac, tol, in_view, f_view, result_view,
                  resnorms, transr, transs, opnorms, at, tmp));

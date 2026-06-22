@@ -200,7 +200,7 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(K);
 
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
     /* launch one block per child */
     CALL_KERNEL(detail::fcoeffs_kernel, fns.size(), thread_dims, smem_size, stream,
       (D, gldata, fns, key, K, tmp,
