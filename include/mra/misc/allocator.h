@@ -1,9 +1,10 @@
 #ifndef MRA_ALLOCATOR_H
 #define MRA_ALLOCATOR_H
 
-#include <ttg/env.h>
 
 #if !defined(MRA_ENABLE_HOST)
+
+#include <ttg/env.h>
 
 #define MRA_HAVE_SCRATCH_ALLOCATOR 1
 template<typename T>
