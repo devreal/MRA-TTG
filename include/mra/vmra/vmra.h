@@ -48,11 +48,13 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
   /**
    * Sanity checks: support compressed, nonstandard, and reconstructed MADNESS trees.
    */
+  bool ignore_leaf = false;
   if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
     if (!((vmra.front().get_impl()->get_tree_state() == madness::TreeState::compressed) ||
           (vmra.front().get_impl()->get_tree_state() == madness::TreeState::nonstandard))) {
       throw std::invalid_argument("make_vmra_load: NodeT is FunctionsCompressedNode but vmra is not compressed");
     }
+    ignore_leaf = true; // compressed nodes do not store leaf information
   } else {
     if (vmra.front().get_impl()->get_tree_state() != madness::TreeState::reconstructed) {
       throw std::invalid_argument("make_vmra_load: NodeT is FunctionsReconstructedNode but vmra is not reconstructed");
@@ -70,7 +72,7 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
   /* Dispatch task: iterate all locally owned MADNESS nodes across all functions and
    * forward each unique MRA key to the load task. */
   auto dispatch_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
-    [&vmra](const mra::Key<NDIM>& key) {
+    [&vmra, ignore_leaf](const mra::Key<NDIM>& key) {
       const Batch batch = key.batch();
       std::set<mra::Key<NDIM>> key_set;
       for (const auto& fn : vmra) {
@@ -139,11 +141,17 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
           /* MRA encodes leaf information in the *parent* node via set_child_leaf.
            * Iterate the 2^NDIM children of the current key and check whether each
            * child is a MADNESS leaf node. */
+          if (vmra.front().get_impl()->get_tree_state() == madness::TreeState::nonstandard) {
+            result.set_ns(true);
+          }
+          result.set_all_child_leaf(fnid, false);
           for (auto child : children(key)) {
             const madness::Key<NDIM> mad_child_key = child.to_madness_key();
             auto child_acc = coeffs.find(mad_child_key);
             if (child_acc.get() != coeffs.end() && child_acc.get()->second.is_leaf()) {
+              std::cout << "LOAD " << key << " setting child " << child << " leaf for fnid " << fnid << std::endl;
               result.set_child_leaf(fnid, child, true);
+              assert(child_acc.get()->second.coeff().size() == 0);
             }
           }
         } else if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {

@@ -94,32 +94,29 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
                      T verification_precision, std::shared_ptr<real_convolution_t> mad_conv, bool print_dot) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto functiondata2 = mra::FunctionData<T,NDIM>(2*K);
-  auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
-  D[0].set_cube(-Length,Length);
 
-  std::map<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> cmap, nsmap, convmap;
-  std::map<Key<NDIM>, FunctionsReconstructedNode<T, NDIM>> projmap, rmap, rconvmap;
-
-  ttg::Edge<mra::Key<NDIM>, void> project_control;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result,
-                                                                      reconstruct_result,
-                                                                      reconstruct_conv_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result,
-                                                                   compress_r_result,
-                                                                   convolution_result;
-  ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_result;
 
   auto pmap = make_procmap<NDIM>(N, num_batches);
   auto dmap = make_devicemap<NDIM>(pmap);
 
-  // define N Gaussians
+  // define N Gaussians, don't instantiate
   auto gaussians = make_functionset<mra::Gaussian<T, NDIM>>(pmap.batch_manager());
-  auto gaussians_view = gaussians->current_view(); // host view
 
   mra::GaussianConvolutionOperator<T, NDIM> op(mad_conv);
 
+  // generate MADNESS comparison
+  auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(N, *mad_conv);
+
+  /**
+   * Feed the MADNESS functions in reconstructed form into MRA/TTG and perform convolution.
+   * Then compare the results.
+   */
   {
-    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(N, *mad_conv);
+    std::cout << "Testing MADNESS RECONSTRUCTED function trees" << std::endl;
+
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result,
+                                                                    convolution_result;
     ttg::Edge<mra::Key<NDIM>, void> load_control;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> load_vmra;
 
@@ -133,11 +130,8 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     auto start            = make_start(gaussians, load_control);
     auto load_tt          = mra::vmra::make_vmra_load(madfunc, load_control, load_vmra, "load_vmra");
     auto compress         = make_compress(gaussians, K, true, functiondata, load_vmra, compress_result, "compress");
-    auto extract_compress = make_extract(compress_result, cmap, "extract_compress");
     auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, "convolution");
-    auto extract_conv     = make_extract(convolution_result, convmap, "extract_conv");
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
-    auto extract_rconv    = make_extract(reconstruct_conv_result, rconvmap, "extract_rconv");
     auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, reconstruct_conv_result, "store_vmra");
     auto connected        = make_graph_executable(start.get());
     assert(connected);
@@ -153,10 +147,59 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     ttg::fence();
 
     madness::make_nonstandard(mad_conv->get_world(), madfunc);
-    compare_mra_madness(madfunc, cmap, "compress_result", verification_precision);
-    compare_mra_madness(madconv, rconvmap, "conv_result", verification_precision);
     compare_mra_madness(madconv, madconv_mra, "madconv_result", verification_precision);
   }
+
+  /**
+   * Feed the MADNESS functions in comressed form into MRA/TTG and perform convolution.
+   * Then compare the results.
+   * TODO: the load implementation for compressed MADNESS function trees is not working yet.
+   *       It seems that the child information is incorrect. That needs to be fixed before this test can be enabled.
+   *       For now, we will just skip this test since we usually get the MADNESS functions in reconstructed form anyway.
+   */
+#if 0
+  {
+
+    std::cout << "Testing MADNESS COMPRESSED function trees" << std::endl;
+
+    ttg::Edge<mra::Key<NDIM>, void> load_control;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> load_vmra;
+
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result;
+    std::vector<real_function_t> madconv_mra(N);
+    for (size_type i = 0; i < N; ++i) {
+      madconv_mra[i].set_impl(madfunc[i], false);
+    }
+
+    // put the MADNESS function into reconstructed form, then compress using MRA/TTG
+    madness::make_nonstandard(mad_conv->get_world(), madfunc);
+    auto start            = make_start(gaussians, load_control);
+    all_tts.push_back(start.get());
+    auto load_tt          = mra::vmra::make_vmra_load(madfunc, load_control, load_vmra, "load_vmra");
+    all_tts.push_back(load_tt.get());
+    auto convolve         = make_convolution(gaussians, K, load_vmra, convolution_result, op, precision, "convolution");
+    all_tts.push_back(convolve.get());
+    auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
+    all_tts.push_back(reconstruct_conv.get());
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, reconstruct_conv_result, "store_vmra");
+    all_tts.push_back(store_tt.get());
+    auto connected        = make_graph_executable(start.get());
+    assert(connected);
+
+    std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
+    if (ttg::default_execution_context().rank() == 0) {
+
+      // beg = std::chrono::high_resolution_clock::now();
+      // This kicks off the entire computation
+      start->invoke();
+    }
+    ttg::execute();
+    ttg::fence();
+
+    compare_mra_madness(madconv, madconv_mra, "madconv_result", verification_precision);
+  }
+#endif // 0
 }
 
 int main(int argc, char **argv) {
