@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.19)
-project(MRA-TTG LANGUAGES CXX)
+project(MRA-TTG VERSION 0.1.0 LANGUAGES CXX)
 
 option(MRA_ENABLE_DEBUG "Whether to enable debug mode" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 set(BUILD_TESTING OFF CACHE BOOL "Whether to build tests in this project and its subprojects")
 
@@ -53,17 +56,31 @@ if (MRA_ENABLE_ASAN)
     add_link_options(-fsanitize=address)
 endif (MRA_ENABLE_ASAN)
 
-# disable tests, may want to re-enable later
+# Build examples/tests/benchmarks only when MRA-TTG is the top-level project
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  set(_MRA_DEFAULT ON)
+else()
+  set(_MRA_DEFAULT OFF)
+endif()
+option(MRA_BUILD_TESTS      "Build MRA tests"      ${_MRA_DEFAULT})
+option(MRA_BUILD_EXAMPLES   "Build MRA examples"   ${_MRA_DEFAULT})
+option(MRA_BUILD_BENCHMARKS "Build MRA benchmarks" ${_MRA_DEFAULT})
+
+# disable tests in subprojects
 set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
 
 ##
-# BTAS is not needed for CUDA/HIP builds, since we don't BLAS on the host in that case.
+# BLASpp is not needed for CUDA/HIP builds, since we don't use BLAS on the host in that case.
 # TTG provides the mechanism to find blaspp.
 ##
+set(MRA_BLASPP_ENABLED OFF)
 if (NOT (HAVE_HIP OR HAVE_CUDA))
   include(FindOrFetchBLASpp)
+  if (TARGET blaspp)
+    set(MRA_BLASPP_ENABLED ON)
+  endif()
 endif (NOT (HAVE_HIP OR HAVE_CUDA))
 
 # look for Kokkos
@@ -79,3 +96,66 @@ endif()
 
 
 add_subdirectory(src)
+
+# ── Install / export ──────────────────────────────────────────────────────────
+
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  COMPONENT mra-dev
+)
+
+install(TARGETS mra-base mra-host
+  EXPORT mra-targets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+if(HAVE_CUDA)
+  install(TARGETS mra-cuda-base mra-cuda
+    EXPORT mra-targets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+endif()
+
+if(HAVE_HIP)
+  install(TARGETS mra-hip
+    EXPORT mra-targets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+endif()
+
+# Export for the build tree (FetchContent / add_subdirectory consumers)
+export(EXPORT mra-targets
+  NAMESPACE mra::
+  FILE "${CMAKE_CURRENT_BINARY_DIR}/mra-targets.cmake"
+)
+
+# Export for the install tree
+install(EXPORT mra-targets
+  NAMESPACE mra::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mra
+)
+
+# Record MADNESS version for the config template
+if(MADNESS_VERSION)
+  set(MRA_MADNESS_VERSION ${MADNESS_VERSION})
+else()
+  set(MRA_MADNESS_VERSION "")
+endif()
+
+configure_package_config_file(cmake/mra-config.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/mra-config.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mra
+)
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/mra-config-version.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY AnyNewerVersion
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/mra-config.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/mra-config-version.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mra
+)
