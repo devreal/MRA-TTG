@@ -8,8 +8,6 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(BUILD_TESTING OFF CACHE BOOL "Whether to build tests in this project and its subprojects")
-
 set(CMAKE_CXX_STANDARD 20)
 
 # needed for atomicAdd_block
@@ -46,6 +44,10 @@ set(TTG_EXAMPLES OFF)
 
 # whoever thought enabling OpenMP by default should be tarred and feathered!
 set(use_openmp OFF)
+# disable PaRSEC's Fortran support
+set(SUPPORT_FORTRAN OFF)
+# disable testing in sub projects
+set(BUILD_TESTING OFF)
 
 # needed for tests
 set(MADNESS_BUILD_MADWORLD_ONLY OFF CACHE BOOL "Whether to build MADNESS runtime only")
@@ -65,9 +67,6 @@ endif()
 option(MRA_BUILD_TESTS      "Build MRA tests"      ${_MRA_DEFAULT})
 option(MRA_BUILD_EXAMPLES   "Build MRA examples"   ${_MRA_DEFAULT})
 option(MRA_BUILD_BENCHMARKS "Build MRA benchmarks" ${_MRA_DEFAULT})
-
-# disable tests in subprojects
-set(BUILD_TESTING OFF)
 
 include(FindOrFetchTTG)
 

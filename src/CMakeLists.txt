@@ -38,7 +38,6 @@ if (HAVE_CUDA)
   )
   target_link_libraries(mra-cuda-base INTERFACE
     mra-base
-    $<$<TARGET_EXISTS:tiledarray>:tiledarray>
     $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
   )
 
@@ -64,7 +63,6 @@ if (HAVE_HIP)
   target_compile_definitions(mra-hip PUBLIC MRA_ENABLE_HIP=1)
   target_link_libraries(mra-hip PUBLIC
     mra-base
-    $<$<TARGET_EXISTS:tiledarray>:tiledarray>
     $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
   )
 
