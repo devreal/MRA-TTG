@@ -9,6 +9,8 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_HIP_STANDARD 20)
 
 # needed for atomicAdd_block
 set(CMAKE_CUDA_ARCHITECTURES 80)
@@ -156,5 +158,6 @@ write_basic_package_version_file(
 install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/mra-config.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/mra-config-version.cmake"
+  cmake/modules/MRAGPUWrappers.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mra
 )

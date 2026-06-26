@@ -22,8 +22,16 @@ target_link_libraries(mra-mad-conv-host-parsec PUBLIC MADworld MADtensor mra::ho
 add_executable(mra-mad-vmra-host-parsec mad_vmra_test.cc ../autocorr.cc)
 target_link_libraries(mra-mad-vmra-host-parsec PUBLIC MADworld MADtensor mra::host)
 
+if (HAVE_CUDA OR HAVE_HIP)
+  mra_generate_gpu_wrappers(
+    SOURCES mad_derivative_test.cc
+    CUDA_OUTPUT_VAR _deriv_cu
+    HIP_OUTPUT_VAR  _deriv_hip
+  )
+endif()
+
 if (HAVE_CUDA)
-  add_executable(mra-mad-deriv-device-cuda-parsec mad_derivative_test.cu)
+  add_executable(mra-mad-deriv-device-cuda-parsec ${_deriv_cu})
   target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
 
   add_executable(mra-mad-conv-device-cuda-parsec mad_convolution_test.cc ../autocorr.cc)
@@ -31,7 +39,7 @@ if (HAVE_CUDA)
 endif()
 
 if (HAVE_HIP)
-  add_executable(mra-mad-deriv-device-hip-parsec mad_derivative_test.hip)
+  add_executable(mra-mad-deriv-device-hip-parsec ${_deriv_hip})
   target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC mra::hip)
 
   add_executable(mra-mad-conv-device-hip-parsec mad_convolution_test.cc ../autocorr.cc)

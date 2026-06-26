@@ -12,6 +12,8 @@ target_link_libraries(mra-base INTERFACE
 )
 target_compile_definitions(mra-base INTERFACE TTG_USE_PARSEC=1)
 
+include(MRAGPUWrappers)
+
 # ── Host (CPU) implementation ─────────────────────────────────────────────────
 set(MRA_SOURCES gl.cc init.cc twoscale.cc)
 set(MRA_KERNEL_SOURCES
@@ -41,8 +43,10 @@ if (HAVE_CUDA)
     $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
   )
 
-  set(MRA_CUDA_KERNEL_SOURCES ${MRA_KERNEL_SOURCES})
-  list(TRANSFORM MRA_CUDA_KERNEL_SOURCES REPLACE "\\.cc$" ".cu")
+  mra_generate_gpu_wrappers(
+    SOURCES ${MRA_KERNEL_SOURCES}
+    CUDA_OUTPUT_VAR MRA_CUDA_KERNEL_SOURCES
+  )
 
   add_library(mra-cuda STATIC ${MRA_SOURCES} ${MRA_CUDA_KERNEL_SOURCES})
   add_library(mra::cuda ALIAS mra-cuda)
@@ -55,8 +59,10 @@ endif (HAVE_CUDA)
 # ── HIP implementation ────────────────────────────────────────────────────────
 if (HAVE_HIP)
 
-  set(MRA_HIP_KERNEL_SOURCES ${MRA_KERNEL_SOURCES})
-  list(TRANSFORM MRA_HIP_KERNEL_SOURCES REPLACE "\\.cc$" ".hip")
+  mra_generate_gpu_wrappers(
+    SOURCES ${MRA_KERNEL_SOURCES}
+    HIP_OUTPUT_VAR MRA_HIP_KERNEL_SOURCES
+  )
 
   add_library(mra-hip STATIC ${MRA_SOURCES} ${MRA_HIP_KERNEL_SOURCES})
   add_library(mra::hip ALIAS mra-hip)
