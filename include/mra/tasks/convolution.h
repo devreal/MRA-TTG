@@ -310,17 +310,17 @@ namespace mra {
 
         if (!child_empty_contributions.empty()) {
 #ifndef MRA_ENABLE_HOST
-          sends.push_back(ttg::device::broadcast<2>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{}));
+          sends.push_back(ttg::device::broadcast<0>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{}));
 #else
-          ttg::broadcast<2>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{});
+          ttg::broadcast<0>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{});
 #endif
         }
 
         if (!child_empty_nodes.empty()) {
 #ifndef MRA_ENABLE_HOST
-          sends.push_back(ttg::device::broadcast<0>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{}));
+          sends.push_back(ttg::device::broadcast<2>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{}));
 #else
-          ttg::broadcast<0>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{});
+          ttg::broadcast<2>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{});
 #endif
         }
 
