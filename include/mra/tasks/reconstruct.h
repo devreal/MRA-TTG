@@ -187,10 +187,10 @@ namespace mra{
         return ttg::device::Input(hg.buffer(), tmp_scratch,
                                   (r_arr[Is].coeffs().buffer())...);
       }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
-      inputs.add(from_parent.coeffs().buffer());
-      inputs.add(node.coeffs().buffer());
-      inputs.add(norms.buffer());
-      inputs.add(result.coeffs().buffer());
+      if (!node.empty()) inputs.add(node.coeffs().buffer());
+      if (!result.empty()) inputs.add(result.coeffs().buffer());
+      if (!from_parent.empty()) inputs.add(from_parent.coeffs().buffer());
+      if (!norms.buffer().empty()) inputs.add(norms.buffer());
       /* select a device */
       co_await ttg::device::select(inputs);
 #endif
