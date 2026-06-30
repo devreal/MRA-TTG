@@ -58,8 +58,8 @@ namespace mra {
          */
         parsec_device_gpu_module_t *device_module = ttg_parsec::detail::parsec_ttg_caller->dev_ptr->device;
         int ret = device_module->memcpy_async(device_module, ttg_parsec::detail::parsec_ttg_caller->dev_ptr->stream,
-                                              m_buffer.host_ptr(),
                                               const_cast<value_type*>(m_tensor.buffer().current_device_ptr()),
+                                              m_buffer.host_ptr(),
                                               sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type),
                                               parsec_device_gpu_transfer_direction_h2d);
         if (ret != PARSEC_SUCCESS) throw std::runtime_error("Failed to copy sparsity data from host to device!");
