@@ -40,30 +40,25 @@ namespace mra {
         this->apply_sparsity(m_tensor.sparsity());
       }
 
-      void populate_device_sparsity() {
-#ifdef MRA_ENABLE_HOST
-        //for (size_t i = 0; i < sparsity_traits::required_space(m_tensor.dims()); ++i) {
-        //  std::cout << "SPARSITY INFO [" << i << "]: " << *reinterpret_cast<uint64_t*>(&m_buffer.host_ptr()[i]) << std::endl;
-        //  m_tensor.buffer().host_ptr()[i] = m_buffer.host_ptr()[i];
-        //}
-        std::memcpy(m_tensor.buffer().host_ptr(),
-                    m_buffer.host_ptr(),
-                    sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type));
-#else  // MRA_ENABLE_HOST
-        // sanity checks
-        assert(ttg::device::current_device().is_device());
-        assert(m_tensor.buffer().is_current_on(ttg::device::current_device()));
-        /**
-         * TODO: TTG should provide a proper API for copying between host and device.
-         */
-        parsec_device_gpu_module_t *device_module = ttg_parsec::detail::parsec_ttg_caller->dev_ptr->device;
-        int ret = device_module->memcpy_async(device_module, ttg_parsec::detail::parsec_ttg_caller->dev_ptr->stream,
-                                              const_cast<value_type*>(m_tensor.buffer().current_device_ptr()),
-                                              m_buffer.host_ptr(),
-                                              sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type),
-                                              parsec_device_gpu_transfer_direction_h2d);
-        if (ret != PARSEC_SUCCESS) throw std::runtime_error("Failed to copy sparsity data from host to device!");
-#endif // MRA_ENABLE_HOST
+      void populate_device_sparsity(ttg::device::Device device = ttg::device::current_device()) {
+        if (device.is_host()) {
+          std::memcpy(m_tensor.buffer().host_ptr(),
+                      m_buffer.host_ptr(),
+                      sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type));
+        } else {
+          // sanity checks
+          assert(m_tensor.buffer().is_current_on(device));
+          /**
+           * TODO: TTG should provide a proper API for copying between host and device.
+           */
+          parsec_device_gpu_module_t *device_module = ttg_parsec::detail::parsec_ttg_caller->dev_ptr->device;
+          int ret = device_module->memcpy_async(device_module, ttg_parsec::detail::parsec_ttg_caller->dev_ptr->stream,
+                                                const_cast<value_type*>(m_tensor.buffer().device_ptr_on(device)),
+                                                m_buffer.host_ptr(),
+                                                sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type),
+                                                parsec_device_gpu_transfer_direction_h2d);
+          if (ret != PARSEC_SUCCESS) throw std::runtime_error("Failed to copy sparsity data from host to device!");
+        }
       }
 
 
@@ -84,8 +79,8 @@ namespace mra {
     };
 
     template<std::size_t... Is>
-    void populate_device_sparsity_impl(std::index_sequence<Is...>) {
-      (std::get<Is>(m_tensors).populate_device_sparsity(), ...);
+    void populate_device_sparsity_impl(ttg::device::Device device, std::index_sequence<Is...>) {
+      (std::get<Is>(m_tensors).populate_device_sparsity(device), ...);
     }
 
   public:
@@ -130,8 +125,8 @@ namespace mra {
     { }
 
 
-    void populate_device_sparsity() {
-      populate_device_sparsity_impl(std::make_index_sequence<sizeof...(TensorTypes)>{});
+    void populate_device_sparsity(ttg::device::Device device = ttg::device::current_device()) {
+      populate_device_sparsity_impl(device, std::make_index_sequence<sizeof...(TensorTypes)>{});
     }
 
 

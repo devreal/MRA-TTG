@@ -111,7 +111,7 @@ namespace mra {
         // The TTG Buffer claims that empty buffers are current on all devices. Not sure that is correct...
         if (!tensor.buffer().empty() && tensor.buffer().is_current_on(ttg::device::Device::host())) {
           // cast away const so we can populate the sparsity information (which is logically mutable even in const tensors)
-          make_sparsity_manager(const_cast<std::decay_t<S>&>(tensor)).populate_device_sparsity();
+          make_sparsity_manager(const_cast<std::decay_t<S>&>(tensor)).populate_device_sparsity(ttg::device::Device::host());
         }
       }
     }
