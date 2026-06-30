@@ -28,13 +28,19 @@ if (HAVE_CUDA OR HAVE_HIP)
     CUDA_OUTPUT_VAR _deriv_cu
     HIP_OUTPUT_VAR  _deriv_hip
   )
+  mra_generate_gpu_wrappers(
+    SOURCES mad_convolution_test.cc
+    CUDA_OUTPUT_VAR _conv_cu
+    HIP_OUTPUT_VAR  _conv_hip
+  )
+
 endif()
 
 if (HAVE_CUDA)
   add_executable(mra-mad-deriv-device-cuda-parsec ${_deriv_cu})
   target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
 
-  add_executable(mra-mad-conv-device-cuda-parsec mad_convolution_test.cc ../autocorr.cc)
+  add_executable(mra-mad-conv-device-cuda-parsec ${_conv_cu} ../autocorr.cc)
   target_link_libraries(mra-mad-conv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
 endif()
 
@@ -42,6 +48,6 @@ if (HAVE_HIP)
   add_executable(mra-mad-deriv-device-hip-parsec ${_deriv_hip})
   target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC mra::hip)
 
-  add_executable(mra-mad-conv-device-hip-parsec mad_convolution_test.cc ../autocorr.cc)
+  add_executable(mra-mad-conv-device-hip-parsec ${_conv_hip} ../autocorr.cc)
   target_link_libraries(mra-mad-conv-device-hip-parsec PUBLIC MADworld MADtensor MADmra mra::hip)
 endif()
