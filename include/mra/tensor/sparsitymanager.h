@@ -51,7 +51,7 @@ namespace mra {
                     sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type));
 #else  // MRA_ENABLE_HOST
         // sanity checks
-        assert(ttg::device::current_device().is_gpu());
+        assert(ttg::device::current_device().is_device());
         assert(m_tensor.buffer().is_current_on(ttg::device::current_device()));
         /**
          * TODO: TTG should provide a proper API for copying between host and device.
