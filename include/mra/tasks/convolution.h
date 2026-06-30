@@ -280,6 +280,8 @@ namespace mra {
           child_empty[child.childindex()] = node.is_all_child_leaf(child);
         }
 
+        std::vector<Key<NDIM>> child_empty_contributions;
+        std::vector<Key<NDIM>> child_empty_nodes;
         // send to all children
         for (auto child : children(key)) {
           auto dest_contributions = filter_dest(child, true, std::index_sequence<0>{});
@@ -292,15 +294,34 @@ namespace mra {
               //std::cout << "DOWN " << key << " child " << child << " is empty but receiving contributions" << std::endl;
               // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
               //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
-              send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
-              send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
+              //send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+              child_empty_contributions.push_back(child);
+              child_empty_nodes.push_back(child);
+              //send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
             }
           } else if (!node.is_all_child_leaf(child)) {
             // we have no contributions but an existing child, send down an empty contribution list to the child
             //std::cout << "DOWN " << key << " sending empty contributions to dest " << child << std::endl;
-            send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+            //send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+            child_empty_contributions.push_back(child);
             child_empty[child.childindex()] = false;
           }
+        }
+
+        if (!child_empty_contributions.empty()) {
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<2>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{}));
+#else
+          ttg::broadcast<2>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{});
+#endif
+        }
+
+        if (!child_empty_nodes.empty()) {
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<0>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{}));
+#else
+          ttg::broadcast<0>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{});
+#endif
         }
 
         if (node.invalid()) {
@@ -559,7 +580,7 @@ namespace mra {
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
-                                        out.coeffs().buffer(), tmp, resnorms.buffer());
+                                        out.coeffs().buffer(), tmp);
         input.add(op_data->norms.buffer());
         for (Dimension d = 0; d < NDIM; ++d) {
           input.add(op_data->data[d]->R.buffer());

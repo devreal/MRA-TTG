@@ -58,7 +58,7 @@ namespace mra {
   struct ConvolutionData {
     std::array<std::shared_ptr<const ConvolutionData1D<T>>, NDIM> data;
     // also taken from MADNESS
-    // 3D: veccount x rank x NDIM x [Rnorm, Snorm, Rnormf, Snormf, NSnormf]
+    // 4D: veccount x rank x NDIM x [Rnorm, Snorm, Rnormf, Snormf, NSnormf]
     //     fac & munorm of each separated term is stored in the same tensor, at dim 0
     DenseTensor<T, 4> norms;
 
@@ -66,7 +66,6 @@ namespace mra {
     : data()
     , norms(std::array{veccount, rank, NDIM, (size_type)NormId::Count}, ttg::scope::SyncIn)
     { }
-
   };
 
   /**

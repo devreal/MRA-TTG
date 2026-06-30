@@ -233,7 +233,6 @@ namespace mra
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::forward(
             // select to which child of our parent we send
-            //ttg::device::send<0>(key, std::move(p)),
             select_send_up(key, std::move(p), std::make_index_sequence<num_children>{}, "compress"),
             // Send result to output tree
             ttg::device::send<out_terminal_id>(key, std::move(result)));

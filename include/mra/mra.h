@@ -44,4 +44,6 @@
 #include "mra/functors/gaussian.h"
 #include "mra/functors/functionfunctor.h"
 
+#include <ttg.h>
+
 #endif // MRA_H_INCL
