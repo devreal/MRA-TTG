@@ -208,12 +208,18 @@ namespace mra {
 
     /* returns a view for the current memory space */
     view_type view_on(const ttg::device::Device& device) {
+      if (!m_buffer.is_current_on(device)) {
+        throw std::runtime_error("Tensor: view_on() called for device that does not have current data");
+      }
       populate_host_sparsity(*this);
       return view_type(m_buffer.device_ptr_on(device), m_dims);
     }
 
     /* returns a view for the current memory space */
     const view_type view_on(const ttg::device::Device& device) const {
+      if (!m_buffer.is_current_on(device)) {
+        throw std::runtime_error("Tensor: view_on() called for device that does not have current data");
+      }
       populate_host_sparsity(*this);
       return view_type(m_buffer.device_ptr_on(device), m_dims);
     }
