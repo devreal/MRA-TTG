@@ -157,7 +157,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
    *       It seems that the child information is incorrect. That needs to be fixed before this test can be enabled.
    *       For now, we will just skip this test since we usually get the MADNESS functions in reconstructed form anyway.
    */
-#if 0
+//#if 0
   {
 
     std::cout << "Testing MADNESS COMPRESSED function trees" << std::endl;
@@ -165,20 +165,26 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     ttg::Edge<mra::Key<NDIM>, void> load_control;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> load_vmra;
 
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result;
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result, reconstruct_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result, compress_result;
     std::vector<real_function_t> madconv_mra(N);
     for (size_type i = 0; i < N; ++i) {
       madconv_mra[i].set_impl(madfunc[i], false);
     }
 
     // put the MADNESS function into reconstructed form, then compress using MRA/TTG
-    madness::make_nonstandard(mad_conv->get_world(), madfunc);
+    //madness::make_nonstandard(mad_conv->get_world(), madfunc);
+    madness::compress(mad_conv->get_world(), madfunc);
     auto start            = make_start(gaussians, load_control);
     all_tts.push_back(start.get());
     auto load_tt          = mra::vmra::make_vmra_load(madfunc, load_control, load_vmra, "load_vmra");
     all_tts.push_back(load_tt.get());
-    auto convolve         = make_convolution(gaussians, K, load_vmra, convolution_result, op, precision, "convolution");
+    // have to reconstruct and compress into nonstandard form
+    auto reconstruct      = make_reconstruct(gaussians, K, false, functiondata, load_vmra, reconstruct_result, "reconstruct");
+    all_tts.push_back(reconstruct.get());
+    auto compress_ns      = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_result, "compress");
+    all_tts.push_back(compress_ns.get());
+    auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, "convolution");
     all_tts.push_back(convolve.get());
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
     all_tts.push_back(reconstruct_conv.get());
@@ -190,6 +196,10 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
     if (ttg::default_execution_context().rank() == 0) {
 
+      std::cout << "==== begin dot ====\n";
+      std::cout << ttg::Dot(true)(start.get()) << std::endl;
+      std::cout << "====  end dot  ====\n";
+
       // beg = std::chrono::high_resolution_clock::now();
       // This kicks off the entire computation
       start->invoke();
@@ -199,7 +209,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
 
     compare_mra_madness(madconv, madconv_mra, "madconv_result", verification_precision);
   }
-#endif // 0
+//#endif // 0
 }
 
 int main(int argc, char **argv) {

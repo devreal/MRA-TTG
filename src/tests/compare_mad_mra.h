@@ -172,6 +172,16 @@ namespace mra {
       std::cout << name << ": number of functions in MADNESS vector 1 (" << madfunc1.size() << ") does not match number of functions in MADNESS vector 2 (" << madfunc2.size() << ")" << std::endl;
       throw std::runtime_error(name + ": mismatch in number of functions between MADNESS vectors");
     }
+    for (std::size_t i = 0; i < madfunc1.size(); ++i) {
+      auto tree1_size = madfunc1[i].get_impl()->tree_size();
+      auto tree2_size = madfunc2[i].get_impl()->tree_size();
+      if (tree1_size != tree2_size) {
+        std::cout << name << ": MADNESS function " << i << " in vector 1 has "
+        << tree1_size << " nodes but in vector 2 has "
+        << tree2_size << " nodes" << std::endl;
+        throw std::runtime_error(name + ": mismatch in tree size between MADNESS vectors");
+      }
+    }
     bool check = true;
     for (std::size_t i = 0; i < madfunc1.size(); ++i) {
       // TODO: check that both trees are in the same state
