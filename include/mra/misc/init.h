@@ -7,6 +7,7 @@ namespace mra {
   /**
    * Initializes the runtime systems necessary for MRA.
    * This includes TTG, MADNESS, and some adjustments to TA.
+   * TODO: take a MADNESS world as argument.
    */
   void initialize(int& argc, char **& argv, int ncores);
 

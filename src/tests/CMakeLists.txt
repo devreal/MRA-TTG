@@ -34,20 +34,32 @@ if (HAVE_CUDA OR HAVE_HIP)
     HIP_OUTPUT_VAR  _conv_hip
   )
 
+  mra_generate_gpu_wrappers(
+    SOURCES mad_vmra_test.cc
+    CUDA_OUTPUT_VAR _vmra_cu
+    HIP_OUTPUT_VAR  _vmra_hip
+  )
+
 endif()
 
 if (HAVE_CUDA)
   add_executable(mra-mad-deriv-device-cuda-parsec ${_deriv_cu})
   target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
 
-  add_executable(mra-mad-conv-device-cuda-parsec ${_conv_cu} ../autocorr.cc)
+  add_executable(mra-mad-conv-device-cuda-parsec ${_conv_cu})
   target_link_libraries(mra-mad-conv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
+
+  add_executable(mra-mad-vmra-device-cuda-parsec ${_vmra_cu})
+  target_link_libraries(mra-mad-vmra-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
 endif()
 
 if (HAVE_HIP)
   add_executable(mra-mad-deriv-device-hip-parsec ${_deriv_hip})
   target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC mra::hip)
 
-  add_executable(mra-mad-conv-device-hip-parsec ${_conv_hip} ../autocorr.cc)
+  add_executable(mra-mad-conv-device-hip-parsec ${_conv_hip})
   target_link_libraries(mra-mad-conv-device-hip-parsec PUBLIC MADworld MADtensor MADmra mra::hip)
+
+  add_executable(mra-mad-vmra-device-hip-parsec ${_vmra_hip})
+  target_link_libraries(mra-mad-vmra-device-hip-parsec PUBLIC MADworld MADtensor MADmra mra::hip)
 endif()
