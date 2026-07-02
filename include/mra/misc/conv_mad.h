@@ -86,7 +86,7 @@ namespace mra {
      */
     GaussianConvolutionOperator(std::shared_ptr<madness::SeparatedConvolution<T, NDIM>> mad_conv_sep)
     : m_mad_conv_sep_vec(std::move(std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>(1, mad_conv_sep)))
-    , m_rank(mad_conv_sep->get_rank())
+    , m_max_rank(mad_conv_sep->get_rank())
     { }
 
     /**
@@ -94,8 +94,12 @@ namespace mra {
      */
     GaussianConvolutionOperator(const std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>& mad_conv_sep)
     : m_mad_conv_sep_vec(mad_conv_sep)
-    , m_rank(mad_conv_sep.front()->get_rank())
-    { }
+    {
+      // find the highest rank
+      for (auto& mad_conv : m_mad_conv_sep_vec) {
+        m_max_rank = std::max(m_max_rank, mad_conv->get_rank());
+      }
+    }
 
     /**
      * Assembles ConvolutionData for the level and displacement.
@@ -114,8 +118,7 @@ namespace mra {
        * Start with assembling the ConvolutionData1D for each dimension.
        * The 1D data is cached so we might reuse if from other displacements.
        */
-      auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(),
-                                                             m_mad_conv_sep_vec.front()->get_rank());
+      auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
       for (int d = 0; d < NDIM; ++d) {
         auto key_1d = std::make_pair(n, disp.translation()[d]);
         auto it = _opcache.find(key_1d);
@@ -140,7 +143,8 @@ namespace mra {
       auto norms_view = data->norms.view_on(ttg::device::Device::host());
       for (int c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
         auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
-        for (int i = 0; i < mad_ops.size(); ++i) {
+        int i = 0;
+        for (i = 0; i < mad_ops.size(); ++i) {
           for (int d = 0; d < NDIM; ++d) {
             auto cd_mad = mad_ops[i].getop(d)->nonstandard(n, disp.translation()[d]);
             norms_view(c, i, d, (int)NormId::Rnorm) = cd_mad->Rnorm;
@@ -151,6 +155,17 @@ namespace mra {
           }
           norms_view(c, i, 0, (int)NormId::Fac) = mad_ops[i].getfac();
           norms_view(c, i, 0, (int)NormId::MUnorm) = munorm2_ns(c, n, i, data);
+        }
+        for (; i < m_max_rank; ++i) {
+          for (int d = 0; d < NDIM; ++d) {
+            norms_view(c, i, d, (int)NormId::Rnorm) = 0.0;
+            norms_view(c, i, d, (int)NormId::Snorm) = 0.0;
+            norms_view(c, i, d, (int)NormId::Rnormf) = 0.0;
+            norms_view(c, i, d, (int)NormId::Snormf) = 0.0;
+            norms_view(c, i, d, (int)NormId::NSnormf) = 0.0;
+          }
+          norms_view(c, i, 0, (int)NormId::Fac) = 0.0;
+          norms_view(c, i, 0, (int)NormId::MUnorm) = 0.0;
         }
         /* Finally, store the norm of the whole operator */
         T norm = m_mad_conv_sep_vec[c]->norm(n, disp.to_madness_key(), disp.to_madness_key());
@@ -170,7 +185,7 @@ namespace mra {
   private:
     // madness separate convolution object, provided by application
     std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>> m_mad_conv_sep_vec;
-    int m_rank = 0;
+    int m_max_rank = 0;
     // our own cache of full operator data for each [Level, Translation] (encoded as Key)
     // includes all terms and dimensions
     mutable std::map<std::pair<Level, Translation>, std::shared_ptr<const ConvolutionData1D<T>>> _opcache;
@@ -190,18 +205,16 @@ namespace mra {
      * Note that the same 1D data may be shared across multiple dimensions and/or terms,
      * depending on what MADNESS provides.
      * This function does not modify the cache.
+     * Assumes all convolution objects have the same K.
      */
     std::shared_ptr<const ConvolutionData1D<T>> make_op1d(Level n, Translation l, Dimension d) const {
-      auto max_rank = 0;
-      for (auto& mad_conv : m_mad_conv_sep_vec) {
-        max_rank = std::max(max_rank, mad_conv->get_rank());
-      }
-      auto data = std::make_shared<ConvolutionData1D<T>>(m_mad_conv_sep_vec.size(), max_rank, m_mad_conv_sep_vec.front()->get_k());
+      auto data = std::make_shared<ConvolutionData1D<T>>(m_mad_conv_sep_vec.size(), m_max_rank, m_mad_conv_sep_vec.front()->get_k());
       auto rv = data->R.view_on(ttg::device::Device::host());
       auto sv = data->S.view_on(ttg::device::Device::host());
       for (int c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
         auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
-        for (int i = 0; i < mad_ops.size(); ++i) {
+        int i = 0;
+        for (i = 0; i < mad_ops.size(); ++i) {
           const madness::ConvolutionData1D<T>* cd_mad;
           std::shared_ptr<const madness::Convolution1D<T> > conv1d = mad_ops[i].getop(d);
           cd_mad = conv1d->nonstandard(n, l);
@@ -213,6 +226,11 @@ namespace mra {
             //copy_from_madtensor(sv(i, 1), cd_mad->TU);
             //copy_from_madtensor(sv(i, 2), cd_mad->TVT);
           }
+        }
+        // fill in the rest of the tensors with zeros
+        for (; i < m_max_rank; ++i) {
+          rv(c, i) = 0.0;
+          sv(c, i) = 0.0;
         }
       }
       return data;
