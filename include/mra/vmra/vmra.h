@@ -95,6 +95,11 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
       const Batch batch = key.batch();
       const size_type N = vmra.size();
       const size_type K = vmra.front().get_impl()->get_k();
+      /**
+       * Always send reconstructed nodes. We don't send compressed nodes if they are leafs.
+       * MADNESS stores them explicitly, MRA does not.
+       */
+      bool do_send = std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>;
       const auto mad_key = key.to_madness_key();
 
       /* Determine sparsity: which functions have a non-empty node at this key. */
@@ -102,8 +107,15 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
       for (size_type fnid = 0; fnid < N; ++fnid) {
         const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
         auto accessor = coeffs.find(mad_key);
-        if (accessor.get() != coeffs.end() && accessor.get()->second.coeff().size() > 0) {
-          sparsity.set_nonzero(fnid);
+        if (accessor.get() != coeffs.end()) {
+          if (accessor.get()->second.coeff().size() > 0) {
+            sparsity.set_nonzero(fnid);
+          }
+          if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
+            if (!accessor.get()->second.is_leaf()) {
+              do_send = true;
+            }
+          }
         }
       }
 
@@ -163,7 +175,9 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
           }
         }
       }
-      ttg::send<0>(key, std::move(result));
+      if (do_send) {
+        ttg::send<0>(key, std::move(result));
+      }
     }, ttg::edges(dispatch_to_load), ttg::edges(out),
     name, {"dispatch"}, {"output"});
 
