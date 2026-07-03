@@ -75,7 +75,7 @@ namespace mra{
 
 
         SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
-        sparsity.nonzero_if_all(t1, t2);
+        sparsity.nonzero_if_any(t1, t2);
 
         auto out = mra::FunctionsCompressedNode<T, NDIM>(key, sparsity, K, ttg::scope::Allocate);
 
