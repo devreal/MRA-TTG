@@ -163,8 +163,16 @@ namespace mra {
     /**
      * Returns true if the i'th element in the sparse dimension is non-zero.
      */
+    /**
+     * Returns true if the i'th element in the sparse dimension is non-zero.
+     * Safe with null storage (returns false), consistent with is_zero().
+     */
     SCOPE bool is_nonzero(std::size_t i) const {
-      const unit_type byte = sparsity_data()[i];
+      auto sd = sparsity_data();
+      if (nullptr == sd) {
+        return false;
+      }
+      const unit_type byte = sd[i];
       return byte & static_cast<unit_type>(detail::SparsityState::NONZERO);
     }
 
