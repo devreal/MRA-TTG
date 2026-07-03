@@ -218,6 +218,16 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
     return impl->get_coeffs().owner(key.to_madness_key());
   };
 
+  if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
+    for (auto& fn : vmra) {
+      fn.get_impl()->set_tree_state(madness::TreeState::compressed);
+    }
+  } else {
+    for (auto& fn : vmra) {
+      fn.get_impl()->set_tree_state(madness::TreeState::reconstructed);
+    }
+  }
+
   auto store_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
     [&vmra](const mra::Key<NDIM>& key, const NodeT& node) {
       const auto mad_key = key.to_madness_key();
