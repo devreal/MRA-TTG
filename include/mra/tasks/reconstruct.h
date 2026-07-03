@@ -130,6 +130,7 @@ namespace mra{
         }
       }
 
+#if 0
       if (node.empty() && from_parent.empty()) {
         //std::cout << "reconstruct " << key << " node and parent empty " << std::endl;
         /* both the node and the parent are empty so we can shortcut with empty results */
@@ -150,8 +151,12 @@ namespace mra{
         return; // we're done
 #endif // MRA_ENABLE_HOST
       }
+#endif // 0
 
-      /* once we are here we know we need to invoke the reconstruct kernel */
+      /**
+       * once we are here we know we need to invoke the reconstruct kernel
+       * TODO: skip the kernel if the node and from_parent are both empty. We will just pass down empty child nodes in that case.
+       */
 
       /**
        * The result that contains the coefficients of leaf nodes only.
