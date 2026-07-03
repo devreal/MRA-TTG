@@ -561,12 +561,6 @@ namespace mra {
         out.allocate(sparsity, K, ttg::scope::Allocate);
         out.set_ns();
         mra::apply_leaf_info(out, in_node);
-        // set child leaf information
-        //for (size_type i = 0; i < N; ++i) {
-        //  for (size_type c = 0; c < num_children; ++c) {
-        //    out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
-        //  }
-        //}
 
         DenseTensor<T, 1> resnorms(N, TempScope);
         T tol = truncate_tol(key, thresh);
@@ -892,7 +886,7 @@ namespace mra {
         for (size_type i = 0; i < N; ++i) {
           for (size_type c = 0; c < num_children; ++c) {
             bool is_child_leaf = false;
-            if (children[c]->empty() || (children[c]->is_all_child_leaf(i) && children[c]->is_zero(i))) {
+            if (children[c]->invalid() || (children[c]->is_all_child_leaf(i) && children[c]->is_zero(i))) {
               is_child_leaf = true;
             }
             node.set_child_leaf(i, c, is_child_leaf);
