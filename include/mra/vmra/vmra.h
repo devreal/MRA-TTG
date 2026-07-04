@@ -257,16 +257,24 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
         auto fn_impl = vmra[fnid].get_impl();
 
         /* Copy MRA coefficients (contiguous row-major) into a MADNESS Tensor. */
-        madness::Tensor<T> mad_tensor(dims);
-        if (!node.is_zero(fnid)) {
-          auto mra_subview = node.coeffs_view(fnid);
-          std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
-        }
-
+        madness::Tensor<T> mad_tensor;
         bool has_children;
         if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
           has_children = !node.is_leaf(fnid);
+          if (node.is_leaf(fnid)) {
+            assert(!node.is_zero(fnid));
+            mad_tensor = madness::Tensor<T>(dims);
+            auto mra_subview = node.coeffs_view(fnid);
+            std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
+          }
+
         } else {
+          if (!node.is_zero(fnid)) {
+            mad_tensor = madness::Tensor<T>(dims);
+            auto mra_subview = node.coeffs_view(fnid);
+            std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
+          }
+
           /* In MRA compressed form, leaf-level zero nodes are not stored; the
            * parent records them via is_child_leaf.  MADNESS requires has_children
            * to reflect the actual tree structure, so we conservatively set it true
