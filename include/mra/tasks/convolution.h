@@ -441,11 +441,13 @@ namespace mra {
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
-//#if 0
+          /**
+           * TODO: take the displacements from the MADNESS SeparatedConvolution operator.
+           */
           auto for_each = [&](auto&& fn){
-            for (int d0 = -3; d0 <= 3; ++d0) {
-              for (int d1 = -3; d1 <= 3; ++d1) {
-                for (int d2 = -3; d2 <= 3; ++d2) {
+            for (int d0 = -4; d0 <= 4; ++d0) {
+              for (int d1 = -4; d1 <= 4; ++d1) {
+                for (int d2 = -4; d2 <= 4; ++d2) {
                   if (d0 == 0 && d1 == 0 && d2 == 0) {
                     continue; // skip self contribution since it is handled separately in level0
                   }
@@ -478,7 +480,6 @@ namespace mra {
               }
             }
           });
-//#endif // 0
 
           //std::cout << "SCREEN " << key << " computed contributions " << contributions.size() << std::endl;
         }
