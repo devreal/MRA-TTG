@@ -192,6 +192,18 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
   return make_ttg(std::move(ops), ins, outs, name);
 }
 
+namespace detail {
+  /**
+   * Helper to map a node type to a MADNESS TreeState.
+   */
+  template<typename NodeT>
+  struct madfunc_state : std::conditional_t<std::is_same_v<NodeT, FunctionsCompressedNode<typename NodeT::value_type, NodeT::NDIM>>,
+                     std::integral_constant<madness::TreeState, madness::TreeState::compressed>,
+                     std::integral_constant<madness::TreeState, madness::TreeState::reconstructed>> {};
+
+  template<typename NodeT>
+  constexpr const madness::TreeState madfunc_state_v = madfunc_state<NodeT>::value;
+} // namespace detail
 
 /**
  * Store MRA FunctionNodes back into a vector of MADNESS functions.
@@ -209,6 +221,7 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
 template<typename T, Dimension NDIM, typename NodeT>
 auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
                      ttg::Edge<mra::Key<NDIM>, NodeT>& in,
+                     madness::TreeState tree_state = detail::madfunc_state_v<NodeT>,
                      const std::string& name = "vmra_store") {
 
   if (vmra.empty()) throw std::invalid_argument("make_vmra_store: empty function vector");
@@ -218,14 +231,8 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
     return impl->get_coeffs().owner(key.to_madness_key());
   };
 
-  if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
-    for (auto& fn : vmra) {
-      fn.get_impl()->set_tree_state(madness::TreeState::compressed);
-    }
-  } else {
-    for (auto& fn : vmra) {
-      fn.get_impl()->set_tree_state(madness::TreeState::reconstructed);
-    }
+  for (auto& fn : vmra) {
+    fn.get_impl()->set_tree_state(tree_state);
   }
 
   auto store_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
