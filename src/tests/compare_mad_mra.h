@@ -11,6 +11,19 @@
 #include <array>
 #include <stdexcept>
 
+#include <unordered_map>
+
+namespace std {
+
+    // Needed to use madness::Key<NDIM> as a key in std::unordered_map
+    template <>
+    struct hash<madness::Key<3>> {
+        std::size_t operator()(const madness::Key<3>& k) const {
+            return k.hash();
+        }
+    };
+} // namespace madness
+
 namespace mra {
 
   namespace detail {
@@ -166,39 +179,53 @@ namespace mra {
   template<typename T, std::size_t NDIM>
   inline void compare_mra_madness(const std::vector<madness::Function<T, NDIM>>& madfunc1,
                                   const std::vector<madness::Function<T, NDIM>>& madfunc2,
-                                  const std::string name, T precision = 1e-15)
+                                  const std::string name, T precision = 1e-15,
+                                  bool fail_on_mismatch = false)
   {
     if (madfunc1.size() != madfunc2.size()) {
       std::cout << name << ": number of functions in MADNESS vector 1 (" << madfunc1.size() << ") does not match number of functions in MADNESS vector 2 (" << madfunc2.size() << ")" << std::endl;
-      throw std::runtime_error(name + ": mismatch in number of functions between MADNESS vectors");
+      if (fail_on_mismatch) {
+        throw std::runtime_error(name + ": mismatch in number of functions between MADNESS vectors");
+      }
     }
     for (std::size_t i = 0; i < madfunc1.size(); ++i) {
-      auto tree1_size = madfunc1[i].get_impl()->tree_size();
-      auto tree2_size = madfunc2[i].get_impl()->tree_size();
+      auto impl1 = madfunc1[i].get_impl();
+      auto impl2 = madfunc2[i].get_impl();
+      if (impl1->get_k() != impl2->get_k()) {
+        std::cout << name << ": MADNESS function " << i << " in vector 1 has k=" << impl1->get_k() << " but in vector 2 has k=" << impl2->get_k() << std::endl;
+        if (fail_on_mismatch) {
+          throw std::runtime_error(name + ": mismatch in k between MADNESS vectors");
+        }
+      }
+      auto tree1_size = impl1->tree_size();
+      auto tree2_size = impl2->tree_size();
       if (tree1_size != tree2_size) {
         std::cout << name << ": MADNESS function " << i << " in vector 1 has "
         << tree1_size << " nodes but in vector 2 has "
         << tree2_size << " nodes" << std::endl;
-        throw std::runtime_error(name + ": mismatch in tree size between MADNESS vectors");
       }
     }
     bool check = true;
     for (std::size_t i = 0; i < madfunc1.size(); ++i) {
-      // TODO: check that both trees are in the same state
-      if (madfunc1[i].get_impl()->get_tree_state() != madfunc2[i].get_impl()->get_tree_state()) {
+      std::unordered_map<madness::Key<NDIM>, bool> node_seen_map;
+      auto impl1 = madfunc1[i].get_impl();
+      auto impl2 = madfunc2[i].get_impl();
+      if (impl1->get_tree_state() != impl2->get_tree_state()) {
         std::cout << name << ": MADNESS function " << i << " in vector 1 is in state "
                   << detail::madfunc_state(madfunc1[i]) << " but in vector 2 is in state "
                   << detail::madfunc_state(madfunc2[i]) << std::endl;
         check = false;
         continue;
       }
-      for (auto& node1 : madfunc1[i].get_impl()->get_coeffs()) {
-        auto node2 = madfunc2[i].get_impl()->get_coeffs().find(node1.first);
-        if (node2.get() == madfunc2[i].get_impl()->get_coeffs().end()) {
+      for (auto& node1 : impl1->get_coeffs()) {
+        auto node2 = impl2->get_coeffs().find(node1.first);
+        if (node2.get() == impl2->get_coeffs().end()) {
           std::cout << name << ": node " << node1.first << " in MADNESS vector 1 function " << i << " (norm " << node1.second.coeff().normf() << ") not found in MADNESS vector 2" << std::endl;
           check = false;
           continue;
         }
+
+        node_seen_map[node1.first] = true;
 
         if (node2.get()->second.has_children() != node1.second.has_children()) {
           std::cout << name << ": node " << node1.first << " in MADNESS vector 1 function " << i
@@ -212,14 +239,26 @@ namespace mra {
         auto norm2 = node2.get()->second.coeff().normf();
         if (std::abs(norm1 - norm2) > precision) {
           std::cout << name << ": node " << node1.first << " in MADNESS function " << i
-                    << " has norm " << norm1 << " in vector 1 but norm " << norm2 << " in vector 2" << std::endl;
+                    << " has norm " << norm1 << " in vector 1 but norm " << norm2 << " in vector 2 (absdiff "
+                    << std::abs(norm1 - norm2) << ")" << std::endl;
+          check = false;
+          continue;
+        }
+      }
+
+      // check if all nodes in vector 2 are in vector 1
+      for (auto& node2 : impl2->get_coeffs()) {
+        if (node_seen_map.find(node2.first) == node_seen_map.end()) {
+          std::cout << name << ": node " << node2.first << " in MADNESS vector 2 function " << i << " (norm " << node2.second.coeff().normf() << ") not found in MADNESS vector 1" << std::endl;
           check = false;
           continue;
         }
       }
     }
     if (!check) {
-      throw std::runtime_error(name + ": mismatch in norms between MADNESS vectors");
+      if (fail_on_mismatch) {
+        throw std::runtime_error(name + ": mismatch in MADNESS vectors");
+      }
     } else {
       std::cout << name << ": all nodes match between MADNESS vectors" << std::endl;
     }
