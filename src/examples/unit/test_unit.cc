@@ -44,7 +44,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   // put it into a buffer
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
-  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), 0, 1.0, project_control, project_result);
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result);
   auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result);
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_result, compress_result, gaxpy_result);

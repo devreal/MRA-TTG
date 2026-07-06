@@ -30,6 +30,8 @@ namespace mra{
     int max_level,
     const mra::FunctionData<T, NDIM>& functiondata,
     const T thresh, /// should be scalar value not complex
+    const int truncate_mode,
+    const T cell_min_width,
     ttg::Edge<mra::Key<NDIM>, void> control,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> result,
     const char *name = "project",
@@ -55,7 +57,7 @@ namespace mra{
     auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn), ttg::edges(control), edges(refine), std::string(name) + "-dispatch");
 
     /* create a non-owning buffer for domain and capture it */
-    auto fn = [&, K, max_level, thresh, gl = mra::GLbuffer<T>(), fns, name]
+    auto fn = [&, K, max_level, thresh, truncate_mode, cell_min_width, gl = mra::GLbuffer<T>(), fns, name]
               (const mra::Key<NDIM>& key, const LeafInfo& leaf_info) -> TASKTYPE {
       using key_type = typename mra::Key<NDIM>;
       using node_type = typename mra::FunctionsReconstructedNode<T, NDIM>;
@@ -95,7 +97,7 @@ namespace mra{
       } else {
         bool all_negligible = true;
         bool all_leaf_or_invalid = true;
-        auto trunc = mra::truncate_tol(key,thresh);
+        auto trunc = mra::truncate_tol(key,thresh,cell_min_width,truncate_mode);
         LeafInfo result_leaf_info;
         auto leaf_info_view = leaf_info.current_view();
         for (std::size_t i = 0; i < N; ++i) {
@@ -172,7 +174,8 @@ namespace mra{
           /* submit the kernel */
           submit_fcoeffs_kernel(domain, gldata, fn_view, key, K, tmp_device,
                                 phibar_view, hgT_view, coeffs_view,
-                                thresh, leaf_info_view, result_leaf_info_view,
+                                thresh, trunc,
+                                leaf_info_view, result_leaf_info_view,
                                 ttg::device::current_stream());
 
           result_norms.compute();

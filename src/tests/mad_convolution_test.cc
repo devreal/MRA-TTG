@@ -130,7 +130,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
   auto db               = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start            = make_start(gaussians, project_control);
-  auto project          = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
+  auto project          = make_project(db, gaussians, K, max_level, functiondata, precision, 0, 1.0, project_control, project_result);
   auto extract_project  = make_extract(project_result, projmap, "extract_project");
   auto compress         = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress");
   auto extract_compress = make_extract(compress_result, cmap, "extract_compress");
@@ -138,7 +138,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   auto extract_reconstruct = make_extract(reconstruct_result, rmap, "extract_reconstruct");
   auto compress_r       = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_r_result, "compress_nonstandard");
   auto extract_ns       = make_extract(compress_r_result, nsmap, "extract_ns");
-  auto convolve         = make_convolution(gaussians, K, compress_r_result, convolution_result, op, precision, "convolution");
+  auto convolve         = make_convolution(gaussians, K, compress_r_result, convolution_result, op, precision, 0, 1.0, "convolution");
   auto extract_conv     = make_extract(convolution_result, convmap, "extract_conv");
   auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
   auto extract_rconv    = make_extract(reconstruct_conv_result, rconvmap, "extract_rconv");

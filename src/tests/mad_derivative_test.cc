@@ -311,7 +311,7 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
   // auto start_d = make_start(project_d_control);
-  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, 0, 1.0, project_control, project_result, "project", pmap, dmap);
   auto extract_p = make_extract(project_result, project_result_map, "extract_p");
   // C(P)
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress", pmap, dmap);

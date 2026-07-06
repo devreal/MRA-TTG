@@ -83,7 +83,7 @@ namespace mra{
     const T* gldata,
     const functorT& f,
     const Key<NDIM>& key,
-    const T thresh,
+    const T truncate_tol,
     // output
     concepts::TensorView<3> auto& values,
     size_type K,
@@ -91,7 +91,7 @@ namespace mra{
     concepts::TensorView<2> auto& x,
     concepts::TensorView<2> auto& xvec)
   {
-    if (is_negligible(f, D.template bounding_box<T>(key), truncate_tol(key,thresh))) {
+    if (is_negligible(f, D.template bounding_box<T>(key), truncate_tol)) {
         values = 0.0;
         /* TensorView assigment synchronizes */
     }

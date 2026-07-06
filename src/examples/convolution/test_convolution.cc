@@ -65,7 +65,7 @@ void test_convolution(int nrep, int N, int K, int Nop,
   // auto gauss_deriv_buffer = ttg::Buffer<mra::GaussianDerivative<T, NDIM>>(std::move(gaussians_deriv), N);
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
-  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, 0, 1.0, project_control, project_result);
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress");
 
   auto convolution = make_convolution(gaussians, K, compress_result, compress_convolution_result, op, precision, "convolution");

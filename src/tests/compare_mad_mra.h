@@ -22,7 +22,7 @@ namespace std {
             return k.hash();
         }
     };
-} // namespace madness
+} // namespace std
 
 namespace mra {
 

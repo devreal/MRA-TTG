@@ -49,14 +49,15 @@ namespace mra {
       const concepts::TensorView<2> auto& hgT,
       /* result */
       concepts::TensorView<NDIM> auto& coeffs,
-      T thresh)
+      T thresh,
+      T truncate_tol)
     {
 
       /* compute all children */
       for (int bid = 0; bid < key.num_children(); bid++) {
         Key<NDIM> child = key.child_at(bid);
         child_values = 0.0; // TODO: needed?
-        fcube(D, gldata, f, child, thresh, child_values, K, x, x_vec);
+        fcube(D, gldata, f, child, truncate_tol, child_values, K, x, x_vec);
         transform(child_values, phibar, r0, workspace);
         auto child_slice = get_child_slice<NDIM>(key, K, bid);
         values(child_slice) = r0;
@@ -74,7 +75,7 @@ namespace mra {
       /* TensorView assignment synchronizes */
       T norm = mra::normf(r1);
       //std::cout << "project norm " << norm << " thresh " << thresh << std::endl;
-      bool is_leaf_val = (norm < mra::truncate_tol(key,thresh));
+      bool is_leaf_val = (norm < truncate_tol);
       return is_leaf_val;
     }
 
@@ -92,6 +93,7 @@ namespace mra {
       const concepts::TensorView<2> auto hgT_view,
       concepts::TensorView<NDIM+1> auto coeffs_view,
       T thresh,
+      T truncate_tol,
       const DenseTensorView<LeafStatus, 1> leaf_info_view,
       DenseTensorView<LeafStatus, 1> result_leaf_info_view)
     {
@@ -114,11 +116,10 @@ namespace mra {
         workspace    = &block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM+NDIM*K];
       }
 
-      /* carry over leaf info */
-      result_leaf_info_view = leaf_info_view;
-
       /* adjust pointers for the function of each block */
       for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x) {
+        /* carry over leaf info */
+        if (is_team_lead()) result_leaf_info_view[fnid] = leaf_info_view[fnid];
         auto& f = fns(fnid);
         // if we have seen a leaf for this function, skip and set the status to Invalid
         if (leaf_info_view(fnid) == LeafStatus::Leaf || leaf_info_view(fnid) == LeafStatus::Invalid) {
@@ -137,10 +138,10 @@ namespace mra {
           }
           continue;
         }
-        if (is_negligible<Fn,T,NDIM>(f, D.template bounding_box<T>(key), mra::truncate_tol(key,thresh))) {
+        if (is_negligible<Fn,T,NDIM>(f, D.template bounding_box<T>(key), truncate_tol)) {
           /* set leaf status to Inner */
           if (is_team_lead()) {
-            //std::cout << "FCOEFFS: key " << key << " negligible with tol " << mra::truncate_tol(key,thresh) << std::endl;
+            //std::cout << "FCOEFFS: key " << key << " negligible with tol " << truncate_tol << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Invalid;
             /* zero coeffs */
             coeffs_view.set_zero(fnid);
@@ -158,7 +159,7 @@ namespace mra {
         SYNCTHREADS();
         bool is_leaf_val = fcoeffs_kernel_impl(D, gldata, f, key, K, fnid,
                             values, r0, r1, child_values, x_vec, x, workspace,
-                            phibar_view, hgT_view, coeffs, thresh);
+                            phibar_view, hgT_view, coeffs, thresh, truncate_tol);
         if (is_team_lead()) {
           if (is_leaf_val) {
             //std::cout << "FCOEFFS: key " << key << " function " << fnid << " is a leaf, zeroing coeffs" << std::endl;
@@ -188,6 +189,7 @@ namespace mra {
       const concepts::TensorView<2> auto& hgT_view,
       concepts::TensorView<NDIM+1> auto& coeffs_view,
       T thresh,
+      T truncate_tol,
       const DenseTensorView<LeafStatus, 1>& leaf_info_view,
       DenseTensorView<LeafStatus, 1>& result_leaf_info_view,
       ttg::device::Stream stream)
@@ -205,7 +207,7 @@ namespace mra {
     CALL_KERNEL(detail::fcoeffs_kernel, fns.size(), thread_dims, smem_size, stream,
       (D, gldata, fns, key, K, tmp,
        phibar_view, hgT_view, coeffs_view,
-       thresh, leaf_info_view, result_leaf_info_view));
+       thresh, truncate_tol, leaf_info_view, result_leaf_info_view));
     checkSubmit();
   }
 

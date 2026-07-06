@@ -70,7 +70,7 @@ void test_pcr(std::size_t N, std::size_t K,
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
   all_tts.push_back(start.get());
-  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), 0, 1.0, project_control, project_result, "project", pmap, dmap);
 
   all_tts.push_back(project.get());
   // C(P)

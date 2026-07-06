@@ -54,7 +54,7 @@ void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axi
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
   // auto start_d = make_start(project_d_control);
-  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, project_control, project_result, "project", pmap, dmap);
+  auto project = make_project(db, gaussians, K, max_level, functiondata, precision, 0, 1.0, project_control, project_result, "project", pmap, dmap);
   // C(P)
   auto compress = make_compress(gaussians, K, false, functiondata, project_result, compress_result, "compress", pmap, dmap);
   // // R(C(P))

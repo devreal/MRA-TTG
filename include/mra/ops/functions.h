@@ -15,8 +15,47 @@ namespace mra {
 
     /// In given box return the truncation tolerance for given threshold
     template <typename T, Dimension NDIM>
-    SCOPE T truncate_tol(const Key<NDIM>& key, const T thresh) {
-        return thresh; // nothing clever for now
+    SCOPE T truncate_tol(const Key<NDIM>& key, const T thresh, T cell_min_width, int truncate_mode = 0) {
+
+        // RJH ... introduced max level here to avoid runaway
+        // refinement due to truncation threshold going down to
+        // intrinsic numerical error
+        const Level MAXLEVEL1 = 20; // 0.5**20 ~= 1e-6
+        const Level MAXLEVEL2 = 10; // 0.25**10 ~= 1e-6
+
+        if (truncate_mode == 0) {
+            return thresh;
+        }
+        else if (truncate_mode == 1) {
+            double L = cell_min_width;
+            return thresh*std::min(1.0,pow(0.5,double(std::min(key.level(),MAXLEVEL1)))*L);
+        }
+        else if (truncate_mode == 2) {
+            double L = cell_min_width;
+            return thresh*std::min(1.0,pow(0.25,double(std::min(key.level(),MAXLEVEL2)))*L*L);
+        }
+        else if (truncate_mode == 3) {
+            // similar to truncate mode 1, but with an additional factor to
+            // account for an increased number of boxes in higher dimensions
+
+            // here is our handwaving argument: this threshold will give each
+            // FunctionNode an error of less than thresh. The total error can
+            // then be as high as sqrt(#nodes) * thresh. Therefore in order to
+            // account for higher dimensions: divide thresh by about the root of
+            // number of siblings (2^NDIM) that have a large error when we
+            // refine along a deep branch of the tree. FAB
+            //
+            // Nope ... it can easily be as high as #nodes * tol.  The real
+            // fix for this is an end-to-end error analysis of the larger
+            // application and if desired to include this factor into the
+            // threshold selected by the application. RJH
+            const static double fac=1.0/std::pow(2,NDIM*0.5);
+            double L = cell_min_width;
+            return thresh*fac*std::min(1.0,pow(0.5,double(std::min(key.level(),MAXLEVEL1)))*L);
+
+        } else {
+            throw std::runtime_error("truncate_tol: unknown truncate mode " + std::to_string(truncate_mode));
+        }
     }
 
     // volume of n-dimensional sphere of radius R

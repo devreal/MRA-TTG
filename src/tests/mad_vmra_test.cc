@@ -140,7 +140,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     auto load_tt          = mra::vmra::make_vmra_load(madfunc, load_control, load_vmra, "load_vmra");
     auto compress         = make_compress(gaussians, K, true, functiondata, load_vmra, compress_result, "compress");
     auto extract          = mra::vmra::make_vmra_store(madfunc_mra, compress_result, madness::TreeState::nonstandard, "store_func");
-    auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, "convolution");
+    auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, 0, 1.0, "convolution");
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
     auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, reconstruct_conv_result, madness::TreeState::reconstructed, "store_conv");
     auto connected        = make_graph_executable(start.get());
@@ -194,7 +194,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     all_tts.push_back(reconstruct.get());
     auto compress_ns      = make_compress(gaussians, K, true, functiondata, reconstruct_result, compress_result, "compress");
     all_tts.push_back(compress_ns.get());
-    auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, "convolution");
+    auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, 0, 1.0, "convolution");
     all_tts.push_back(convolve.get());
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
     all_tts.push_back(reconstruct_conv.get());

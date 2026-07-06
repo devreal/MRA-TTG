@@ -87,6 +87,8 @@ namespace mra {
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> result,
                         const mra::GaussianConvolutionOperator<T, NDIM>& op,
                         const T thresh,
+                        const int truncate_mode,
+                        const T cell_min_width,
                         const std::string& name = "convolution",
                         ProcMap procmap = {},
                         DeviceMap devicemap = {}) {
@@ -405,7 +407,7 @@ namespace mra {
      *       Taking the raw pointer here is a dirty hack!
      */
     auto screener_tt = ttg::make_tt<Space>(
-      [&, K, thresh, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
+      [&, K, thresh, truncate_mode, cell_min_width, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
                               const mra::Key<NDIM>& key,
                               const mra::FunctionsCompressedNode<T, NDIM>& in_node,
                               const DenseTensor<T, 1>& cnorms) -> TASKTYPE {
@@ -432,7 +434,7 @@ namespace mra {
 
         if (!in_node.empty()){
 
-          const double tol = truncate_tol(key, thresh);
+          const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
 
           /**
            * Compute the cnorm using the norm kernel.
@@ -525,7 +527,7 @@ namespace mra {
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
     auto shell0_tt = ttg::make_tt<Space>(
-      [&, K, fac, thresh, name](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
@@ -564,7 +566,7 @@ namespace mra {
         mra::apply_leaf_info(out, in_node);
 
         DenseTensor<T, 1> resnorms(N, TempScope);
-        T tol = truncate_tol(key, thresh);
+        T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
@@ -699,7 +701,7 @@ namespace mra {
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
-      [&, K, fac, thresh, name](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
@@ -748,7 +750,7 @@ namespace mra {
       mra::apply_leaf_info(out, in_node);
 
       DenseTensor<T, 1> resnorms;
-      T tol = truncate_tol(key, thresh);
+      const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
       // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 

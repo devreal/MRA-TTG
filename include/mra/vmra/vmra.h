@@ -161,7 +161,7 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
             const madness::Key<NDIM> mad_child_key = child.to_madness_key();
             auto child_acc = coeffs.find(mad_child_key);
             if (child_acc.get() != coeffs.end() && child_acc.get()->second.is_leaf()) {
-              std::cout << "LOAD " << key << " setting child " << child << " leaf for fnid " << fnid << std::endl;
+              //std::cout << "LOAD " << key << " setting child " << child << " leaf for fnid " << fnid << std::endl;
               result.set_child_leaf(fnid, child, true);
               assert(child_acc.get()->second.coeff().size() == 0);
             }
