@@ -187,7 +187,7 @@ namespace mra{
         work2_k = DenseTensorView<T, NDIM>(work2.data(), K);
       }
 
-      size_type rank = transr[0].dim(0); // doing computation assuming full rank
+      const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
 
       T optol = 0.01*tol/rank; // can potentially be a parameter
 

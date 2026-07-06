@@ -24,6 +24,7 @@ namespace mra {
     Fac,
     MUnorm,
     Opnorm, // overall operator norm
+    Rank,   // stored rank of the operator
     Count
   };
 
@@ -153,8 +154,9 @@ namespace mra {
             norms_view(c, i, d, (int)NormId::Snormf) = cd_mad->Tnormf;
             norms_view(c, i, d, (int)NormId::NSnormf) = cd_mad->NSnormf;
           }
-          norms_view(c, i, 0, (int)NormId::Fac) = mad_ops[i].getfac();
-          norms_view(c, i, 0, (int)NormId::MUnorm) = munorm2_ns(c, n, i, data);
+          auto fac = mad_ops[i].getfac();
+          norms_view(c, i, 0, (int)NormId::Fac) = fac;
+          norms_view(c, i, 0, (int)NormId::MUnorm) = munorm2_ns(c, n, i, data) * std::abs(fac);
         }
         for (; i < m_max_rank; ++i) {
           for (int d = 0; d < NDIM; ++d) {
@@ -170,6 +172,7 @@ namespace mra {
         /* Finally, store the norm of the whole operator */
         T norm = m_mad_conv_sep_vec[c]->norm(n, disp.to_madness_key(), disp.to_madness_key());
         norms_view(c, 0, 0, (int)NormId::Opnorm) = norm;
+        norms_view(c, 0, 0, (int)NormId::Rank) = mad_ops.size();
       }
       it = _datacache.find(key);
       if (it != _datacache.end()) {
