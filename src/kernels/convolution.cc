@@ -4,6 +4,7 @@
 
 namespace mra {
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   template
   void submit_convolution_kernel<double, 3>(
     Key<3> key,
@@ -22,5 +23,6 @@ namespace mra {
     const std::array<bool, 2>& at,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra

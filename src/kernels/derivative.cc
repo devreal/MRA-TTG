@@ -4,6 +4,7 @@
 
 namespace mra {
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   template
   void submit_derivative_kernel<double, 3>(
     const Domain<3>& D,
@@ -28,5 +29,6 @@ namespace mra {
     const int bc_left,
     const int bc_right,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra

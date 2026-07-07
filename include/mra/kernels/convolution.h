@@ -388,6 +388,7 @@ namespace mra{
   }
 
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instantiation */
   extern template
   void submit_convolution_kernel<double, 3>(
@@ -407,6 +408,7 @@ namespace mra{
     const std::array<bool, 2>& at,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

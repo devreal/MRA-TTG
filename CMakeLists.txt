@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.19)
 project(MRA-TTG VERSION 0.1.0 LANGUAGES CXX)
 
 option(MRA_ENABLE_DEBUG "Whether to enable debug mode" OFF)
+option(MRA_ENABLE_EXPLICIT_INSTANTIATION "Whether to explicitly instantiate kernels in src/kernels/*.cc (some CUDA compilers fail on this)" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 

@@ -377,6 +377,7 @@ namespace mra {
     checkSubmit();
   }
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instanatiation */
   extern template
   void submit_derivative_kernel<double, 3>(
@@ -402,6 +403,7 @@ namespace mra {
     const int bc_left,
     const int bc_right,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

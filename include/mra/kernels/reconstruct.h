@@ -163,6 +163,7 @@ namespace mra {
   }
 
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit declaration */
   extern template
   void submit_reconstruct_kernel<double, 3>(
@@ -177,6 +178,7 @@ namespace mra {
     SparseTensorView<double, 3+1>& result,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

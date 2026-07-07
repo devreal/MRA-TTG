@@ -11,6 +11,9 @@ target_link_libraries(mra-base INTERFACE
   $<$<TARGET_EXISTS:blaspp>:blaspp>
 )
 target_compile_definitions(mra-base INTERFACE TTG_USE_PARSEC=1)
+if (MRA_ENABLE_EXPLICIT_INSTANTIATION)
+  target_compile_definitions(mra-base INTERFACE MRA_ENABLE_EXPLICIT_INSTANTIATION=1)
+endif()
 
 include(MRAGPUWrappers)
 

@@ -4,6 +4,7 @@
 
 namespace mra {
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   template
   void submit_compress_kernel<double, 3>(
     const Key<3>& key,
@@ -18,5 +19,6 @@ namespace mra {
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra

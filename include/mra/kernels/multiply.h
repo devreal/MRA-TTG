@@ -166,6 +166,7 @@ namespace mra {
     checkSubmit();
   }
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instanatiation */
   extern template
   void submit_multiply_kernel<double, 3>(
@@ -184,6 +185,7 @@ namespace mra {
     size_type K,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

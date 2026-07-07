@@ -145,6 +145,7 @@ namespace mra {
   }
 
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
 /* explicit instantiation */
 extern template
 void submit_compress_kernel<double, 3>(
@@ -160,6 +161,7 @@ void submit_compress_kernel<double, 3>(
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 
