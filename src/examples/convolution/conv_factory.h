@@ -24,7 +24,7 @@ namespace mra {
       ops[i].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, madness::LatticeRange()));
     }
 
-    return real_convolution_t(world, ops, K);
+    return std::make_shared<real_convolution_t>(world, ops, K);
   }
 
 } // namespace mra

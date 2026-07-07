@@ -145,7 +145,7 @@ void test(World &world, int N, int K, int Nop, int nrep, int seed, int initial_l
   // f.make_nonstandard(false, true);
   // f.compress();
 
-  real_convolution_t op = mra::make_mad_convolution(expnt, K, Nop, world);
+  auto op = mra::make_mad_convolution(expnt, K, Nop, world);
 
   //real_function_t opf = op(f);
 
@@ -159,7 +159,7 @@ void test(World &world, int N, int K, int Nop, int nrep, int seed, int initial_l
       a = random_gaussians(N, world, seed);
     }
     make_nonstandard(world, a, true);
-    auto b = apply(world, op, a);
+    auto b = apply(world, *op, a);
     auto norms = norm2s(world, b);
     end = std::chrono::high_resolution_clock::now();
     if (world.rank() == 0) {

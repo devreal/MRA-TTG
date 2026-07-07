@@ -68,7 +68,7 @@ void test_convolution(int nrep, int N, int K, int Nop,
   auto project = make_project(db, gaussians, K, max_level, functiondata, precision, 0, 1.0, project_control, project_result);
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress");
 
-  auto convolution = make_convolution(gaussians, K, compress_result, compress_convolution_result, op, precision, "convolution");
+  auto convolution = make_convolution(gaussians, K, compress_result, compress_convolution_result, op, precision, 0, 1.0, "convolution");
 
 #if 0
   /**
