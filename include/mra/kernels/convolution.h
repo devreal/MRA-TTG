@@ -46,7 +46,6 @@ namespace mra{
       size_type dimi = size/dimk;
 
       // assume the tensors to be uninitialized
-      result = 0.0;
       work1 = 0.0;
       work2 = 0.0;
 
@@ -198,8 +197,6 @@ namespace mra{
       // TODO: why does this fix correctness?!
       result = 0.0;
       resultc = 0.0;
-      work1 = 0.0;
-      work2 = 0.0;
 
       /**
        * TODO: split this out into two kernels:
@@ -342,6 +339,12 @@ namespace mra{
         if (f_view.is_zero(blockId)) {
           /* copy input to output */
           result = in;
+          if (!resnorms.empty()) {
+            auto resnorm = normf(result);
+            if (is_team_lead()) {
+              resnorms[blockId] = resnorm;
+            }
+          }
           continue;
         }
 

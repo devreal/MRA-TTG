@@ -752,7 +752,6 @@ namespace mra {
       DenseTensor<T, 1> resnorms;
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
-      // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
       auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
 
@@ -808,7 +807,6 @@ namespace mra {
           if (resnorms_host_view(i) != 0.0) {
             assert(out.is_nonzero(i) && "if the norm is non-zero we should have non-zero coefficients");
             empty = false;
-            break;
           } else {
             // TODO: should we allow modifying the sparsity on the host?
             out.set_zero(i);
