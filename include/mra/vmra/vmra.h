@@ -266,6 +266,8 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
             mad_tensor = madness::Tensor<T>(dims);
             auto mra_subview = node.coeffs_view(fnid);
             std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
+          } else if (node.is_invalid(fnid)) {
+            continue; // do not store invalid nodes in MADNESS
           }
 
         } else {
