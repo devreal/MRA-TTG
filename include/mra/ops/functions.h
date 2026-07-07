@@ -15,7 +15,7 @@ namespace mra {
 
     /// In given box return the truncation tolerance for given threshold
     template <typename T, Dimension NDIM>
-    SCOPE T truncate_tol(const Key<NDIM>& key, const T thresh, T cell_min_width, int truncate_mode = 0) {
+    T truncate_tol(const Key<NDIM>& key, const T thresh, T cell_min_width, int truncate_mode = 0) {
 
         // RJH ... introduced max level here to avoid runaway
         // refinement due to truncation threshold going down to
