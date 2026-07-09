@@ -328,6 +328,9 @@ namespace mra{
       for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x) {
         if (result_view.is_zero(blockId)) {
           // nothing to do
+          if (is_team_lead() && !resnorms.empty()) {
+            resnorms[blockId] = 0.0;
+          }
           continue;
         }
         if (is_team_lead()) {
