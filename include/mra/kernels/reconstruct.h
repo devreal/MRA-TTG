@@ -91,7 +91,7 @@ namespace mra {
       const concepts::TensorView<2> auto hg,
       const concepts::TensorView<NDIM+1> auto from_parent_view,
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
-      concepts::TensorView<NDIM+1> auto& result_view)
+      concepts::TensorView<NDIM+1> auto result_view)
     {
       const bool is_t0 = (0 == thread_id());
 
