@@ -570,7 +570,19 @@ namespace mra {
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
+        // Parallelize over the operator's rank-mu terms when there's enough rank/occupancy
+        // headroom to be worth it (see convolution_num_groups()); never on the host backend.
+        size_type nnz = sparsity.count_nonzero();
+        size_type rank = op_data->norms.dim(1);
+        size_type num_groups = convolution_num_groups(nnz, rank);
+
+        mra::SparseTensor<T, NDIM+2> group_partials;
+        if (num_groups > 1) {
+          group_partials = mra::SparseTensor<T, NDIM+2>(sparsity,
+              std::array<size_type, NDIM+2>{N, num_groups, 2*K, 2*K, 2*K}, TempScope);
+        }
+
+        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N * num_groups, TempScope);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -582,6 +594,9 @@ namespace mra {
         for (Dimension d = 0; d < NDIM; ++d) {
           input.add(op_data->data[d]->R.buffer());
           input.add(op_data->data[d]->S.buffer());
+        }
+        if (num_groups > 1) {
+          input.add(group_partials.buffer());
         }
         co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
@@ -599,9 +614,22 @@ namespace mra {
 
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
-                                            in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
-                                            at, tmp.current_device_ptr(), ttg::device::current_stream());
+        if (num_groups > 1) {
+          auto sparseman_gp = make_sparsity_manager(group_partials);
+          sparseman_gp.populate_device_sparsity();
+          auto group_partials_view = group_partials.current_view();
+          submit_convolution_kernel_partials<T, NDIM>(K, N, num_groups, fac, tol, in_node_view,
+                                              transr, transs, opnorms_view, at,
+                                              group_partials_view, tmp.current_device_ptr(),
+                                              ttg::device::current_stream());
+          submit_convolution_kernel_finalize<T, NDIM>(K, N, num_groups, fac, tol,
+                                              /*in_node_view*/ empty_node_view, out_view, resnorms_view,
+                                              group_partials_view, ttg::device::current_stream());
+        } else {
+          submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
+                                              in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
+                                              at, tmp.current_device_ptr(), ttg::device::current_stream());
+        }
 
 #ifndef MRA_ENABLE_HOST
         // wait for the norms to come back
@@ -753,7 +781,19 @@ namespace mra {
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
 
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
+      // Parallelize over the operator's rank-mu terms when there's enough rank/occupancy
+      // headroom to be worth it (see convolution_num_groups()); never on the host backend.
+      size_type nnz = sparsity.count_nonzero();
+      size_type rank = op_data->norms.dim(1);
+      size_type num_groups = convolution_num_groups(nnz, rank);
+
+      mra::SparseTensor<T, NDIM+2> group_partials;
+      if (num_groups > 1) {
+        group_partials = mra::SparseTensor<T, NDIM+2>(sparsity,
+            std::array<size_type, NDIM+2>{N, num_groups, 2*K, 2*K, 2*K}, TempScope);
+      }
+
+      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N * num_groups, TempScope);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -766,6 +806,9 @@ namespace mra {
       for (Dimension d = 0; d < NDIM; ++d) {
         input.add(op_data->data[d]->R.buffer());
         input.add(op_data->data[d]->S.buffer());
+      }
+      if (num_groups > 1) {
+        input.add(group_partials.buffer());
       }
       if (last_key) {
         // if this is the last we want to get the norms of the result back
@@ -785,10 +828,23 @@ namespace mra {
 
       auto sparseman = make_sparsity_manager(out);
       sparseman.populate_device_sparsity();
-      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
-                                          contribution_view, out_view, resnorms_view, transr, transs,
-                                          opnorms_view, at,
-                                          tmp.current_device_ptr(), ttg::device::current_stream());
+      if (num_groups > 1) {
+        auto sparseman_gp = make_sparsity_manager(group_partials);
+        sparseman_gp.populate_device_sparsity();
+        auto group_partials_view = group_partials.current_view();
+        submit_convolution_kernel_partials<T, NDIM>(K, N, num_groups, fac, tol, contribution_view,
+                                            transr, transs, opnorms_view, at,
+                                            group_partials_view, tmp.current_device_ptr(),
+                                            ttg::device::current_stream());
+        submit_convolution_kernel_finalize<T, NDIM>(K, N, num_groups, fac, tol, in_node_view,
+                                            out_view, resnorms_view, group_partials_view,
+                                            ttg::device::current_stream());
+      } else {
+        submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
+                                            contribution_view, out_view, resnorms_view, transr, transs,
+                                            opnorms_view, at,
+                                            tmp.current_device_ptr(), ttg::device::current_stream());
+      }
 
 #ifndef MRA_ENABLE_HOST
       // wait for norms to come back

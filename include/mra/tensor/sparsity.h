@@ -519,7 +519,7 @@ namespace mra {
 
   private:
     class sparsity_iterator {
-      using iter_type = typename std::vector<detail::Range>::iterator;
+      using iter_type = typename std::vector<detail::Range>::const_iterator;
       iter_type m_iter, m_end;
       size_type m_id = 0;
 

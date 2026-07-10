@@ -26,6 +26,32 @@ namespace mra{
     return 3*TWOK2NDIM + 2*K2NDIM; // resultc, result, f, work1, work2
   }
 
+  /**
+   * Heuristic choosing how many thread-blocks ("groups") should split the rank-mu terms
+   * of a convolution operator between them: convolution_kernel_partials computes each
+   * group's contribution independently (in its own thread-block), and a second, cheap
+   * kernel (convolution_kernel_finalize) sums the groups and applies the result.
+   *
+   * Capped so that nnz * num_groups never exceeds 512 total thread-blocks for
+   * convolution_kernel_partials -- a soft cap to avoid over-subdividing when there's
+   * already enough parallelism from the number of functions, not a hard occupancy limit
+   * (unlike a cooperative launch, this kernel has no residency requirement). Never
+   * parallelizes over mu on the host backend, where there is no thread-block concept to
+   * split across.
+   */
+  SCOPE size_type convolution_num_groups(size_type nnz, size_type rank) {
+#if defined(MRA_ENABLE_HOST)
+    return 1;
+#else
+    if (nnz == 0) return 1;
+    size_type occupancy_cap = std::max<size_type>(1, 512 / nnz);
+    size_type groups = std::min(occupancy_cap, rank);
+    size_type pow2 = 1;
+    while (pow2 * 2 <= groups) pow2 *= 2; // round down to a power of two for a clean tree reduction
+    return pow2;
+#endif
+  }
+
   namespace detail {
 
     template <typename T, Dimension NDIM>
@@ -161,10 +187,19 @@ namespace mra{
     }
 
 
+    /**
+     * Applies the mu-terms [mu_lo, mu_hi) of the operator's separated rank expansion to `f`,
+     * accumulating their sum into `result`. `apply_conv` (below) calls this with the full
+     * [0, rank) range for the sequential per-function kernel; convolution_kernel_partials
+     * calls it with a sub-range assigned to one thread-block "group" so that groups can be
+     * computed independently and summed by a later, separate kernel.
+     */
     template<typename T, Dimension NDIM>
-    DEVSCOPE void apply_conv(
+    DEVSCOPE void apply_conv_range(
       int opid,
       size_type K,
+      size_type mu_lo,
+      size_type mu_hi,
       const T fac,
       const T tol,
       const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
@@ -186,7 +221,7 @@ namespace mra{
         work2_k = DenseTensorView<T, NDIM>(work2.data(), K);
       }
 
-      const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
+      const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // full rank, used to scale the per-term error budget
 
       T optol = 0.01*tol/rank; // can potentially be a parameter
 
@@ -198,17 +233,11 @@ namespace mra{
       result = 0.0;
       resultc = 0.0;
 
-      /**
-       * TODO: split this out into two kernels:
-       *  - one kernel that computes the contributions for each muop separately
-       *  - one that accumulates the contributions and applies the aggressive screening analogous to MADNESS
-       * That way we gain significant parallelism even for small N.
-       */
-      for (int mu = 0; mu < rank; ++mu) {
+      for (size_type mu = mu_lo; mu < mu_hi; ++mu) {
         T munorm = opnorms(opid, mu, 0, (size_type)NormId::MUnorm);
         if (munorm > optol) {
-          T fac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
-          muopxv_fast<T, NDIM>(opid, K, mu, fac, tol/std::abs(fac), at, transr, transs, opnorms, f, f0,
+          T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
+          muopxv_fast<T, NDIM>(opid, K, mu, mufac, tol/std::abs(mufac), at, transr, transs, opnorms, f, f0,
                                resultc, result, work1, work2, work1_k, work2_k);
         }
       }
@@ -219,6 +248,67 @@ namespace mra{
       //});
       result(s0) += resultc;
 
+    }
+
+    template<typename T, Dimension NDIM>
+    DEVSCOPE void apply_conv(
+      int opid,
+      size_type K,
+      const T fac,
+      const T tol,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<4> auto& opnorms,
+      const std::array<bool, 2>& at,
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,  // size K, stores the sum
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2)
+    {
+      const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank);
+      apply_conv_range<T, NDIM>(opid, K, 0, rank, fac, tol, transr, transs, opnorms, at,
+                                f, f0, resultc, result, work1, work2);
+    }
+
+    /**
+     * Combines a (fully summed) convolution result with the pre-existing `in` node and
+     * applies the aggressive-screening threshold, writing the final per-function norm to
+     * `resnorm_out` (if non-null). Shared by the sequential convolution_kernel_impl and by
+     * convolution_kernel_finalize (the second half of the two-kernel grouped path).
+     */
+    template <typename T, Dimension NDIM>
+    DEVSCOPE void convolution_finalize(
+      const T fac,
+      const T tol,
+      const concepts::TensorView<NDIM> auto& in,
+      concepts::TensorView<NDIM> auto& result,
+      T* resnorm_out)
+    {
+      T resnorm = normf(result);
+      bool above_threshold = (resnorm > (0.3 * tol / fac));
+
+      // Accumulate input if not empty
+      if (!in.empty()) {
+        if (above_threshold) {
+          /* add input values */
+          result += in;
+        } else {
+          /* if input is empty, we can just copy the result to it */
+          result = in;
+        }
+        resnorm = normf(result);
+      } else if (!above_threshold) {
+        /* if input is empty and result is below threshold, we can just leave it zero */
+        result = 0.0;
+        resnorm = 0.0;
+      }
+      if (resnorm_out != nullptr) {
+        if (is_team_lead()) {
+          *resnorm_out = resnorm;
+        }
+      }
     }
 
     template <typename T, Dimension NDIM>
@@ -243,48 +333,20 @@ namespace mra{
       T* resnorm_out)
     {
       SYNCTHREADS();
-      T normthresh = 1e-20; // Can potentially be a parameter
       const T cnorm = mra::normf(f);
-      T resnorm = 0.0;
       T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
 
       //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
-
         apply_conv<T, NDIM>(opid, K, fac, (tol / fac / cnorm), transr, transs,
                    opnorms, at, f, f0, resultc,
                    result, work1, work2);
-
-        resnorm = normf(result);
-      }
-
-      bool above_threshold = (resnorm > (0.3 * tol / fac));
-
-      //std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " cnorm " << cnorm
-      //          << " opnorm " << opnorm << " tol " << tol << " resnorm " << resnorm
-      //          << (above_threshold ? " above threshold" : " below threshold, dropping result") << std::endl;
-
-      // Accumulate input if not empty
-      if (!in.empty()) {
-        if (above_threshold) {
-          /* add input values */
-          result += in;
-        } else {
-          /* if input is empty, we can just copy the result to it */
-          result = in;
-        }
-        resnorm = normf(result);
-      } else if (!above_threshold) {
-        /* if input is empty and result is below threshold, we can just leave it zero */
+      } else {
         result = 0.0;
-        resnorm = 0.0;
       }
-      if (resnorm_out != nullptr) {
-        if (is_team_lead()) {
-          *resnorm_out = resnorm;
-        }
-      }
+
+      convolution_finalize<T, NDIM>(fac, tol, in, result, resnorm_out);
 
       //std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " result " << resnorm << std::endl;
 
@@ -359,6 +421,123 @@ namespace mra{
                                          resnorms.empty() ? nullptr : &resnorms[blockId]);
       }
     }
+
+    /**
+     * Computes each function's contribution to `group_partials`, splitting the rank-mu
+     * terms into gridDim.y independent "groups" (blockIdx.y) so they can be computed in
+     * parallel thread-blocks. This kernel does no cross-block communication (each block
+     * only ever touches its own group_partials slot), so unlike a cooperative-launch
+     * design its grid size is not limited by device occupancy -- convolution_kernel_finalize
+     * (below) sums the groups afterwards in a separate, ordinary kernel launch on the same
+     * stream; ordering between the two is guaranteed by the stream, no explicit sync needed.
+     */
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void convolution_kernel_partials(
+      size_type K,
+      size_type N,
+      const T fac,
+      const T tol,
+      const concepts::TensorView<NDIM+1> auto f_view,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto transs,
+      const concepts::TensorView<4> auto opnorms_view,
+      const std::array<bool, 2> at,
+      concepts::TensorView<NDIM+2> auto group_partials,
+      T* tmp)
+    {
+      SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, group_slot;
+      SHARED DenseTensorView<const T, NDIM> f;
+
+      const size_type num_groups = gridDim.y;
+      const size_type groupId = blockIdx.y;
+      const size_type K2NDIM = std::pow(K, NDIM);
+      const size_type TWOK2NDIM = std::pow(2*K, NDIM);
+
+      for (size_type fnIdx = blockIdx.x; fnIdx < N; fnIdx += gridDim.x) {
+        if (group_partials.is_zero(fnIdx)) {
+          // no function here, or the function's output is entirely zero: nothing to do
+          continue;
+        }
+
+        T* block_tmp_ptr = &tmp[(fnIdx * num_groups + groupId) * convolution_tmp_size<NDIM>(K)];
+        if (is_team_lead()) {
+          f0         = DenseTensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
+          resultc    = DenseTensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
+          work1      = DenseTensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
+          work2      = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
+          group_slot = group_partials(fnIdx, groupId);
+          f          = f_view(fnIdx);
+        }
+        SYNCTHREADS();
+
+        int opid = opnorms_view.dim(0) > 1 ? fnIdx : 0;
+        const T cnorm = mra::normf(f);
+        const T opnorm = opnorms_view(opid, 0, 0, (size_type)NormId::Opnorm);
+
+        if ((cnorm * opnorm) > (tol / fac)) {
+          const T effective_tol = tol / fac / cnorm;
+          const size_type rank = (size_type)opnorms_view(opid, 0, 0, (size_type)NormId::Rank);
+          const size_type mu_lo = (groupId * rank) / num_groups;
+          const size_type mu_hi = ((groupId + 1) * rank) / num_groups;
+          if (mu_lo < mu_hi) {
+            apply_conv_range<T, NDIM>(opid, K, mu_lo, mu_hi, fac, effective_tol,
+                                      transr, transs, opnorms_view, at,
+                                      f, f0, resultc, group_slot, work1, work2);
+          } else {
+            group_slot = 0.0;
+          }
+        } else {
+          group_slot = 0.0;
+        }
+      }
+    }
+
+    /**
+     * Sums the per-group partials computed by convolution_kernel_partials and applies the
+     * aggressive-screening threshold / `in` accumulation (convolution_finalize) -- one thread
+     * block per function, so no cross-block synchronization is needed here either. The extra
+     * kernel-submission cost is negligible next to the parallelism gained in
+     * convolution_kernel_partials for operators with large rank.
+     */
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void convolution_kernel_finalize(
+      size_type N,
+      size_type num_groups,
+      const T fac,
+      const T tol,
+      const concepts::TensorView<NDIM+1> auto in_view,
+      concepts::TensorView<NDIM+1> auto result_view,
+      concepts::TensorView<1> auto resnorms,
+      concepts::TensorView<NDIM+2> auto group_partials)
+    {
+      SHARED DenseTensorView<T, NDIM> result;
+      SHARED DenseTensorView<const T, NDIM> in;
+
+      for (size_type fnIdx = blockIdx.x; fnIdx < N; fnIdx += gridDim.x) {
+        if (result_view.is_zero(fnIdx)) {
+          if (is_team_lead() && !resnorms.empty()) {
+            resnorms[fnIdx] = 0.0;
+          }
+          continue;
+        }
+        if (is_team_lead()) {
+          in     = in_view(fnIdx);
+          result = result_view(fnIdx);
+        }
+        SYNCTHREADS();
+
+        result = group_partials(fnIdx, 0);
+        for (size_type g = 1; g < num_groups; ++g) {
+          axpy_kernel_impl<T, NDIM>(group_partials(fnIdx, g), result, T(1.0));
+        }
+
+        convolution_finalize<T, NDIM>(fac, tol, in, result,
+                                      resnorms.empty() ? nullptr : &resnorms[fnIdx]);
+      }
+    }
+
   } // namespace detail
 
   template <typename T, Dimension NDIM>
@@ -390,6 +569,66 @@ namespace mra{
     checkSubmit();
   }
 
+  /**
+   * Launches convolution_kernel_partials, splitting each function's rank-mu terms across
+   * `num_groups` independent thread-block groups (see convolution_num_groups()).
+   * `group_partials` is the per-group scratch tensor (sized [N, num_groups, 2K, 2K, 2K],
+   * sparse on dim0 -- allocated by the caller using the same SparsityInfo used for
+   * `result_view`). Ordinary (non-cooperative) launch: grid size is only limited by the
+   * heuristic in convolution_num_groups(), not by device occupancy.
+   */
+  template <typename T, Dimension NDIM>
+  void submit_convolution_kernel_partials(
+    size_type K,
+    size_type N,
+    size_type num_groups,
+    const T fac,
+    const T tol,
+    const concepts::TensorView<NDIM+1> auto& f_view,
+    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+    const concepts::TensorView<4> auto& opnorms,
+    const std::array<bool, 2>& at,
+    concepts::TensorView<NDIM+2> auto& group_partials,
+    T* tmp,
+    ttg::device::Stream stream)
+  {
+    Dim3 thread_dims = max_thread_dims(2*K);
+    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    Dim3 grid_dims(N, num_groups, 1);
+
+    CALL_KERNEL((detail::convolution_kernel_partials<T, NDIM>), grid_dims, thread_dims, smem_size, stream,
+                (K, N, fac, tol, f_view, transr, transs, opnorms, at, group_partials, tmp));
+    checkSubmit();
+  }
+
+  /**
+   * Launches convolution_kernel_finalize, summing the `num_groups` per-group partials
+   * computed by submit_convolution_kernel_partials and applying the aggressive-screening
+   * threshold / `in` accumulation. Must be submitted on the same stream as
+   * submit_convolution_kernel_partials, after it -- stream ordering (not an explicit sync)
+   * guarantees group_partials is fully written before this kernel reads it.
+   */
+  template <typename T, Dimension NDIM>
+  void submit_convolution_kernel_finalize(
+    size_type K,
+    size_type N,
+    size_type num_groups,
+    const T fac,
+    const T tol,
+    const concepts::TensorView<NDIM+1> auto& in_view,
+    concepts::TensorView<NDIM+1> auto& result_view,
+    concepts::TensorView<1> auto& resnorms,
+    const concepts::TensorView<NDIM+2> auto& group_partials,
+    ttg::device::Stream stream)
+  {
+    Dim3 thread_dims = max_thread_dims(2*K);
+
+    CALL_KERNEL((detail::convolution_kernel_finalize<T, NDIM>), N, thread_dims, 0, stream,
+                (N, num_groups, fac, tol, in_view, result_view, resnorms, group_partials));
+    checkSubmit();
+  }
+
 
 #if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instantiation */
@@ -410,6 +649,35 @@ namespace mra{
     const DenseTensorView<double, 4>& opnorms,
     const std::array<bool, 2>& at,
     double* tmp,
+    ttg::device::Stream stream);
+
+  extern template
+  void submit_convolution_kernel_partials<double, 3>(
+    size_type K,
+    size_type N,
+    size_type num_groups,
+    const double fac,
+    const double tol,
+    const SparseTensorView<double, 3+1>& f,
+    const std::array<SparseTensorView<double, 4>, 3>& transr,
+    const std::array<SparseTensorView<double, 4>, 3>& transs,
+    const DenseTensorView<double, 4>& opnorms,
+    const std::array<bool, 2>& at,
+    SparseTensorView<double, 3+2>& group_partials,
+    double* tmp,
+    ttg::device::Stream stream);
+
+  extern template
+  void submit_convolution_kernel_finalize<double, 3>(
+    size_type K,
+    size_type N,
+    size_type num_groups,
+    const double fac,
+    const double tol,
+    const SparseTensorView<double, 3+1>& in,
+    SparseTensorView<double, 3+1>& result,
+    SparseTensorView<double, 1>& resnorms,
+    const SparseTensorView<double, 3+2>& group_partials,
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
