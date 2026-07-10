@@ -510,7 +510,7 @@ namespace mra{
       const concepts::TensorView<NDIM+1> auto in_view,
       concepts::TensorView<NDIM+1> auto result_view,
       concepts::TensorView<1> auto resnorms,
-      concepts::TensorView<NDIM+2> auto group_partials)
+      const concepts::TensorView<NDIM+2> auto group_partials)
     {
       SHARED DenseTensorView<T, NDIM> result;
       SHARED DenseTensorView<const T, NDIM> in;
@@ -527,8 +527,8 @@ namespace mra{
           result = result_view(fnIdx);
         }
         SYNCTHREADS();
-
-        result = group_partials(fnIdx, 0);
+        auto p = group_partials(fnIdx, 0);
+        result = p;
         for (size_type g = 1; g < num_groups; ++g) {
           axpy_kernel_impl<T, NDIM>(group_partials(fnIdx, g), result, T(1.0));
         }
