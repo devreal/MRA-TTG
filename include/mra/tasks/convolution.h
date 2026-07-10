@@ -38,7 +38,10 @@ namespace mra {
 
       auto operator<=>(const KeyPair&) const = default;
       auto hash() const {
-        return source.hash() + dest.hash(); // TODO: make this better
+        HashValue hashvalue = source.level() ^ (static_cast<HashValue>(source.batch())<<48);
+        for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | source.translation()[d];
+        for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | dest.translation()[d];
+        return hashvalue;
       }
     };
 
