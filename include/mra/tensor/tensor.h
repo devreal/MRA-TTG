@@ -148,7 +148,6 @@ namespace mra {
     {
       // TODO: make this static_assert (clang 14 doesn't get it)
       assert(dims.size() == NDIM);
-                    //"Number of arguments does not match number of Dimensions.");
     }
 
     Tensor(const SparsityInfo& sparsity_info,
@@ -159,6 +158,18 @@ namespace mra {
     , m_dims(create_dims_array(sparsity_info.dim(0), K, std::make_index_sequence<NDIM-1>{}))
     , m_buffer(buffer_size(), scope)
     {
+      this->apply_sparsity(sparsity_info);
+    }
+
+    Tensor(const SparsityInfo& sparsity_info,
+           const std::array<size_type, NDIM>& dims,
+           ttg::scope scope = ttg::scope::SyncIn)
+    : ttvalue_type()
+    , sparsity_type()
+    , m_dims(dims)
+    , m_buffer(buffer_size(), scope)
+    {
+      assert(sparsity_info.dim(0) == dims[0]);
       this->apply_sparsity(sparsity_info);
     }
 
