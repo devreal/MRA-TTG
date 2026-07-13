@@ -184,8 +184,11 @@ namespace mra{
         conv_transform<T, NDIM>(opid, K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
       }
 
-      printf("MRA APPLY CONV: opid %d mu %d Rnorm %g Snorm %g result %g resultc %g\n",
-             opid, mu, Rnorm, Snorm, normf(result), normf(resultc));
+      auto rnorm = normf(result);
+      auto rcnorm = normf(resultc);
+      if (is_team_lead())
+        printf("MRA APPLY CONV: opid %d mu %d result %e resultc %e\n",
+             opid, mu, rnorm, rcnorm);
 
     }
 
@@ -273,6 +276,9 @@ namespace mra{
                                 f, f0, resultc, result, work1, work2);
       std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       result(s0) += resultc;
+      auto rnorm = normf(result);
+      auto rcnorm = normf(resultc);
+      if (is_team_lead()) printf("MRA APPLY CONV opid %d final result %e resultc %e\n", opid, rnorm, rcnorm);
     }
 
     /**
@@ -505,8 +511,7 @@ namespace mra{
             // sequential kernel's computation order (see apply_conv_range's doc comment).
             apply_conv_range<T, NDIM>(opid, K, mu_lo, mu_hi, fac, effective_tol,
                                       transr, transs, opnorms_view, at,
-                                      f, f0, resultc, group_slot, work1, work2);
-            group_slot_s = resultc;
+                                      f, f0, group_slot_s, group_slot, work1, work2);
             if (is_team_lead()) {
               group_partials_mask(fnIdx, groupId) = true;
             }
@@ -571,8 +576,11 @@ namespace mra{
         };
         result = 0.0;
         for (int g = next_group(-1); g < num_groups; g = next_group(g)) {
-          printf("MRA CONV FINALIZE: fnIdx %d group %d result %e group_partial %e\n",
-                 fnIdx, g, normf(result), normf(group_partials(fnIdx, g)));
+          auto rnorm = normf(result);
+          auto pgnorm = normf(group_partials(fnIdx, g));
+          if (is_team_lead())
+            printf("MRA CONV FINALIZE: fnIdx %d group %d result %e group_partial %e\n",
+                   fnIdx, g, rnorm, pgnorm);
           result += group_partials(fnIdx, g);
         }
 
@@ -580,13 +588,20 @@ namespace mra{
         if (g < num_groups) {
           auto resultc = group_partials_s(fnIdx, g);
           for (; g < num_groups; g = next_group(g)) {
-            printf("MRA CONV FINALIZE: fnIdx %d group %d resultc %e group_partial_s %e\n",
-                    fnIdx, g, normf(resultc), normf(group_partials_s(fnIdx, g)));
+            auto rnorm = normf(resultc);
+            auto pgnorm = normf(group_partials_s(fnIdx, g));
+            if (is_team_lead())
+              printf("MRA CONV FINALIZE: fnIdx %d group %d resultc %e group_partial_s %e\n",
+                     fnIdx, g, rnorm, pgnorm);
+
             resultc += group_partials_s(fnIdx, g);
           }
 
           std::array<Slice, NDIM> s0 = std::array<Slice, NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
           result(s0) += resultc;
+          auto rnorm = normf(result);
+          auto rcnorm = normf(resultc);
+          if (is_team_lead()) printf("MRA CONV FINALIZE: fnIdx %d final result %e resultc %e\n", fnIdx, rnorm, rcnorm);
         }
 
         convolution_finalize<T, NDIM>(fac, tol, in, result,
