@@ -32,6 +32,13 @@ namespace mra {
         return TensorType::ndim();
       }
 
+      MockTensor() = default;
+
+      MockTensor(const MockTensor&) = delete;
+      MockTensor(MockTensor&&) = default;
+      MockTensor& operator=(const MockTensor&) = delete;
+      MockTensor& operator=(MockTensor&&) = default;
+
       MockTensor(TensorType& tensor)
       : sparsity_type()
       , m_tensor(tensor)
@@ -80,7 +87,7 @@ namespace mra {
 
     template<std::size_t... Is>
     void populate_device_sparsity_impl(ttg::device::Device device, std::index_sequence<Is...>) {
-      (std::get<Is>(m_tensors).populate_device_sparsity(device), ...);
+      (std::get<Is>(*m_tensors).populate_device_sparsity(device), ...);
     }
 
   public:
@@ -99,11 +106,21 @@ namespace mra {
     }
 
     template<typename TensorTuple, std::size_t... Is>
-    mocktensor_tuple_type construct_mocktensors(TensorTuple&& tensors, std::index_sequence<Is...>) {
-      return std::make_tuple(MockTensor<TensorTypes>(std::get<Is>(tensors))...);
+    auto construct_mocktensors(TensorTuple&& tensors, std::index_sequence<Is...>) {
+      return std::make_unique<mocktensor_tuple_type>(std::make_tuple(MockTensor<TensorTypes>(std::get<Is>(tensors))...));
     }
 
   public:
+
+    SparsityManager() = default;
+
+    /**
+     * Allow move but not copy, since the underlying buffers are not copyable.
+     */
+    SparsityManager(const SparsityManager&) = delete;
+    SparsityManager(SparsityManager&&) = default;
+    SparsityManager& operator=(const SparsityManager&) = delete;
+    SparsityManager& operator=(SparsityManager&&) = default;
 
     SparsityManager(TensorTypes&... tensors)
     : m_tensors(construct_mocktensors(std::forward_as_tuple(tensors...), std::make_index_sequence<sizeof...(TensorTypes)>{}))
@@ -136,7 +153,7 @@ namespace mra {
      */
 
   private:
-    mocktensor_tuple_type m_tensors;
+    std::unique_ptr<mocktensor_tuple_type> m_tensors;
   };
 
 

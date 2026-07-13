@@ -621,8 +621,11 @@ namespace mra {
 
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
+        // have to declare it here so the manager stays in scope until the kernel is done.
+        using partials_sparsman_t = decltype(make_sparsity_manager(group_partials, group_partials_s));
+        partials_sparsman_t sparseman_gp;
         if (num_groups > 1) {
-          auto sparseman_gp = make_sparsity_manager(group_partials, group_partials_s);
+          sparseman_gp = make_sparsity_manager(group_partials, group_partials_s);
           sparseman_gp.populate_device_sparsity();
           auto group_partials_view = group_partials.current_view();
           auto group_partials_s_view = group_partials_s.current_view();
@@ -842,8 +845,11 @@ namespace mra {
 
       auto sparseman = make_sparsity_manager(out);
       sparseman.populate_device_sparsity();
+      // have to declare it here so the manager stays in scope until the kernel is done.
+      using partials_sparsman_t = decltype(make_sparsity_manager(group_partials, group_partials_s));
+      partials_sparsman_t sparseman_gp;
       if (num_groups > 1) {
-        auto sparseman_gp = make_sparsity_manager(group_partials, group_partials_s);
+        sparseman_gp = make_sparsity_manager(group_partials, group_partials_s);
         sparseman_gp.populate_device_sparsity();
         auto group_partials_view = group_partials.current_view();
         auto group_partials_s_view = group_partials_s.current_view();
