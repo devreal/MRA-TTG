@@ -184,6 +184,9 @@ namespace mra{
         conv_transform<T, NDIM>(opid, K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
       }
 
+      printf("MRA APPLY CONV: opid %d mu %d Rnorm %g Snorm %g result %g resultc %g\n",
+             opid, mu, Rnorm, Snorm, normf(result), normf(resultc));
+
     }
 
 
@@ -445,6 +448,7 @@ namespace mra{
       const std::array<bool, 2> at,
       concepts::TensorView<NDIM+2> auto group_partials,
       concepts::TensorView<NDIM+2> auto group_partials_s,
+      concepts::TensorView<2> auto group_partials_mask,
       T* tmp)
     {
       SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, group_slot, group_slot_s;
@@ -473,9 +477,22 @@ namespace mra{
         }
         SYNCTHREADS();
 
+        if (f_view.is_zero(fnIdx)) {
+          /* copy input to output */
+          if (groupId == 0) {
+            // nothing to be done for this function, so mark
+            // its group_partials_mask as false for all groups
+            if (is_team_lead()) {
+              group_partials_mask(fnIdx, groupId) = false;
+            }
+          }
+          continue;
+        }
+
+
         int opid = opnorms_view.dim(0) > 1 ? fnIdx : 0;
-        const T cnorm = mra::normf(f);
         const T opnorm = opnorms_view(opid, 0, 0, (size_type)NormId::Opnorm);
+        const T cnorm = mra::normf(f);
 
         if ((cnorm * opnorm) > (tol / fac)) {
           const T effective_tol = tol / fac / cnorm;
@@ -490,13 +507,18 @@ namespace mra{
                                       transr, transs, opnorms_view, at,
                                       f, f0, resultc, group_slot, work1, work2);
             group_slot_s = resultc;
+            if (is_team_lead()) {
+              group_partials_mask(fnIdx, groupId) = true;
+            }
           } else {
-            group_slot = 0.0;
-            group_slot_s = 0.0;
+            if (is_team_lead()) {
+              group_partials_mask(fnIdx, groupId) = false;
+            }
           }
         } else {
-          group_slot = 0.0;
-          group_slot_s = 0.0;
+          if (is_team_lead()) {
+            group_partials_mask(fnIdx, groupId) = false;
+          }
         }
       }
     }
@@ -520,7 +542,8 @@ namespace mra{
       concepts::TensorView<NDIM+1> auto result_view,
       concepts::TensorView<1> auto resnorms,
       concepts::TensorView<NDIM+2> auto group_partials,
-      concepts::TensorView<NDIM+2> auto group_partials_s)
+      concepts::TensorView<NDIM+2> auto group_partials_s,
+      concepts::TensorView<2> auto group_partials_mask)
     {
       SHARED DenseTensorView<T, NDIM> result;
       SHARED DenseTensorView<const T, NDIM> in;
@@ -540,18 +563,31 @@ namespace mra{
 
         // Sum the R-series and S-series separately across all groups, then fold exactly
         // once -- matching the sequential kernel's computation order (see apply_conv_range).
-        result = group_partials(fnIdx, 0);
-        for (size_type g = 1; g < num_groups; ++g) {
-          axpy_kernel_impl<T, NDIM>(group_partials(fnIdx, g), result, T(1.0));
+        auto next_group = [&](int last_group) -> int {
+          for (int g = last_group + 1; g < num_groups; ++g) {
+            if (group_partials_mask(fnIdx, g)) return g;
+          }
+          return num_groups;
+        };
+        result = 0.0;
+        for (int g = next_group(-1); g < num_groups; g = next_group(g)) {
+          printf("MRA CONV FINALIZE: fnIdx %d group %d result %e group_partial %e\n",
+                 fnIdx, g, normf(result), normf(group_partials(fnIdx, g)));
+          result += group_partials(fnIdx, g);
         }
 
-        auto resultc = group_partials_s(fnIdx, 0);
-        for (size_type g = 1; g < num_groups; ++g) {
-          axpy_kernel_impl<T, NDIM>(group_partials_s(fnIdx, g), resultc, T(1.0));
-        }
+        int g = next_group(-1);
+        if (g < num_groups) {
+          auto resultc = group_partials_s(fnIdx, g);
+          for (; g < num_groups; g = next_group(g)) {
+            printf("MRA CONV FINALIZE: fnIdx %d group %d resultc %e group_partial_s %e\n",
+                    fnIdx, g, normf(resultc), normf(group_partials_s(fnIdx, g)));
+            resultc += group_partials_s(fnIdx, g);
+          }
 
-        std::array<Slice, NDIM> s0 = std::array<Slice, NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
-        result(s0) += resultc;
+          std::array<Slice, NDIM> s0 = std::array<Slice, NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
+          result(s0) += resultc;
+        }
 
         convolution_finalize<T, NDIM>(fac, tol, in, result,
                                       resnorms.empty() ? nullptr : &resnorms[fnIdx]);
@@ -563,7 +599,7 @@ namespace mra{
   template <typename T, Dimension NDIM>
   void submit_convolution_kernel(
     Key<NDIM> key,
-	Key<NDIM> displacement,
+	  Key<NDIM> displacement,
     size_type K,
     size_type N,
     const T fac,
@@ -611,6 +647,7 @@ namespace mra{
     const std::array<bool, 2>& at,
     concepts::TensorView<NDIM+2> auto& group_partials,
     concepts::TensorView<NDIM+2> auto& group_partials_s,
+    concepts::TensorView<2> auto& group_partials_mask,
     T* tmp,
     ttg::device::Stream stream)
   {
@@ -619,7 +656,8 @@ namespace mra{
     Dim3 grid_dims(N, num_groups, 1);
 
     CALL_KERNEL((detail::convolution_kernel_partials<T, NDIM>), grid_dims, thread_dims, smem_size, stream,
-                (K, N, fac, tol, f_view, transr, transs, opnorms, at, group_partials, group_partials_s, tmp));
+                (K, N, fac, tol, f_view, transr, transs, opnorms, at, group_partials, group_partials_s,
+                 group_partials_mask, tmp));
     checkSubmit();
   }
 
@@ -642,12 +680,15 @@ namespace mra{
     concepts::TensorView<1> auto& resnorms,
     concepts::TensorView<NDIM+2> auto& group_partials,
     concepts::TensorView<NDIM+2> auto& group_partials_s,
+    concepts::TensorView<2> auto& group_partials_mask,
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
     CALL_KERNEL((detail::convolution_kernel_finalize<T, NDIM>), N, thread_dims, 0, stream,
-                (K, N, num_groups, fac, tol, in_view, result_view, resnorms, group_partials, group_partials_s));
+                (K, N, num_groups, fac, tol, in_view,
+                 result_view, resnorms, group_partials,
+                 group_partials_s, group_partials_mask));
     checkSubmit();
   }
 
@@ -687,6 +728,7 @@ namespace mra{
     const std::array<bool, 2>& at,
     SparseTensorView<double, 3+2>& group_partials,
     SparseTensorView<double, 3+2>& group_partials_s,
+    DenseTensorView<bool, 2>& group_partials_mask,
     double* tmp,
     ttg::device::Stream stream);
 
@@ -702,6 +744,7 @@ namespace mra{
     SparseTensorView<double, 1>& resnorms,
     SparseTensorView<double, 3+2>& group_partials,
     SparseTensorView<double, 3+2>& group_partials_s,
+    DenseTensorView<bool, 2>& group_partials_mask,
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 

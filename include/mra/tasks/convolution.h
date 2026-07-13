@@ -581,11 +581,13 @@ namespace mra {
 
         mra::SparseTensor<T, NDIM+2> group_partials;
         mra::SparseTensor<T, NDIM+2> group_partials_s;
+        mra::DenseTensor<bool, 2> group_partials_mask;
         if (num_groups > 1) {
           group_partials = mra::SparseTensor<T, NDIM+2>(sparsity,
               std::array<size_type, NDIM+2>{N, num_groups, 2*K, 2*K, 2*K}, TempScope);
           group_partials_s = mra::SparseTensor<T, NDIM+2>(sparsity,
               std::array<size_type, NDIM+2>{N, num_groups, K, K, K}, TempScope);
+          group_partials_mask = mra::DenseTensor<bool, 2>({N, num_groups}, TempScope);
         }
 
         auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N * num_groups, TempScope);
@@ -604,6 +606,7 @@ namespace mra {
         if (num_groups > 1) {
           input.add(group_partials.buffer());
           input.add(group_partials_s.buffer());
+          input.add(group_partials_mask.buffer());
         }
         co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
@@ -629,14 +632,17 @@ namespace mra {
           sparseman_gp.populate_device_sparsity();
           auto group_partials_view = group_partials.current_view();
           auto group_partials_s_view = group_partials_s.current_view();
+          auto group_partials_mask_view = group_partials_mask.current_view();
           submit_convolution_kernel_partials<T, NDIM>(K, N, num_groups, fac, tol, in_node_view,
                                               transr, transs, opnorms_view, at,
                                               group_partials_view, group_partials_s_view,
+                                              group_partials_mask_view,
                                               tmp.current_device_ptr(),
                                               ttg::device::current_stream());
           submit_convolution_kernel_finalize<T, NDIM>(K, N, num_groups, fac, tol,
                                               /*in_node_view*/ empty_node_view, out_view, resnorms_view,
                                               group_partials_view, group_partials_s_view,
+                                              group_partials_mask_view,
                                               ttg::device::current_stream());
         } else {
           submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
@@ -802,11 +808,13 @@ namespace mra {
 
       mra::SparseTensor<T, NDIM+2> group_partials;
       mra::SparseTensor<T, NDIM+2> group_partials_s;
+      mra::DenseTensor<bool, 2> group_partials_mask;
       if (num_groups > 1) {
         group_partials = mra::SparseTensor<T, NDIM+2>(sparsity,
             std::array<size_type, NDIM+2>{N, num_groups, 2*K, 2*K, 2*K}, TempScope);
         group_partials_s = mra::SparseTensor<T, NDIM+2>(sparsity,
             std::array<size_type, NDIM+2>{N, num_groups, K, K, K}, TempScope);
+        group_partials_mask = mra::DenseTensor<bool, 2>({N, num_groups}, TempScope);
       }
 
       auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N * num_groups, TempScope);
@@ -826,6 +834,7 @@ namespace mra {
       if (num_groups > 1) {
         input.add(group_partials.buffer());
         input.add(group_partials_s.buffer());
+        input.add(group_partials_mask.buffer());
       }
       if (last_key) {
         // if this is the last we want to get the norms of the result back
@@ -853,14 +862,18 @@ namespace mra {
         sparseman_gp.populate_device_sparsity();
         auto group_partials_view = group_partials.current_view();
         auto group_partials_s_view = group_partials_s.current_view();
+        auto group_partials_mask_view = group_partials_mask.current_view();
         submit_convolution_kernel_partials<T, NDIM>(K, N, num_groups, fac, tol, contribution_view,
                                             transr, transs, opnorms_view, at,
                                             group_partials_view, group_partials_s_view,
+                                            group_partials_mask_view,
                                             tmp.current_device_ptr(),
                                             ttg::device::current_stream());
         submit_convolution_kernel_finalize<T, NDIM>(K, N, num_groups, fac, tol, in_node_view,
                                             out_view, resnorms_view, group_partials_view,
-                                            group_partials_s_view, ttg::device::current_stream());
+                                            group_partials_s_view,
+                                            group_partials_mask_view,
+                                            ttg::device::current_stream());
       } else {
         submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
                                             contribution_view, out_view, resnorms_view, transr, transs,

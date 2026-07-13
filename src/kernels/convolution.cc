@@ -38,6 +38,7 @@ namespace mra {
     const std::array<bool, 2>& at,
     SparseTensorView<double, 3+2>& group_partials,
     SparseTensorView<double, 3+2>& group_partials_s,
+    DenseTensorView<bool, 2>& group_partials_mask,
     double* tmp,
     ttg::device::Stream stream);
 
@@ -53,6 +54,7 @@ namespace mra {
     SparseTensorView<double, 1>& resnorms,
     SparseTensorView<double, 3+2>& group_partials,
     SparseTensorView<double, 3+2>& group_partials_s,
+    DenseTensorView<bool, 2>& group_partials_mask,
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
