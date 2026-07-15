@@ -41,7 +41,7 @@ namespace mra{
    */
   SCOPE size_type convolution_num_groups(size_type nnz, size_type rank) {
 #if defined(MRA_ENABLE_HOST)
-    return 2;
+    return 1;
 #else
     if (nnz == 0) return 1;
     size_type occupancy_cap = std::max<size_type>(1, 512 / nnz);
@@ -184,11 +184,11 @@ namespace mra{
         conv_transform<T, NDIM>(opid, K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
       }
 
-      auto rnorm = normf(result);
-      auto rcnorm = normf(resultc);
-      if (is_team_lead())
-        printf("MRA APPLY CONV: opid %d mu %d result %e resultc %e\n",
-             opid, mu, rnorm, rcnorm);
+      //auto rnorm = normf(result);
+      //auto rcnorm = normf(resultc);
+      //if (is_team_lead())
+      //  printf("MRA APPLY CONV: opid %d mu %d result %e resultc %e\n",
+      //       opid, mu, rnorm, rcnorm);
 
     }
 
@@ -206,7 +206,7 @@ namespace mra{
      * (typically near-cancelling) R and S contributions combine.
      */
     template<typename T, Dimension NDIM>
-    DEVSCOPE void apply_conv_range(
+    DEVSCOPE bool apply_conv_range(
       int opid,
       size_type K,
       size_type mu_lo,
@@ -225,6 +225,7 @@ namespace mra{
       concepts::TensorView<NDIM> auto& work2)
     {
       SHARED DenseTensorView<T, NDIM> work1_k, work2_k;
+      bool result = false;
       // cannot be SHARED because ctors won't run
       std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       if (is_team_lead()) {
@@ -250,8 +251,10 @@ namespace mra{
           T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
           muopxv_fast<T, NDIM>(opid, K, mu, mufac, tol/std::abs(mufac), at, transr, transs, opnorms, f, f0,
                                resultc, result, work1, work2, work1_k, work2_k);
+          result = true;
         }
       }
+      return result;
     }
 
     template<typename T, Dimension NDIM>
@@ -276,9 +279,9 @@ namespace mra{
                                 f, f0, resultc, result, work1, work2);
       std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       result(s0) += resultc;
-      auto rnorm = normf(result);
-      auto rcnorm = normf(resultc);
-      if (is_team_lead()) printf("MRA APPLY CONV opid %d final result %e resultc %e\n", opid, rnorm, rcnorm);
+      //auto rnorm = normf(result);
+      //auto rcnorm = normf(resultc);
+      //if (is_team_lead()) printf("MRA APPLY CONV opid %d final result %e resultc %e\n", opid, rnorm, rcnorm);
     }
 
     /**
@@ -466,6 +469,11 @@ namespace mra{
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
 
       for (size_type fnIdx = blockIdx.x; fnIdx < N; fnIdx += gridDim.x) {
+
+        // false by default, set to true if we have a non-zero partial result
+        if (is_team_lead()) {
+          group_partials_mask(fnIdx, groupId) = false;
+        }
         if (group_partials.is_zero(fnIdx)) {
           // no function here, or the function's output is entirely zero: nothing to do
           continue;
@@ -484,14 +492,6 @@ namespace mra{
         SYNCTHREADS();
 
         if (f_view.is_zero(fnIdx)) {
-          /* copy input to output */
-          if (groupId == 0) {
-            // nothing to be done for this function, so mark
-            // its group_partials_mask as false for all groups
-            if (is_team_lead()) {
-              group_partials_mask(fnIdx, groupId) = false;
-            }
-          }
           continue;
         }
 
@@ -509,20 +509,12 @@ namespace mra{
             // R-sum -> group_slot, S-sum -> group_slot_s, left UNFOLDED: convolution_kernel_finalize
             // sums each series across all groups separately and folds exactly once, matching the
             // sequential kernel's computation order (see apply_conv_range's doc comment).
-            apply_conv_range<T, NDIM>(opid, K, mu_lo, mu_hi, fac, effective_tol,
+            bool have_update = apply_conv_range<T, NDIM>(opid, K, mu_lo, mu_hi, fac, effective_tol,
                                       transr, transs, opnorms_view, at,
                                       f, f0, group_slot_s, group_slot, work1, work2);
             if (is_team_lead()) {
-              group_partials_mask(fnIdx, groupId) = true;
+              group_partials_mask(fnIdx, groupId) = have_update;
             }
-          } else {
-            if (is_team_lead()) {
-              group_partials_mask(fnIdx, groupId) = false;
-            }
-          }
-        } else {
-          if (is_team_lead()) {
-            group_partials_mask(fnIdx, groupId) = false;
           }
         }
       }
@@ -576,11 +568,11 @@ namespace mra{
         };
         result = 0.0;
         for (int g = next_group(-1); g < num_groups; g = next_group(g)) {
-          auto rnorm = normf(result);
-          auto pgnorm = normf(group_partials(fnIdx, g));
-          if (is_team_lead())
-            printf("MRA CONV FINALIZE: fnIdx %d group %d result %e group_partial %e\n",
-                   fnIdx, g, rnorm, pgnorm);
+          //auto rnorm = normf(result);
+          //auto pgnorm = normf(group_partials(fnIdx, g));
+          //if (is_team_lead())
+          //  printf("MRA CONV FINALIZE: fnIdx %d group %d result %e group_partial %e\n",
+          //         fnIdx, g, rnorm, pgnorm);
           result += group_partials(fnIdx, g);
         }
 
@@ -588,20 +580,20 @@ namespace mra{
         if (g < num_groups) {
           auto resultc = group_partials_s(fnIdx, g);
           for (; g < num_groups; g = next_group(g)) {
-            auto rnorm = normf(resultc);
-            auto pgnorm = normf(group_partials_s(fnIdx, g));
-            if (is_team_lead())
-              printf("MRA CONV FINALIZE: fnIdx %d group %d resultc %e group_partial_s %e\n",
-                     fnIdx, g, rnorm, pgnorm);
+            //auto rnorm = normf(resultc);
+            //auto pgnorm = normf(group_partials_s(fnIdx, g));
+            //if (is_team_lead())
+            //  printf("MRA CONV FINALIZE: fnIdx %d group %d resultc %e group_partial_s %e\n",
+            //         fnIdx, g, rnorm, pgnorm);
 
             resultc += group_partials_s(fnIdx, g);
           }
 
           std::array<Slice, NDIM> s0 = std::array<Slice, NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
           result(s0) += resultc;
-          auto rnorm = normf(result);
-          auto rcnorm = normf(resultc);
-          if (is_team_lead()) printf("MRA CONV FINALIZE: fnIdx %d final result %e resultc %e\n", fnIdx, rnorm, rcnorm);
+          //auto rnorm = normf(result);
+          //auto rcnorm = normf(resultc);
+          //if (is_team_lead()) printf("MRA CONV FINALIZE: fnIdx %d final result %e resultc %e\n", fnIdx, rnorm, rcnorm);
         }
 
         convolution_finalize<T, NDIM>(fac, tol, in, result,
