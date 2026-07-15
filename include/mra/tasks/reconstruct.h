@@ -51,7 +51,7 @@ namespace mra{
       }
     };
 
-    auto p = ttg::make_tt(std::move(primer), ttg::edges(in), edges(P), "primer");
+    auto p = ttg::make_tt<Space>(std::move(primer), ttg::edges(in), edges(P), "primer");
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) p->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) p->set_devicemap(devicemap);
