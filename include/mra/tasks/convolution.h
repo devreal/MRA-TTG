@@ -169,7 +169,7 @@ namespace mra {
         if (key.level() == 0) {
           // root has no neighbors and no parent, so forward the contributions to the down task
           ttg::send<0>(key, std::move(contributions));
-          //std::cout << "UP " << key << " is root with " << contributions.size() << " contributions" << std::endl;
+          std::cout << "MRA CONV UP " << contributions.size() << " contributions to distribute at root" << std::endl;
 
         } else {
 
