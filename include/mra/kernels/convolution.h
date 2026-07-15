@@ -39,16 +39,22 @@ namespace mra{
    * parallelizes over mu on the host backend, where there is no thread-block concept to
    * split across.
    */
-  SCOPE size_type convolution_num_groups(size_type nnz, size_type rank) {
+  SCOPE size_type convolution_num_groups(size_type nnz, size_type max_rank) {
 #if defined(MRA_ENABLE_HOST)
     return 1;
 #else
     if (nnz == 0) return 1;
-    size_type occupancy_cap = std::max<size_type>(1, 512 / nnz);
-    size_type groups = std::min(occupancy_cap, rank);
-    size_type pow2 = 1;
-    while (pow2 * 2 <= groups) pow2 *= 2; // round down to a power of two for a clean tree reduction
-    return pow2;
+    static int max_groups = -1;
+    if (max_groups < 0) {
+      const char* envstr = std::getenv("MRA_CONVOLUTION_MAX_GROUPS");
+      max_groups = envstr ? std::atoi(envstr) : 512;
+    }
+    size_type occupancy_cap = std::max<size_type>(1, max_groups / nnz);
+    size_type groups = std::min(occupancy_cap, max_rank);
+    return groups;
+    //size_type pow2 = 1;
+    //while (pow2 * 2 <= groups) pow2 *= 2; // round down to a power of two for a clean tree reduction
+    //return pow2;
 #endif
   }
 
