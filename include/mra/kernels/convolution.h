@@ -231,7 +231,7 @@ namespace mra{
       concepts::TensorView<NDIM> auto& work2)
     {
       SHARED DenseTensorView<T, NDIM> work1_k, work2_k;
-      bool result = false;
+      bool have_update = false;
       // cannot be SHARED because ctors won't run
       std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       if (is_team_lead()) {
@@ -257,10 +257,14 @@ namespace mra{
           T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
           muopxv_fast<T, NDIM>(opid, K, mu, mufac, tol/std::abs(mufac), at, transr, transs, opnorms, f, f0,
                                resultc, result, work1, work2, work1_k, work2_k);
-          result = true;
+          have_update = true;
         }
       }
-      return result;
+      if (have_update) {
+        std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
+        result(s0) += resultc;
+      }
+      return have_update;
     }
 
     template<typename T, Dimension NDIM>
