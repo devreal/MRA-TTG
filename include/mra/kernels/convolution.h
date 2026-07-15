@@ -39,7 +39,7 @@ namespace mra{
    * parallelizes over mu on the host backend, where there is no thread-block concept to
    * split across.
    */
-  SCOPE size_type convolution_num_groups(size_type nnz, size_type max_rank) {
+  size_type convolution_num_groups(size_type nnz, size_type max_rank) {
 #if defined(MRA_ENABLE_HOST)
     return 1;
 #else
