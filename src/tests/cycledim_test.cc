@@ -9,10 +9,10 @@ int main(int argc, char **argv) {
 
   constexpr const mra::size_type K = 10;
 
-  mra::Tensor<double, 2> nodeA(K), nodeB(K), nodeC(K);
-  mra::TensorView<double, 2> nodeAv = nodeA.current_view();
-  mra::TensorView<double, 2> nodeBv = nodeB.current_view();
-  mra::TensorView<double, 2> nodeCv = nodeC.current_view();
+  mra::DenseTensor<double, 2> nodeA(K), nodeB(K), nodeC(K);
+  mra::DenseTensorView<double, 2> nodeAv = nodeA.current_view();
+  mra::DenseTensorView<double, 2> nodeBv = nodeB.current_view();
+  mra::DenseTensorView<double, 2> nodeCv = nodeC.current_view();
 
   for (int i=0; i<nodeA.size(); ++i){
     nodeAv[i] = i;
@@ -20,8 +20,8 @@ int main(int argc, char **argv) {
     nodeCv[i] = 100.0;
   }
 
-  mra::detail::cycledim<double, 2>(nodeAv, nodeBv, 1, 0, 2);
-  mra::detail::cycledim<double, 2>(nodeBv, nodeCv, 1, 0, 2);
+  mra::detail::cycledim(nodeAv, nodeBv, 1, 0, 2);
+  mra::detail::cycledim(nodeBv, nodeCv, 1, 0, 2);
 
   for (int i=0; i<nodeA.size(); ++i){
     assert(nodeCv[i] == nodeAv[i]);

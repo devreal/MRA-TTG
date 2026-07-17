@@ -17,9 +17,9 @@ namespace mra {
 #if defined(MRA_CUDA_ENABLE_SHARED_TRANSFORM) && defined(MRA_ENABLE_CUDA) && defined(MRA_HAVE_CUBLASDX)
   template <Dimension NDIM, typename T>
   SCOPE bool transform_shared(
-    const TensorView<T, NDIM>& t,
-    const TensorView<T, 2>& c,
-    TensorView<T, NDIM>& result,
+    const concepts::TensorView<NDIM> auto& t,
+    const concepts::TensorView<2> auto& c,
+    concepts::TensorView<NDIM> auto& result,
     T* workspace)
   {
     if ((2*t.size() + c.size() + result.size()) > mTxmq_shmem_size<T>(c.dim(0))) {
@@ -51,25 +51,28 @@ namespace mra {
     return true;
   }
 #else // defined(MRA_ENABLE_CUDA)
-  template <Dimension NDIM, typename T>
+  template <typename T>
   SCOPE bool transform_shared(
-    const TensorView<T, NDIM>& t,
-    const TensorView<T, 2>& c,
-    TensorView<T, NDIM>& result,
+    const concepts::TensorView auto& t,
+    const concepts::TensorView<2> auto& c,
+    concepts::TensorView auto& result,
     T* workspace) {
       return false;
   }
 #endif // defined(MRA_ENABLE_CUDA)
 
-  template <Dimension NDIM, typename T>
+  template <typename T>
   SCOPE void transform(
-    const TensorView<T, NDIM>& t,
-    const TensorView<T, 2>& c,
-    TensorView<T, NDIM>& result,
-    T* workspace) {
+    const concepts::TensorView auto& t,
+    const concepts::TensorView<2> auto& c,
+    concepts::TensorView auto& result,
+    T* workspace)
+  {
+    static_assert(std::decay_t<decltype(t)>::ndim() == std::decay_t<decltype(result)>::ndim(),
+                  "Input and output tensor views must have the same number of dimensions.");
     if (transform_shared(t, c, result, workspace)) return;
-    const T* pc = c.data();
-    T *t0=workspace, *t1=result.data();
+    const auto* pc = c.data();
+    T* t0=workspace, *t1=result.data();
     if (t.ndim() & 0x1) std::swap(t0,t1);
     const size_type dimj = c.dim(1);
     size_type dimi = 1;
@@ -82,13 +85,13 @@ namespace mra {
     /* no need to synchronize here, mTxmq synchronizes */
   }
 
-  template <typename T, Dimension NDIM>
   SCOPE void transform_dir(
-    const TensorView<T, NDIM>& node,
-    const TensorView<T, 2>& op,
-    TensorView<T, NDIM>& tmp,
-    TensorView<T, NDIM>& result,
-    size_type axis) {
+    const concepts::TensorView auto& node,
+    const concepts::TensorView<2> auto& op,
+    concepts::TensorView auto& tmp,
+    concepts::TensorView auto& result,
+    size_type axis)
+  {
       if (axis == 0){
         result = 0.0; // start from 0
         detail::inner(op, node, result, 0, axis);
@@ -107,22 +110,23 @@ namespace mra {
       }
     }
 
-  template <typename T, Dimension NDIM, std::size_t ARRDIM = NDIM>
   SCOPE void general_transform(
-    const TensorView<T, NDIM>& t,
-    const std::array<TensorView<T, 2>, ARRDIM>& c,
-    TensorView<T, NDIM>& result_in,
-    TensorView<T, NDIM>& result_tmp_in)
+    const concepts::TensorView auto& t,
+    const concepts::TensorViewArray<2> auto& c,
+    concepts::TensorView auto& result_in,
+    concepts::TensorView auto& result_tmp_in)
     {
       /* create our own tensor views pointing to the input
        * data so we don't have to modify the input views */
-      SHARED TensorView<T, NDIM> result, result_tmp;
+      using result_view_type = std::decay_t<decltype(result_in)>;
+      constexpr const mra::Dimension ndim = result_view_type::ndim();
+      SHARED result_view_type result, result_tmp;
       if (is_team_lead()) {
-        result = TensorView<T, NDIM>(result_in.data(), result_in.dims());
-        result_tmp = TensorView<T, NDIM>(result_tmp_in.data(), result_tmp_in.dims());
+        result = result_view_type(result_in.data(), result_in.dims());
+        result_tmp = result_view_type(result_tmp_in.data(), result_tmp_in.dims());
       }
       SYNCTHREADS();
-      if constexpr (NDIM % 2) {
+      if constexpr (ndim % 2) {
         // make sure result and result_tmp
         // end up pointing to the same memory
         if (is_team_lead()) {
@@ -131,7 +135,7 @@ namespace mra {
         SYNCTHREADS();
       }
       result = t; // prime result
-      for (size_type i = 0; i < NDIM; ++i){
+      for (size_type i = 0; i < ndim; ++i){
         // inner accumulates but we're passing
         // TODO: make accumulation optional?
         result_tmp = 0;

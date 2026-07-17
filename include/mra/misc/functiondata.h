@@ -30,14 +30,14 @@ namespace mra {
 
     private:
         size_type K;
-        Tensor<T,2> phi;            // phi(mu,i) = phi(x[mu],i) --- value of scaling functions at quadrature points on level 0
-        Tensor<T,2> phiT;           // transpose of phi
-        Tensor<T,2> phibar;         // phibar(mu,i) = w[mu]*phi(x[mu],i)
-        Tensor<T,2> HG;             // Two scale filter applied from left to scaling function coeffs
-        Tensor<T,2> HGT;            // Two scale filter applied from right to scaling function coeffs
-        Tensor<T,1> quad_x;         // Quadrature points on level 0
-        std::unique_ptr<T[]> x, w;  // Quadrature points and weights on level 0
-        Tensor<T, 2+1> operators;   // Derivative operators
+        DenseTensor<T,2> phi;            // phi(mu,i) = phi(x[mu],i) --- value of scaling functions at quadrature points on level 0
+        DenseTensor<T,2> phiT;           // transpose of phi
+        DenseTensor<T,2> phibar;         // phibar(mu,i) = w[mu]*phi(x[mu],i)
+        DenseTensor<T,2> HG;             // Two scale filter applied from left to scaling function coeffs
+        DenseTensor<T,2> HGT;            // Two scale filter applied from right to scaling function coeffs
+        DenseTensor<T,1> quad_x;         // Quadrature points on level 0
+        std::unique_ptr<T[]> x, w;       // Quadrature points and weights on level 0
+        DenseTensor<T, 2+1> operators;   // Derivative operators
         BCType bc_left, bc_right;
         // TODO: add quad_x and corresponding functions
 
@@ -236,7 +236,7 @@ namespace mra {
             make_phiT();
             make_phibar();
             make_quad_x();
-            twoscale_get(K, HG.data());
+            twoscale_get(K, HG.current_view().data());
             auto HG_view  = HG.current_view();
             auto HGT_view = HGT.current_view();
             for (size_type i = 0; i < 2*K; ++i) {

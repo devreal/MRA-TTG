@@ -10,6 +10,7 @@
 #include "mra/tensor/tensorview.h"
 #include "mra/kernels/fcube.h"
 #include "mra/kernels/transform.h"
+#include "mra/tensor/leafstatus.h"
 
 namespace mra {
 
@@ -28,7 +29,7 @@ namespace mra {
   namespace detail {
 
     template<typename Fn, typename T, Dimension NDIM>
-    DEVSCOPE void fcoeffs_kernel_impl(
+    DEVSCOPE bool fcoeffs_kernel_impl(
       const Domain<NDIM>& D,
       const T* gldata,
       const Fn& f,
@@ -36,71 +37,46 @@ namespace mra {
       size_type K,
       size_type fnid,
       /* temporaries */
-      TensorView<T, NDIM>& values,
-      TensorView<T, NDIM>& r0,
-      TensorView<T, NDIM>& r1,
-      TensorView<T, NDIM>& child_values,
-      TensorView<T, 2   >& x_vec,
-      TensorView<T, 2   >& x,
+      concepts::TensorView<NDIM> auto& values,
+      concepts::TensorView<NDIM> auto& r0,
+      concepts::TensorView<NDIM> auto& r1,
+      concepts::TensorView<NDIM> auto& child_values,
+      concepts::TensorView<2> auto& x_vec,
+      concepts::TensorView<2> auto& x,
       T* workspace, /* variable size so pointer only */
       /* constants */
-      const TensorView<T, 2>& phibar,
-      const TensorView<T, 2>& hgT,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& hgT,
       /* result */
-      TensorView<T, NDIM>&  coeffs,
-      bool *is_leaf,
-      T thresh)
+      concepts::TensorView<NDIM> auto& coeffs,
+      T thresh,
+      T truncate_tol)
     {
-      /* check for our function */
-      if ((key.level() < initial_level(f))) {
-        // std::cout << "project: key " << key << " below intial level " << initial_level(f) << std::endl;
-        coeffs = T(1e7); // set to obviously bad value to detect incorrect use
-        if (is_team_lead()) {
-          *is_leaf = false;
-        }
+
+      /* compute all children */
+      for (int bid = 0; bid < key.num_children(); bid++) {
+        Key<NDIM> child = key.child_at(bid);
+        child_values = 0.0; // TODO: needed?
+        fcube(D, gldata, f, child, truncate_tol, child_values, K, x, x_vec);
+        transform(child_values, phibar, r0, workspace);
+        auto child_slice = get_child_slice<NDIM>(key, K, bid);
+        values(child_slice) = r0;
       }
-      if (is_negligible<Fn,T,NDIM>(f, D.template bounding_box<T>(key), mra::truncate_tol(key,thresh))) {
-        /* zero coeffs */
-        coeffs = T(0.0);
-        if (is_team_lead()) {
-          *is_leaf = true;
-        }
-      } else {
 
-        /* compute all children */
-        for (int bid = 0; bid < key.num_children(); bid++) {
-          Key<NDIM> child = key.child_at(bid);
-          child_values = 0.0; // TODO: needed?
-          fcube(D, gldata, f, child, thresh, child_values, K, x, x_vec);
-          transform(child_values, phibar, r0, workspace);
-          auto child_slice = get_child_slice<NDIM>(key, K, bid);
-          values(child_slice) = r0;
-        }
+      T fac = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5),T(NDIM*(1+key.level()))));
+      values *= fac;
+      // Inlined: filter<T,K,NDIM>(values,r);
+      transform(values, hgT, r1, workspace);
 
-        T fac = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5),T(NDIM*(1+key.level()))));
-        values *= fac;
-        // Inlined: filter<T,K,NDIM>(values,r);
-        transform<NDIM>(values, hgT, r1, workspace);
-
-        auto child_slice = get_child_slice<NDIM>(key, K, 0);
-        auto r_slice = r1(child_slice);
-        coeffs = r_slice; // extract sum coeffs
-        r_slice = 0.0; // zero sum coeffs so can easily compute norm of difference coeffs
-        /* TensorView assignment synchronizes */
-        T norm = mra::normf(r1);
-        //std::cout << "project norm " << norm << " thresh " << thresh << std::endl;
-        if (is_team_lead()) {
-          *is_leaf = (norm < truncate_tol(key,thresh)); // test norm of difference coeffs
-          if (!*is_leaf) {
-            // std::cout << "fcoeffs not leaf " << key << " norm " << norm << std::endl;
-          }
-        }
-        SYNCTHREADS();
-        if (!*is_leaf) {
-          /* zero out coeffs if this is not a leaf */
-          coeffs = T(0.0);
-        }
-      }
+      auto child_slice = get_child_slice<NDIM>(key, K, 0);
+      auto r_slice = r1(child_slice);
+      coeffs = r_slice; // extract sum coeffs
+      r_slice = 0.0; // zero sum coeffs so can easily compute norm of difference coeffs
+      /* TensorView assignment synchronizes */
+      T norm = mra::normf(r1);
+      //std::cout << "project norm " << norm << " thresh " << thresh << std::endl;
+      bool is_leaf_val = (norm < truncate_tol);
+      return is_leaf_val;
     }
 
     template<typename Fn, typename T, Dimension NDIM>
@@ -109,19 +85,21 @@ namespace mra {
     fcoeffs_kernel(
       const Domain<NDIM>& D,
       const T* gldata,
-      const TensorView<Fn, 1> fns,
+      const DenseTensorView<Fn, 1> fns,
       Key<NDIM> key,
       size_type K,
       T* tmp,
-      const TensorView<T, 2> phibar_view,
-      const TensorView<T, 2> hgT_view,
-      TensorView<T, NDIM+1>  coeffs_view,
-      bool *is_leaf,
-      T thresh)
+      const concepts::TensorView<2> auto phibar_view,
+      const concepts::TensorView<2> auto hgT_view,
+      concepts::TensorView<NDIM+1> auto coeffs_view,
+      T thresh,
+      T truncate_tol,
+      const DenseTensorView<LeafStatus, 1> leaf_info_view,
+      DenseTensorView<LeafStatus, 1> result_leaf_info_view)
     {
       /* set up temporaries once in each block */
-      SHARED TensorView<T, NDIM> values, r0, r1, child_values, coeffs;
-      SHARED TensorView<T, 2   > x_vec, x;
+      SHARED DenseTensorView<T, NDIM> values, r0, r1, child_values, coeffs;
+      SHARED DenseTensorView<T, 2   > x_vec, x;
       SHARED T* workspace;
       size_type N = fns.dim(0);
 
@@ -129,26 +107,69 @@ namespace mra {
         const size_type K2NDIM    = std::pow(K, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
         T* block_tmp = &tmp[blockIdx.x*fcoeffs_tmp_size<NDIM>(K)];
-        values       = TensorView<T, NDIM>(&block_tmp[0], 2*K);
-        r0           = TensorView<T, NDIM>(&block_tmp[TWOK2NDIM], K);
-        r1           = TensorView<T, NDIM>(&block_tmp[TWOK2NDIM+K2NDIM], 2*K);
-        child_values = TensorView<T, NDIM>(&block_tmp[2*TWOK2NDIM+K2NDIM], K);
-        x_vec        = TensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+2*K2NDIM], NDIM, K2NDIM);
-        x            = TensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM], NDIM, K);
+        values       = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
+        r0           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM], K);
+        r1           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM+K2NDIM], 2*K);
+        child_values = DenseTensorView<T, NDIM>(&block_tmp[2*TWOK2NDIM+K2NDIM], K);
+        x_vec        = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+2*K2NDIM], NDIM, K2NDIM);
+        x            = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM], NDIM, K);
         workspace    = &block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM+NDIM*K];
       }
 
       /* adjust pointers for the function of each block */
       for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x) {
+        /* carry over leaf info */
+        if (is_team_lead()) result_leaf_info_view[fnid] = leaf_info_view[fnid];
+        auto& f = fns(fnid);
+        // if we have seen a leaf for this function, skip and set the status to Invalid
+        if (leaf_info_view(fnid) == LeafStatus::Leaf || leaf_info_view(fnid) == LeafStatus::Invalid) {
+          if (is_team_lead()) {
+            result_leaf_info_view(fnid) = LeafStatus::Invalid;
+          }
+          continue; // skip leaf and invalid entries
+        }
+        /* check for our function */
+        if ((key.level() < initial_level(f))) {
+          // std::cout << "project: key " << key << " below intial level " << initial_level(f) << std::endl;
+          if (is_team_lead()) {
+            //std::cout << "FCOEFFS: key " << key << " function " << fnid << " above initial level, marking as Inner" << std::endl;
+            result_leaf_info_view(fnid) = LeafStatus::Inner;
+            coeffs_view.set_zero(fnid);
+          }
+          continue;
+        }
+        if (is_negligible<Fn,T,NDIM>(f, D.template bounding_box<T>(key), truncate_tol)) {
+          /* set leaf status to Inner */
+          if (is_team_lead()) {
+            //std::cout << "FCOEFFS: key " << key << " negligible with tol " << truncate_tol << std::endl;
+            result_leaf_info_view(fnid) = LeafStatus::Invalid;
+            /* zero coeffs */
+            coeffs_view.set_zero(fnid);
+          }
+          continue;
+        }
+        // if we have not seen a leaf for this function it might still be zero (one of our siblings will be non-zero)
+        if (coeffs_view.is_zero(fnid)) {
+          continue;
+        }
         if (is_team_lead()) {
           /* get the coefficient inputs */
-          coeffs       = coeffs_view(fnid);
+          coeffs = coeffs_view(fnid);
         }
         SYNCTHREADS();
-        fcoeffs_kernel_impl(D, gldata, fns[fnid], key, K, fnid,
+        bool is_leaf_val = fcoeffs_kernel_impl(D, gldata, f, key, K, fnid,
                             values, r0, r1, child_values, x_vec, x, workspace,
-                            phibar_view, hgT_view, coeffs,
-                            &is_leaf[fnid], thresh);
+                            phibar_view, hgT_view, coeffs, thresh, truncate_tol);
+        if (is_team_lead()) {
+          if (is_leaf_val) {
+            //std::cout << "FCOEFFS: key " << key << " function " << fnid << " is a leaf, zeroing coeffs" << std::endl;
+            result_leaf_info_view(fnid) = LeafStatus::Leaf;
+          } else {
+            //std::cout << "FCOEFFS: key " << key << " function " << fnid << " is not a leaf, marking as Inner" << std::endl;
+            result_leaf_info_view(fnid) = LeafStatus::Inner;
+            coeffs_view.set_zero(fnid);
+          }
+        }
       }
     }
   } // namespace detail
@@ -160,15 +181,17 @@ namespace mra {
   void submit_fcoeffs_kernel(
       const mra::Domain<NDIM>& D,
       const T* gldata,
-      const TensorView<Fn, 1>& fns,
+      const DenseTensorView<Fn, 1>& fns,
       const mra::Key<NDIM>& key,
       size_type K,
       T* tmp,
-      const mra::TensorView<T, 2>& phibar_view,
-      const mra::TensorView<T, 2>& hgT_view,
-      mra::TensorView<T, NDIM+1>& coeffs_view,
-      bool* is_leaf_scratch,
+      const concepts::TensorView<2> auto& phibar_view,
+      const concepts::TensorView<2> auto& hgT_view,
+      concepts::TensorView<NDIM+1> auto& coeffs_view,
       T thresh,
+      T truncate_tol,
+      const DenseTensorView<LeafStatus, 1>& leaf_info_view,
+      DenseTensorView<LeafStatus, 1>& result_leaf_info_view,
       ttg::device::Stream stream)
   {
     /**
@@ -179,12 +202,12 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(K);
 
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
     /* launch one block per child */
     CALL_KERNEL(detail::fcoeffs_kernel, fns.size(), thread_dims, smem_size, stream,
       (D, gldata, fns, key, K, tmp,
        phibar_view, hgT_view, coeffs_view,
-       is_leaf_scratch, thresh));
+       thresh, truncate_tol, leaf_info_view, result_leaf_info_view));
     checkSubmit();
   }
 

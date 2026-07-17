@@ -23,11 +23,11 @@ namespace mra {
 #endif // TTG_PARSEC_IMPORTED
     madness::initialize(argc, argv, /* nthread = */ 1, /* quiet = */ true);
     madness::World& world = madness::World::get_default();
-    madness::startup(world, 0, nullptr, false);
+    madness::startup(world, argc, argv, false);
 
 #if !defined(MRA_ENABLE_HOST) && defined(MRA_HAVE_SCRATCH_ALLOCATOR)
-    // adjust the pinned memory allocator through TA
-    TiledArray::device::Env::initialize(TiledArray::get_default_world(), 1UL<<32, 1UL<<40);
+    // adjust the pinned memory allocator through TTG's environment settings
+    ttg::Env::initialize(1UL<<32, 1UL<<40);
 #endif // MRA_ENABLE_HOST
   }
 

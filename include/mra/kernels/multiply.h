@@ -27,20 +27,20 @@ namespace mra {
       const Domain<NDIM>& D,
       const Key<NDIM>& keyA,
       const Key<NDIM>& keyB,
-      const TensorView<T, NDIM>& nodeA,
-      const TensorView<T, NDIM>& nodeB,
-      TensorView<T, NDIM+1>& cnodesA,
-      TensorView<T, NDIM+1>& cnodesB,
-      TensorView<T, NDIM>& cnodeR,
-      TensorView<T, NDIM>& cnodeD,
-      TensorView<T, NDIM>& nodeR,
-      TensorView<T, NDIM+1>& r1,
+      const concepts::TensorView<NDIM> auto& nodeA,
+      const concepts::TensorView<NDIM> auto& nodeB,
+      concepts::TensorView<NDIM+1> auto& cnodesA,
+      concepts::TensorView<NDIM+1> auto& cnodesB,
+      concepts::TensorView<NDIM> auto& cnodeR,
+      concepts::TensorView<NDIM> auto& cnodeD,
+      concepts::TensorView<NDIM> auto& nodeR,
+      concepts::TensorView<NDIM+1> auto& r1,
       T* workspace,
-      const TensorView<T, 2>& hgT,
-      const TensorView<T, 2>& phi,
-      const TensorView<T, 2>& phiT,
-      const TensorView<T, 2>& phibar,
-      const TensorView<T, 1>& quad_x,
+      const concepts::TensorView<2> auto& hgT,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phiT,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
       size_type K)
     {
       Key<NDIM> target;
@@ -74,11 +74,11 @@ namespace mra {
       // compress the result(r1 which is NDIM+1 tensorview) and store scaling functions to nodeR
       for (int i = 0; i<target.num_children(); ++i) {
         auto child_slice = get_child_slice<NDIM>(target, K, i);
-        const TensorView<T, NDIM>& in = r1(i);
+        const auto& in = r1(i);
         cnodeR(child_slice) = in;
       }
 
-      transform<NDIM>(cnodeR, hgT, cnodeD, workspace);
+      transform(cnodeR, hgT, cnodeD, workspace);
       if (keyA.level() > 0) {
         auto child_slice = get_child_slice<NDIM>(target, K, 0);
         nodeR = cnodeD(child_slice);
@@ -92,20 +92,21 @@ namespace mra {
       const Domain<NDIM>& D,
       const Key<NDIM>& keyA,
       const Key<NDIM>& keyB,
-      const TensorView<T, NDIM+1> nodeA_view,
-      const TensorView<T, NDIM+1> nodeB_view,
-      TensorView<T, NDIM+1> nodeR_view,
+      const concepts::TensorView<NDIM+1> auto nodeA_view,
+      const concepts::TensorView<NDIM+1> auto nodeB_view,
+      concepts::TensorView<NDIM+1> auto nodeR_view,
       T* tmp,
-      const TensorView<T, 2>& hgT,
-      const TensorView<T, 2>& phi,
-      const TensorView<T, 2> phiT,
-      const TensorView<T, 2> phibar,
-      const TensorView<T, 1>& quad_x,
+      const concepts::TensorView<2> auto hgT,
+      const concepts::TensorView<2> auto phi,
+      const concepts::TensorView<2> auto phiT,
+      const concepts::TensorView<2> auto phibar,
+      const concepts::TensorView<1> auto quad_x,
       size_type N,
       size_type K)
     {
-      SHARED TensorView<T, NDIM> nodeA, nodeB, nodeR, cnodesR, cnodesD;
-      SHARED TensorView<T, NDIM+1> cnodesA, cnodesB, r1;
+      SHARED DenseTensorView<const T, NDIM> nodeA, nodeB;
+      SHARED DenseTensorView<T, NDIM> nodeR, cnodesR, cnodesD;
+      SHARED DenseTensorView<T, NDIM+1> cnodesA, cnodesB, r1;
       SHARED T* workspace;
       size_type blockId = blockIdx.x;
       if (is_team_lead()){
@@ -113,15 +114,19 @@ namespace mra {
         const size_type TWO2NDIM = std::pow(2, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
         T* block_tmp = &tmp[blockId*multiply_tmp_size<NDIM>(K)];
-        r1        = TensorView<T, NDIM+1>(&block_tmp[        0], TWO2NDIM, K, K, K);
-        cnodesA   = TensorView<T, NDIM+1>(&block_tmp[ 8*K2NDIM], TWO2NDIM, K, K, K);
-        cnodesB   = TensorView<T, NDIM+1>(&block_tmp[16*K2NDIM], TWO2NDIM, K, K, K);
-        cnodesR   = TensorView<T, NDIM>(&block_tmp  [24*K2NDIM], 2*K, 2*K, 2*K);
-        cnodesD   = TensorView<T, NDIM>(&block_tmp  [32*K2NDIM + TWOK2NDIM], 2*K, 2*K, 2*K);
+        r1        = DenseTensorView<T, NDIM+1>(&block_tmp[        0], TWO2NDIM, K, K, K);
+        cnodesA   = DenseTensorView<T, NDIM+1>(&block_tmp[ 8*K2NDIM], TWO2NDIM, K, K, K);
+        cnodesB   = DenseTensorView<T, NDIM+1>(&block_tmp[16*K2NDIM], TWO2NDIM, K, K, K);
+        cnodesR   = DenseTensorView<T, NDIM>(&block_tmp  [24*K2NDIM], 2*K, 2*K, 2*K);
+        cnodesD   = DenseTensorView<T, NDIM>(&block_tmp  [32*K2NDIM + TWOK2NDIM], 2*K, 2*K, 2*K);
         workspace = &block_tmp[32*K2NDIM + 2*TWOK2NDIM];
       }
 
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
+        if (nodeR_view.is_zero(fnid)) {
+          /* no work to do */
+          continue;
+        }
         if (is_team_lead()) {
           nodeA = nodeA_view(fnid);
           nodeB = nodeB_view(fnid);
@@ -139,14 +144,14 @@ namespace mra {
     const Domain<NDIM>& D,
     const Key<NDIM>& keyA,
     const Key<NDIM>& keyB,
-    const TensorView<T, NDIM+1>& funcA,
-    const TensorView<T, NDIM+1>& funcB,
-    TensorView<T, NDIM+1>& funcR,
-    const TensorView<T, 2>& hgT,
-    const TensorView<T, 2>& phi,
-    const TensorView<T, 2>& phiT,
-    const TensorView<T, 2>& phibar,
-    const TensorView<T, 1>& quad_x,
+    const concepts::TensorView<NDIM+1> auto& funcA,
+    const concepts::TensorView<NDIM+1> auto& funcB,
+    concepts::TensorView<NDIM+1> auto& funcR,
+    const concepts::TensorView<2> auto& hgT,
+    const concepts::TensorView<2> auto& phi,
+    const concepts::TensorView<2> auto& phiT,
+    const concepts::TensorView<2> auto& phibar,
+    const concepts::TensorView<1> auto& quad_x,
     size_type N,
     size_type K,
     T* tmp,
@@ -154,31 +159,33 @@ namespace mra {
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    CONFIGURE_KERNEL((detail::multiply_kernel<T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::multiply_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::multiply_kernel, N, thread_dims, smem_size, stream,
       (D, keyA, keyB, funcA, funcB, funcR, tmp, hgT, phi, phiT, phibar,
         quad_x, N, K));
     checkSubmit();
   }
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instanatiation */
   extern template
   void submit_multiply_kernel<double, 3>(
     const Domain<3>& D,
     const Key<3>& keyA,
     const Key<3>& keyB,
-    const TensorView<double, 3+1>& funcA,
-    const TensorView<double, 3+1>& funcB,
-    TensorView<double, 3+1>& funcR,
-    const TensorView<double, 2>& hgT,
-    const TensorView<double, 2>& phi,
-    const TensorView<double, 2>& phiT,
-    const TensorView<double, 2>& phibar,
-    const TensorView<double, 1>& quad_x,
+    const SparseTensorView<double, 3+1>& funcA,
+    const SparseTensorView<double, 3+1>& funcB,
+    SparseTensorView<double, 3+1>& funcR,
+    const SparseTensorView<double, 2>& hgT,
+    const SparseTensorView<double, 2>& phi,
+    const SparseTensorView<double, 2>& phiT,
+    const SparseTensorView<double, 2>& phibar,
+    const SparseTensorView<double, 1>& quad_x,
     size_type N,
     size_type K,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

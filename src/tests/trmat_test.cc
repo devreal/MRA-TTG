@@ -26,16 +26,6 @@ void test_coeffs(int argc, char** argv) {
   static double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);; // coefficient for the Gaussian
   mra::FunctionData<double, 3> functiondata(K), functiondata2(2*K);
 
-  // mra::Convolution<double, 3> conv(K, npt, coeff, expnt, functiondata, functiondata2);
-  // const mra::Tensor<double, 1>& rnlp1 = conv.make_rnlp(2, 1);
-  // const mra::Tensor<double, 2>& rnlij1 = conv.make_rnlij(0, -1);
-  // const mra::Tensor<double, 1>& rnlp2 = conv.get_rnlp(2, -1);
-  // const mra::Tensor<double, 2>& rnlij2 = conv.make_rnlij(2, -1);
-  // auto rnlij1_view = rnlij1.current_view();
-  // auto rnlij2_view = rnlij2.current_view();
-  // auto rnlp1_view = rnlp1.current_view();
-  // auto rnlp2_view = rnlp2.current_view();
-
   madness::World world(SafeMPI::COMM_WORLD);
   startup(world, argc, argv);
 

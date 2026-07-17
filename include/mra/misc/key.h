@@ -38,13 +38,13 @@ namespace mra {
         static constexpr int num_children() { return (1ul<<NDIM); }
 
         /// Default constructor is deliberately default so that is POD
-        constexpr SCOPE Key() = default;
+        constexpr Key() = default;
 
         /// Copy constructor default is OK
-        constexpr SCOPE Key(const Key<NDIM>& key) = default;
+        constexpr Key(const Key<NDIM>& key) = default;
 
         /// Move constructor default is OK
-        constexpr SCOPE Key(Key<NDIM>&& key) = default;
+        constexpr Key(Key<NDIM>&& key) = default;
 
         /// Construct from batch, level and translation
         constexpr SCOPE Key(Batch b, Level n, const std::array<Translation,NDIM>& l)
@@ -57,10 +57,10 @@ namespace mra {
         { }
 
         /// Assignment default is OK
-        SCOPE Key& operator=(const Key<NDIM>& other) = default;
+        Key& operator=(const Key<NDIM>& other) = default;
 
         /// Move assignment default is OK
-        SCOPE Key& operator=(Key<NDIM>&& key) = default;
+        Key& operator=(Key<NDIM>&& key) = default;
 
         /* The HIP compiler seems to stumble over the spaceship operator (rocm/6.4.1)
          * and complains about missing references to memcmp when linking.
@@ -226,7 +226,7 @@ namespace mra {
         }
 
         SCOPE constexpr static Key<NDIM> invalid() {
-            return Key<NDIM>(b, -1);
+            return Key<NDIM>(0, -1);
         }
 
         SCOPE constexpr bool is_invalid() const {

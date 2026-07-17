@@ -24,7 +24,7 @@ namespace mra {
 
   public:
 
-    using tensor_type = Tensor<FunctionType, 1>;
+    using tensor_type = DenseTensor<FunctionType, 1>;
     using view_type = typename tensor_type::view_type;
 
     using function_type = FunctionType;

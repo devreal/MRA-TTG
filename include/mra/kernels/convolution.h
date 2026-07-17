@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <iostream>
 #include "mra/ops/mxm.h"
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
@@ -28,15 +29,16 @@ namespace mra{
   namespace detail {
 
     template <typename T, Dimension NDIM>
-    SCOPE void conv_transform(
+    DEVSCOPE void conv_transform(
+      int opid,
       const size_type dimk,
       const size_type mu,
       const T mufac,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& trans,
-      const TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& result,
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2)
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& trans,
+      const concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& result,
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2)
     {
       size_type rank = dimk; // doing computation assuming full rank
       size_type size = 1;
@@ -44,7 +46,6 @@ namespace mra{
       size_type dimi = size/dimk;
 
       // assume the tensors to be uninitialized
-      result = 0.0;
       work1 = 0.0;
       work2 = 0.0;
 
@@ -52,15 +53,15 @@ namespace mra{
       T* work2ptr = work2.data();
 
       //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size
-      //          << " norm f " << normf(f) << " trans " << 0 << normf(trans[0](mu)) << std::endl;
-      mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0](mu).data());
+      //          << " norm f " << normf(f) << " trans " << 0 << normf(trans[0](opid, mu)) << std::endl;
+      mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0](opid, mu).data());
 
       size = rank * size / dimk;
       dimi = size / dimk;
 
       for (size_type d = 1; d < NDIM; ++d) {
         //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size  << " trans " << d << " norm " << norm(trans[d]) << std::endl;
-        mTxmq(dimi, rank, dimk, work2ptr, work1ptr, trans[d](mu).data());
+        mTxmq(dimi, rank, dimk, work2ptr, work1ptr, trans[d](opid, mu).data());
         size = rank * size / dimk;
         dimi = size / dimk;
         std::swap(work1ptr, work2ptr);
@@ -123,67 +124,75 @@ namespace mra{
 #endif // 0
 
     template<typename T, Dimension NDIM>
-    void muopxv_fast(
+    DEVSCOPE void muopxv_fast(
+      int opid,
       size_type K,
       const size_type mu,
       const T mufac,
       const T tol,
       const std::array<bool, 2>& at,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transr,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transs,
-      const TensorView<T, 3>& opnorms,
-      TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& f0,
-      TensorView<T, NDIM>& resultc,
-      TensorView<T, NDIM>& result,
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2,
-      TensorView<T, NDIM>& work1_k,
-      TensorView<T, NDIM>& work2_k)
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<4> auto& opnorms,
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2,
+      concepts::TensorView<NDIM> auto& work1_k,
+      concepts::TensorView<NDIM> auto& work2_k)
     {
       // R term
       double Rnorm = 1.0;
-      for (std::size_t d=0; d<NDIM; ++d) Rnorm *= opnorms(mu, d, (size_type)NormId::Rnorm);
+      for (std::size_t d=0; d<NDIM; ++d) Rnorm *= opnorms(opid, mu, d, (size_type)NormId::Rnorm);
       if (at[0] && Rnorm > 1.e-20) {
 
-        conv_transform<T, NDIM>(2*K, mu, mufac, transr, f, result, work1, work2);
+        conv_transform<T, NDIM>(opid, 2*K, mu, mufac, transr, f, result, work1, work2);
       }
 
       // S term
       double Snorm = 1.0;
-      for (std::size_t d=0; d<NDIM; ++d) Snorm *= opnorms(mu, d, (size_type)NormId::Snorm);
+      for (std::size_t d=0; d<NDIM; ++d) Snorm *= opnorms(opid, mu, d, (size_type)NormId::Snorm);
       if (at[1] && Snorm > 0.0) {
-        conv_transform<T, NDIM>(K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
+        conv_transform<T, NDIM>(opid, K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
       }
+
+      //auto rnorm = normf(result);
+      //auto rcnorm = normf(resultc);
+      //if (is_team_lead())
+      //  printf("MRA APPLY CONV: opid %d mu %d result %e resultc %e\n",
+      //       opid, mu, rnorm, rcnorm);
 
     }
 
 
     template<typename T, Dimension NDIM>
     DEVSCOPE void apply_conv(
+      int opid,
       size_type K,
       const T fac,
       const T tol,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transr,
-      const std::array<TensorView<T, 3>, (size_t)NDIM>& transs,
-      const TensorView<T, 3>& opnorms,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<4> auto& opnorms,
       const std::array<bool, 2>& at,
-      TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& f0,
-      TensorView<T, NDIM>& resultc,
-      TensorView<T, NDIM>& result,  // size K, stores the sum
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2)
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,  // size K, stores the sum
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2)
     {
-      SHARED TensorView<T, NDIM> work1_k, work2_k;
-      SHARED std::array<Slice,NDIM> s0;
+      SHARED DenseTensorView<T, NDIM> work1_k, work2_k;
+      // cannot be SHARED because ctors won't run
+      std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       if (is_team_lead()) {
-        s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
-        work1_k = TensorView<T, NDIM>(work1.data(), K);
-        work2_k = TensorView<T, NDIM>(work2.data(), K);
+        work1_k = DenseTensorView<T, NDIM>(work1.data(), K);
+        work2_k = DenseTensorView<T, NDIM>(work2.data(), K);
       }
 
-      size_type rank = transr[0].dim(0); // doing computation assuming full rank
+      const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
 
       T optol = 0.01*tol/rank; // can potentially be a parameter
 
@@ -194,97 +203,92 @@ namespace mra{
       // TODO: why does this fix correctness?!
       result = 0.0;
       resultc = 0.0;
-      work1 = 0.0;
-      work2 = 0.0;
 
-      /**
-       * TODO: split this out into two kernels:
-       *  - one kernel that computes the contributions for each muop separately
-       *  - one that accumulates the contributions and applies the aggressive screening analogous to MADNESS
-       * That way we gain significant parallelism even for small N.
-       */
-      for (int mu = 0; mu < rank; ++mu) {
-        T munorm = opnorms(mu, 0, (size_type)NormId::MUnorm);
+      for (size_type mu = 0; mu < rank; ++mu) {
+        T munorm = opnorms(opid, mu, 0, (size_type)NormId::MUnorm);
         if (munorm > optol) {
-          T fac = opnorms(mu, 0, (size_type)NormId::Fac);
-          muopxv_fast(K, mu, fac, tol/std::abs(fac), at, transr, transs, opnorms, f, f0,
-                      resultc, result, work1, work2, work1_k, work2_k);
+          T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
+          muopxv_fast<T, NDIM>(opid, K, mu, mufac, tol/std::abs(mufac), at, transr, transs, opnorms, f, f0,
+                               resultc, result, work1, work2, work1_k, work2_k);
         }
       }
-      //r(s0).gaxpy(1.0,r0,1.0);
-      // OR
-      //foreach_idxs(resultc, [&](auto... idxs) {
-      //  result(idxs...) += resultc(idxs...);
-      //});
       result(s0) += resultc;
+    }
 
+    /**
+     * Combines a (fully summed) convolution result with the pre-existing `in` node and
+     * applies the aggressive-screening threshold, writing the final per-function norm to
+     * `resnorm_out` (if non-null).
+     */
+    template <typename T, Dimension NDIM>
+    DEVSCOPE void convolution_finalize(
+      const T fac,
+      const T tol,
+      const concepts::TensorView<NDIM> auto& in,
+      concepts::TensorView<NDIM> auto& result,
+      T* resnorm_out)
+    {
+      T resnorm = normf(result);
+      bool above_threshold = (resnorm > (0.3 * tol / fac));
+
+      // Accumulate input if not empty
+      if (!in.empty()) {
+        if (above_threshold) {
+          /* add input values */
+          result += in;
+        } else {
+          /* if input is empty, we can just copy the result to it */
+          result = in;
+        }
+        resnorm = normf(result);
+      } else if (!above_threshold) {
+        /* if input is empty and result is below threshold, we can just leave it zero */
+        result = 0.0;
+        resnorm = 0.0;
+      }
+      if (resnorm_out != nullptr) {
+        if (is_team_lead()) {
+          *resnorm_out = resnorm;
+        }
+      }
     }
 
     template <typename T, Dimension NDIM>
     DEVSCOPE void convolution_kernel_impl(
       Key<NDIM> key,
+      int opid,
       Key<NDIM> displacement,
       size_type K,
-      const T opnorm,
       const T fac,
       const T tol,
-      const std::array<TensorView<T, 3>, NDIM>& transr,
-      const std::array<TensorView<T, 3>, NDIM>& transs,
-      const TensorView<T, 3>& opnorms,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<4> auto& opnorms,
       const std::array<bool, 2>& at,
-      TensorView<T, NDIM>& in,
-      TensorView<T, NDIM>& f,
-      TensorView<T, NDIM>& f0,
-      TensorView<T, NDIM>& resultc,
-      TensorView<T, NDIM>& result,  // size K, stores the sum
-      TensorView<T, NDIM>& work1,
-      TensorView<T, NDIM>& work2,
+      concepts::TensorView<NDIM> auto& in,
+      concepts::TensorView<NDIM> auto& f,
+      concepts::TensorView<NDIM> auto& f0,
+      concepts::TensorView<NDIM> auto& resultc,
+      concepts::TensorView<NDIM> auto& result,  // size K, stores the sum
+      concepts::TensorView<NDIM> auto& work1,
+      concepts::TensorView<NDIM> auto& work2,
       T* resnorm_out)
     {
       SYNCTHREADS();
-      T normthresh = 1e-20; // Can potentially be a parameter
       const T cnorm = mra::normf(f);
-      T resnorm = 0.0;
+      T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
 
       //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
-
-        apply_conv(K, fac, (tol / fac / cnorm), transr, transs,
+        apply_conv<T, NDIM>(opid, K, fac, (tol / fac / cnorm), transr, transs,
                    opnorms, at, f, f0, resultc,
                    result, work1, work2);
-
-        // set to zero if norm is below threshold; this is the aggressive screening analogous to MADNESS
-        resnorm = normf(result);
-      }
-
-      bool above_threshold = (resnorm > (0.3 * tol / fac));
-
-      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement
-      //          << ", in " << normf(in)
-      //          << ", tol " << tol << ", fac " << fac
-      //          << ", result " << resnorm
-      //          << " above threshold " << above_threshold << std::endl;
-
-      //std::cout << "MRA_OP_APPLY BEFORE ACCUMULATE " << key << " disp " << displacement << " result \n" << result << std::endl;
-
-      // if not above the threshold in FunctionImpl::do_apply we drop the result
-      if (!above_threshold) {
-        /* reset result to 0 */
+      } else {
         result = 0.0;
       }
-      // Accumulate input if not empty
-      if (!in.empty()) {
-        /* add input values */
-        result += in;
-      }
 
-      if (resnorm_out != nullptr) {
-        resnorm = normf(result);
-        if (is_team_lead()) {
-          *resnorm_out = resnorm;
-        }
-      }
+      convolution_finalize<T, NDIM>(fac, tol, in, result, resnorm_out);
 
       //std::cout << "MRA_OP_APPLY " << key << " disp " << displacement << " result " << resnorm << std::endl;
 
@@ -297,21 +301,20 @@ namespace mra{
       Key<NDIM> displacement,
       size_type K,
       size_type N,
-      const T opnorm,
       const T fac,
       const T tol,
-      const TensorView<T, NDIM+1> in_view,
-      const TensorView<T, NDIM+1> f_view,
-      TensorView<T, NDIM+1> result_view,
-      TensorView<T, 1>& resnorms,
-      const std::array<TensorView<T, 3>, (size_t)NDIM> transr,
-      const std::array<TensorView<T, 3>, (size_t)NDIM> transs,
-      const TensorView<T, 3>& opnorms,
+      const concepts::TensorView<NDIM+1> auto in_view,
+      const concepts::TensorView<NDIM+1> auto f_view,
+      concepts::TensorView<NDIM+1> auto result_view,
+      concepts::TensorView<1> auto resnorms,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto transs,
+      const concepts::TensorView<4> auto opnorms_view,
       const std::array<bool, 2> at,
       T* tmp)
     {
-      SHARED TensorView<T, NDIM> f0, resultc, work1, work2;
-      SHARED TensorView<T, NDIM> f, result, in;
+      SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, result;
+      SHARED DenseTensorView<const T, NDIM> f, in;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp[blockId*convolution_tmp_size<NDIM>(K)];
@@ -320,44 +323,64 @@ namespace mra{
 
       if (is_team_lead()) {
         // construct temporaries and pass them to conv_transform
-        f0        = TensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
-        resultc   = TensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
-        work1     = TensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
-        work2     = TensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
+        f0        = DenseTensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
+        resultc   = DenseTensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
+        work1     = DenseTensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
+        work2     = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
       }
 
-      for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x){
+      for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x) {
+        if (result_view.is_zero(blockId)) {
+          // nothing to do
+          if (is_team_lead() && !resnorms.empty()) {
+            resnorms[blockId] = 0.0;
+          }
+          continue;
+        }
         if (is_team_lead()) {
           in     = in_view(blockId);
           f      = f_view(blockId);
           result = result_view(blockId);
         }
         SYNCTHREADS();
+        if (f_view.is_zero(blockId)) {
+          /* copy input to output */
+          result = in;
+          if (!resnorms.empty()) {
+            auto resnorm = normf(result);
+            if (is_team_lead()) {
+              resnorms[blockId] = resnorm;
+            }
+          }
+          continue;
+        }
 
-        convolution_kernel_impl<T, NDIM>(key, displacement, K, opnorm, fac, tol,
-                                         transr, transs, opnorms, at, in, f, f0,
+        int opid = opnorms_view.dim(0) > 1 ? blockId : 0; // TODO: this is a bit hacky, can we do better?
+
+        convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
+                                         transr, transs, opnorms_view, at, in, f, f0,
                                          resultc, result, work1, work2,
                                          resnorms.empty() ? nullptr : &resnorms[blockId]);
       }
     }
+
   } // namespace detail
 
   template <typename T, Dimension NDIM>
   void submit_convolution_kernel(
     Key<NDIM> key,
-	Key<NDIM> displacement,
+	  Key<NDIM> displacement,
     size_type K,
     size_type N,
-    const T opnorm,
     const T fac,
     const T tol,
-    const TensorView<T, NDIM+1>& in,
-    const TensorView<T, NDIM+1>& f,
-    TensorView<T, NDIM+1>& result,
-    TensorView<T, 1>& resnorms,
-    const std::array<TensorView<T, 3>, (size_t)NDIM>& transr,
-    const std::array<TensorView<T, 3>, (size_t)NDIM>& transs,
-    const TensorView<T, 3>& opnorms,
+    const concepts::TensorView<NDIM+1> auto& in_view,
+    const concepts::TensorView<NDIM+1> auto& f_view,
+    concepts::TensorView<NDIM+1> auto& result_view,
+    concepts::TensorView<1> auto& resnorms,
+    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+    const concepts::TensorView<4> auto& opnorms,
     const std::array<bool, 2>& at,
     T* tmp,
     ttg::device::Stream stream)
@@ -365,14 +388,14 @@ namespace mra{
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
 
-    CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
-                (key, displacement, K, N, opnorm, fac, tol, in, f, result,
+                (key, displacement, K, N, fac, tol, in_view, f_view, result_view,
                  resnorms, transr, transs, opnorms, at, tmp));
     checkSubmit();
   }
 
-
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instantiation */
   extern template
   void submit_convolution_kernel<double, 3>(
@@ -380,19 +403,19 @@ namespace mra{
     Key<3> displacement,
     size_type K,
     size_type N,
-    const double opnorm,
     const double fac,
     const double tol,
-    const TensorView<double, 3+1>& in,
-    const TensorView<double, 3+1>& contribution,
-    TensorView<double, 3+1>& result,
-    TensorView<double, 1>& resnorms,
-    const std::array<TensorView<double, 3>, 3>& transr,
-    const std::array<TensorView<double, 3>, 3>& transs,
-    const TensorView<double, 3>& opnorms,
+    const SparseTensorView<double, 3+1>& in,
+    const SparseTensorView<double, 3+1>& contribution,
+    SparseTensorView<double, 3+1>& result,
+    SparseTensorView<double, 1>& resnorms,
+    const std::array<SparseTensorView<double, 4>, 3>& transr,
+    const std::array<SparseTensorView<double, 4>, 3>& transs,
+    const DenseTensorView<double, 4>& opnorms,
     const std::array<bool, 2>& at,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

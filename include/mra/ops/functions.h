@@ -15,8 +15,47 @@ namespace mra {
 
     /// In given box return the truncation tolerance for given threshold
     template <typename T, Dimension NDIM>
-    SCOPE T truncate_tol(const Key<NDIM>& key, const T thresh) {
-        return thresh; // nothing clever for now
+    T truncate_tol(const Key<NDIM>& key, const T thresh, T cell_min_width, int truncate_mode = 0) {
+
+        // RJH ... introduced max level here to avoid runaway
+        // refinement due to truncation threshold going down to
+        // intrinsic numerical error
+        const Level MAXLEVEL1 = 20; // 0.5**20 ~= 1e-6
+        const Level MAXLEVEL2 = 10; // 0.25**10 ~= 1e-6
+
+        if (truncate_mode == 0) {
+            return thresh;
+        }
+        else if (truncate_mode == 1) {
+            double L = cell_min_width;
+            return thresh*std::min(1.0,pow(0.5,double(std::min(key.level(),MAXLEVEL1)))*L);
+        }
+        else if (truncate_mode == 2) {
+            double L = cell_min_width;
+            return thresh*std::min(1.0,pow(0.25,double(std::min(key.level(),MAXLEVEL2)))*L*L);
+        }
+        else if (truncate_mode == 3) {
+            // similar to truncate mode 1, but with an additional factor to
+            // account for an increased number of boxes in higher dimensions
+
+            // here is our handwaving argument: this threshold will give each
+            // FunctionNode an error of less than thresh. The total error can
+            // then be as high as sqrt(#nodes) * thresh. Therefore in order to
+            // account for higher dimensions: divide thresh by about the root of
+            // number of siblings (2^NDIM) that have a large error when we
+            // refine along a deep branch of the tree. FAB
+            //
+            // Nope ... it can easily be as high as #nodes * tol.  The real
+            // fix for this is an end-to-end error analysis of the larger
+            // application and if desired to include this factor into the
+            // threshold selected by the application. RJH
+            const static double fac=1.0/std::pow(2,NDIM*0.5);
+            double L = cell_min_width;
+            return thresh*fac*std::min(1.0,pow(0.5,double(std::min(key.level(),MAXLEVEL1)))*L);
+
+        } else {
+            throw std::runtime_error("truncate_tol: unknown truncate mode " + std::to_string(truncate_mode));
+        }
     }
 
     // volume of n-dimensional sphere of radius R
@@ -45,7 +84,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distancesq(const Coordinate<T,1>& p, const TensorView<T,1>& q, T* rsq, size_type N) {
+    SCOPE void distancesq(const Coordinate<T,1>& p, const concepts::TensorView<1> auto& q, T* rsq, size_type N) {
         const T x = p(0);
 #ifdef HAVE_DEVICE_ARCH
         for (size_type i = thread_id(); i < N; i += block_size()) {
@@ -62,7 +101,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distancesq(const Coordinate<T,2>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distancesq(const Coordinate<T,2>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
 #ifdef HAVE_DEVICE_ARCH
@@ -82,7 +121,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distancesq(const Coordinate<T,3>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distancesq(const Coordinate<T,3>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
         const T z = p(2);
@@ -105,7 +144,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distance(const Coordinate<T,1>& p, const TensorView<T,1>& q, T* rsq, size_type N) {
+    SCOPE void distance(const Coordinate<T,1>& p, const concepts::TensorView<1> auto& q, T* rsq, size_type N) {
         const T x = p(0);
 #ifdef HAVE_DEVICE_ARCH
         for (size_type i = thread_id(); i < N; i += block_size()) {
@@ -122,7 +161,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distance(const Coordinate<T,2>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distance(const Coordinate<T,2>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
 #ifdef HAVE_DEVICE_ARCH
@@ -142,7 +181,7 @@ namespace mra {
     }
 
     template <typename T>
-    SCOPE void distance(const Coordinate<T,3>& p, const TensorView<T,2>& q, T* rsq, size_type N) {
+    SCOPE void distance(const Coordinate<T,3>& p, const concepts::TensorView<2> auto& q, T* rsq, size_type N) {
         const T x = p(0);
         const T y = p(1);
         const T z = p(2);
@@ -220,8 +259,24 @@ namespace mra {
       }
     }
 
-    template <typename T, Dimension NDIM, typename accumulatorT>
-    SCOPE void sumabssq(const TensorView<T, NDIM>& a, accumulatorT* sum) {
+    /**
+     * Accumulator type for sum of squares function.
+     * Maps float to double for higher accuracy.
+     */
+    template<typename T>
+    struct accumulator_type {
+      using type = std::decay_t<T>;
+    };
+    template<>
+    struct accumulator_type<float> {
+      using type = double;
+    };
+
+    template<typename T>
+    using accumulator_type_t = typename accumulator_type<T>::type;
+
+    template <typename accumulatorT>
+    SCOPE void sumabssq(const concepts::TensorView auto& a, accumulatorT* sum) {
       accumulatorT s = 0.0;
       /* every thread computes a partial sum */
       foreach_idx(a, [&](size_type i) mutable {
@@ -233,8 +288,8 @@ namespace mra {
 
 
     /// Compute Frobenius norm ... still needs specializing for complex
-    template <typename T, Dimension NDIM, typename accumulatorT = std::decay_t<T>>
-    SCOPE accumulatorT normf(const TensorView<T, NDIM>& a) {
+    SCOPE auto normf(const concepts::TensorView auto& a) {
+      using accumulatorT = accumulator_type_t<typename std::decay_t<decltype(a)>::value_type>;
 #ifdef HAVE_DEVICE_ARCH
       __shared__ accumulatorT sum;
 #else  // HAVE_DEVICE_ARCH

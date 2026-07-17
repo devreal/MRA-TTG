@@ -1,170 +1,91 @@
 
-# define a base target for the MRA
-add_library(libmra-base-parsec INTERFACE)
-target_include_directories(libmra-base-parsec INTERFACE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(libmra-base-parsec INTERFACE MADworld MADchem MADtensor MADmra ttg-parsec $<$<TARGET_EXISTS:blaspp>:blaspp>)
-target_compile_definitions(libmra-base-parsec INTERFACE TTG_USE_PARSEC=1)
+# ── Base interface library ────────────────────────────────────────────────────
+add_library(mra-base INTERFACE)
+add_library(mra::base ALIAS mra-base)
+target_include_directories(mra-base INTERFACE
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(mra-base INTERFACE
+  MADworld MADtensor MADmra ttg-parsec
+  $<$<TARGET_EXISTS:blaspp>:blaspp>
+)
+target_compile_definitions(mra-base INTERFACE TTG_USE_PARSEC=1)
+if (MRA_ENABLE_EXPLICIT_INSTANTIATION)
+  target_compile_definitions(mra-base INTERFACE MRA_ENABLE_EXPLICIT_INSTANTIATION=1)
+endif()
 
+include(MRAGPUWrappers)
+
+# ── Host (CPU) implementation ─────────────────────────────────────────────────
 set(MRA_SOURCES gl.cc init.cc twoscale.cc)
-set(MRA_KERNEL_SOURCES kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc kernels/derivative.cc kernels/convolution.cc)
+set(MRA_KERNEL_SOURCES
+  kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc
+  kernels/derivative.cc kernels/convolution.cc
+)
 
-#define a target for the host
-add_library(libmra-host-parsec OBJECT ${MRA_SOURCES} ${MRA_KERNEL_SOURCES})
+add_library(mra-host STATIC ${MRA_SOURCES} ${MRA_KERNEL_SOURCES})
+add_library(mra::host ALIAS mra-host)
+target_link_libraries(mra-host PUBLIC mra-base)
+target_compile_definitions(mra-host PUBLIC MRA_ENABLE_HOST=1)
 
-target_link_libraries(libmra-host-parsec PUBLIC libmra-base-parsec)
-target_compile_definitions(libmra-host-parsec PUBLIC MRA_ENABLE_HOST=1)
-
-add_executable(mad-pcr
-               examples/pcr/test_pcr_madness.cc)
-target_link_libraries(mad-pcr PUBLIC MADchem)
-target_include_directories(mad-pcr PUBLIC ${CMAKE_SOURCE_DIR}/include)
-
-add_executable(mra-pcr-host-parsec
-               examples/pcr/test_pcr.cc)
-target_link_libraries(mra-pcr-host-parsec PUBLIC libmra-host-parsec)
-
-add_executable(mra-deriv-host-parsec
-               examples/derivative/bench_derivative.cc)
-target_link_libraries(mra-deriv-host-parsec PUBLIC libmra-host-parsec)
-
-add_executable(mad-derivative
-               examples/derivative/bench_mad_derivative.cc)
-target_link_libraries(mad-derivative PUBLIC MADchem)
-target_include_directories(mad-derivative PUBLIC ${CMAKE_SOURCE_DIR}/include)
-
-add_executable(mra-convolution-host-parsec
-               autocorr.cc examples/convolution/test_convolution.cc)
-target_link_libraries(mra-convolution-host-parsec PUBLIC libmra-host-parsec)
-
-add_executable(mad-convolution examples/convolution/test_convolution_madness.cc)
-target_link_libraries(mad-convolution PUBLIC libmra-host-parsec)
-
-add_executable(mra-unit-host-parsec
-               examples/unit/test_unit.cc)
-target_link_libraries(mra-unit-host-parsec PUBLIC libmra-host-parsec)
-
-# Holding this off until BLAS in MADNESS works for our use case
-add_executable(mra-mad-deriv-host-parsec
-               tests/mad_derivative_test.cc)
-target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
-
-add_executable(mra-mad-conv-host-parsec
-               tests/mad_convolution_test.cc autocorr.cc)
-target_link_libraries(mra-mad-conv-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
-
-add_executable(mra-mad-debug-host-parsec
-               tests/mad_conv.cc autocorr.cc)
-target_link_libraries(mra-mad-debug-host-parsec PUBLIC MADworld MADtensor libmra-host-parsec)
-
-add_executable(mra-cycledimtest tests/cycledim_test.cc)
-target_link_libraries(mra-cycledimtest PUBLIC libmra-host-parsec)
-
-add_executable(mra-gaxpytest tests/gaxpy_test.cc)
-target_link_libraries(mra-gaxpytest PUBLIC libmra-host-parsec)
-
-# test to verify that tensor slices work
-add_executable(mra-tensortest tests/tensor_test.cc)
-target_link_libraries(mra-tensortest PUBLIC libmra-host-parsec)
-
-# test to verify that matrix multiplication works
-add_executable(mra-matrixtest tests/matrix_test.cc)
-target_link_libraries(mra-matrixtest PUBLIC libmra-host-parsec)
-
-#test to verify transition matrices
-# TODO: Right now we're taking the matrices directly from MADNESS, no need to test.
-#add_executable(mra-trmatrixtest autocorr.cc tests/trmat_test.cc)
-#target_link_libraries(mra-trmatrixtest PUBLIC MADworld MADmra MADtensor libmra-host-parsec)
-
-# test to verify that inner() works
-# FIXME: this test breaks because of BLAS in MADNESS, the baine of our existence
-#add_executable(mra-innertest madness/tests/inner_test.cc)
-#target_compile_definitions(mra-innertest PUBLIC MRA_ENABLE_HOST=1 TTG_USE_PARSEC=1)
-#target_link_libraries(mra-innertest PUBLIC MADworld ttg-parsec)
-
-
+# ── CUDA implementation ───────────────────────────────────────────────────────
 if (HAVE_CUDA)
 
-  #define a target for CUDA
-  add_library(libmra-cuda-base-parsec INTERFACE)
-  #if (TARGET Kokkos::kokkos)
-  #  target_link_libraries(libmra-cuda-base-parsec INTERFACE Kokkos::kokkos)
-  #  target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_HAVE_KOKKOS=1)
-  #else (TARGET Kokkos::kokkos)
-    target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES})
-    target_compile_options(libmra-cuda-base-parsec INTERFACE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --extended-lambda>)
-  #endif (TARGET Kokkos::kokkos)
+  add_library(mra-cuda-base INTERFACE)
+  add_library(mra::cuda-base ALIAS mra-cuda-base)
+  target_compile_definitions(mra-cuda-base INTERFACE
+    MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES}
+    MRA_ENABLE_CUDA=1
+  )
+  target_compile_options(mra-cuda-base INTERFACE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --extended-lambda>
+  )
+  target_link_libraries(mra-cuda-base INTERFACE
+    mra-base
+    $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
+  )
 
-  target_compile_definitions(libmra-cuda-base-parsec INTERFACE MRA_ENABLE_CUDA=1)
-  target_link_libraries(libmra-cuda-base-parsec INTERFACE libmra-base-parsec
-                                               $<$<TARGET_EXISTS:tiledarray>:tiledarray>
-                                               $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
+  mra_generate_gpu_wrappers(
+    SOURCES ${MRA_KERNEL_SOURCES}
+    CUDA_OUTPUT_VAR MRA_CUDA_KERNEL_SOURCES
+  )
 
-  set(MRA_CUDA_KERNEL_SOURCES ${MRA_KERNEL_SOURCES})
-  list(TRANSFORM MRA_CUDA_KERNEL_SOURCES REPLACE "\\.cc$" ".cu")
-  add_library(libmra-cuda-parsec OBJECT ${MRA_SOURCES} ${MRA_CUDA_KERNEL_SOURCES})
-
-  target_link_libraries(libmra-cuda-parsec PUBLIC libmra-cuda-base-parsec)
-
-  add_executable(mra-pcr-device-cuda-parsec examples/pcr/test_pcr.cu)
-  target_link_libraries(mra-pcr-device-cuda-parsec PUBLIC libmra-cuda-parsec)
-
-  add_executable(mra-deriv-device-cuda-parsec examples/derivative/bench_derivative.cu)
-  target_link_libraries(mra-deriv-device-cuda-parsec PUBLIC libmra-cuda-parsec)
-
-  add_executable(mra-convolution-device-cuda-parsec autocorr.cc examples/convolution/test_convolution.cu)
-  target_link_libraries(mra-convolution-device-cuda-parsec PUBLIC libmra-cuda-parsec)
-
-  add_executable(mra-unit-device-cuda-parsec examples/unit/test_unit.cu)
-  target_link_libraries(mra-unit-device-cuda-parsec PUBLIC libmra-cuda-parsec)
-
-  add_executable(mra-mad-deriv-device-cuda-parsec
-                 tests/mad_derivative_test.cu)
-  target_link_libraries(mra-mad-deriv-device-cuda-parsec PUBLIC MADworld MADtensor MADmra libmra-cuda-parsec)
-
-  if (TARGET Kokkos::kokkos)
-    add_executable(transformbench-cuda-kokkos-parsec benchmarks/transformbench/transformbench.cu)
-    target_link_libraries(transformbench-cuda-kokkos-parsec PUBLIC libmra-cuda-base-parsec Kokkos::kokkos)
-    target_compile_definitions(transformbench-cuda-kokkos-parsec PUBLIC MRA_HAVE_KOKKOS=1)
-  endif (TARGET Kokkos::kokkos)
-
-  add_executable(transformbench-cuda-parsec benchmarks/transformbench/transformbench.cu)
-  target_link_libraries(transformbench-cuda-parsec PUBLIC libmra-cuda-parsec)
-
-  find_package(CUDAToolkit)
-  if (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
-    add_executable(mxm-test-cuda tests/mxm_test.cu)
-    target_link_libraries(mxm-test-cuda PUBLIC CUDA::cublas libmra-cuda-base-parsec)
-  endif (TARGET CUDA::cublas AND TARGET mathdx::cublasdx)
+  add_library(mra-cuda STATIC ${MRA_SOURCES} ${MRA_CUDA_KERNEL_SOURCES})
+  add_library(mra::cuda ALIAS mra-cuda)
+  # Embed resolved device code so downstream links are self-contained
+  set_target_properties(mra-cuda PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  target_link_libraries(mra-cuda PUBLIC mra-cuda-base)
 
 endif (HAVE_CUDA)
 
+# ── HIP implementation ────────────────────────────────────────────────────────
 if (HAVE_HIP)
 
-  # define a target for HIP
+  mra_generate_gpu_wrappers(
+    SOURCES ${MRA_KERNEL_SOURCES}
+    HIP_OUTPUT_VAR MRA_HIP_KERNEL_SOURCES
+  )
 
-  set(MRA_HIP_KERNEL_SOURCES ${MRA_KERNEL_SOURCES})
-  list(TRANSFORM MRA_HIP_KERNEL_SOURCES REPLACE "\\.cc$" ".hip")
-
-  add_library(libmra-hip-parsec OBJECT ${MRA_SOURCES} ${MRA_HIP_KERNEL_SOURCES})
-  target_compile_definitions(libmra-hip-parsec PUBLIC MRA_ENABLE_HIP=1)
-  target_link_libraries(libmra-hip-parsec PUBLIC libmra-base-parsec
-                                              $<$<TARGET_EXISTS:tiledarray>:tiledarray>
-                                              $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>)
-
-  add_executable(mra-pcr-device-hip-parsec examples/pcr/test_pcr.hip)
-  target_link_libraries(mra-pcr-device-hip-parsec PUBLIC libmra-hip-parsec)
-
-  add_executable(mra-deriv-device-hip-parsec examples/derivative/bench_derivative.hip)
-  target_link_libraries(mra-deriv-device-hip-parsec PUBLIC libmra-hip-parsec)
-
-  add_executable(mra-convolution-device-hip-parsec autocorr.cc examples/convolution/test_convolution.hip)
-  target_link_libraries(mra-convolution-device-hip-parsec PUBLIC libmra-hip-parsec)
-
-  add_executable(mra-unit-device-hip-parsec examples/unit/test_unit.hip)
-  target_link_libraries(mra-unit-device-hip-parsec PUBLIC libmra-hip-parsec)
-
-  add_executable(mra-mad-deriv-device-hip-parsec
-                 tests/mad_derivative_test.hip)
-  target_link_libraries(mra-mad-deriv-device-hip-parsec PUBLIC libmra-hip-parsec)
+  add_library(mra-hip STATIC ${MRA_SOURCES} ${MRA_HIP_KERNEL_SOURCES})
+  add_library(mra::hip ALIAS mra-hip)
+  target_compile_definitions(mra-hip PUBLIC MRA_ENABLE_HIP=1)
+  target_link_libraries(mra-hip PUBLIC
+    mra-base
+    $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
+  )
 
 endif (HAVE_HIP)
+
+# ── Optional subdirectories ───────────────────────────────────────────────────
+if (MRA_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+
+if (MRA_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+
+if (MRA_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
+endif()

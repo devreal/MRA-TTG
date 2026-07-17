@@ -19,7 +19,12 @@
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
 
-namespace mra{
+namespace mra {
+
+  /**
+   * Multiply two sets of functions represented as FunctionsReconstructedNode objects.
+   * TODO: need to fix leaf information propagation!
+   */
   template<typename T, mra::Dimension NDIM, typename FunctionSetT,
            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_multiply(
@@ -57,7 +62,7 @@ namespace mra{
       if (t1.empty() || t2.empty()) {
         /* send out an empty result */
         auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N);
-        out.set_all_leaf(false);
+        out.set_all_leaf(LeafStatus::Leaf);
         send_out(std::move(out));
         if(!t1.empty()){
           std::vector<mra::Key<NDIM>> bcast_keys;
@@ -80,7 +85,9 @@ namespace mra{
       } else {
         auto keyA = t1.key();
         auto keyB = t2.key();
-        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
+        sparsity.nonzero_if_all(t1, t2);
+        auto out = mra::FunctionsReconstructedNode<T, NDIM>(key, sparsity, K, ttg::scope::Allocate);
         mra::apply_leaf_info(out, t1, t2);
         const auto& hgT = functiondata.get_hgT();
         const auto& phibar = functiondata.get_phibar();
@@ -114,6 +121,9 @@ namespace mra{
         auto hgT_view = hgT.current_view();
         auto& D = *db.current_device_ptr();
         T* tmp_device = tmp_scratch.current_device_ptr();
+
+        auto sparseman = make_sparsity_manager(out);
+        sparseman.populate_device_sparsity();
 
         submit_multiply_kernel(D, keyA, keyB, t1_view, t2_view, out_view, hgT_view, phi_view,
           phiT_view, phibar_view, quad_x_view, N, K, tmp_device, ttg::device::current_stream());

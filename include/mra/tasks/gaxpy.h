@@ -73,20 +73,16 @@ namespace mra{
         send_out(t1);
       } else {
 
-        auto out = mra::FunctionsCompressedNode<T, NDIM>(key, N, K, ttg::scope::Allocate);
+
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+        sparsity.nonzero_if_any(t1, t2);
+
+        auto out = mra::FunctionsCompressedNode<T, NDIM>(key, sparsity, K, ttg::scope::Allocate);
 
         /* adapt the leaf information of the result: if the children of both nodes are leafs then
-        * the children of the output node are leafs as well. */
+         * the children of the output node are leafs as well. */
         mra::apply_leaf_info(out, t1, t2);
         //std::cout << name << " " << key << " all leafs " << out.is_all_child_leaf() << std::endl;
-#if 0
-        for (size_type i = 0; i < N; ++i) {
-          for (auto child : children(key)) {
-            auto childidx = child.childindex();
-            out.is_child_leaf(i)[childidx] = t1.is_child_leaf(i)[childidx] && t2.is_child_leaf(i)[childidx];
-          }
-        }
-#endif // 0
 
         auto norms = FunctionNorms(name, out, t1, t2);
 
@@ -104,6 +100,9 @@ namespace mra{
         auto t1_view = t1.coeffs().current_view();
         auto t2_view = t2.coeffs().current_view();
         auto out_view = out.coeffs().current_view();
+
+        auto sparseman = make_sparsity_manager(out);
+        sparseman.populate_device_sparsity();
 
         submit_gaxpy_kernel(key, t1_view, t2_view, out_view,
                             scalarA, scalarB, N, K, ttg::device::current_stream());

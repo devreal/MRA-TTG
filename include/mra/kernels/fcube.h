@@ -6,8 +6,7 @@
 
 namespace mra{
   /// Make outer product of quadrature points for vectorized algorithms
-  template<typename T>
-  SCOPE void make_xvec(const TensorView<T,2>& x, TensorView<T,2>& xvec,
+  SCOPE void make_xvec(const concepts::TensorView<2> auto& x, concepts::TensorView<2> auto& xvec,
                           std::integral_constant<Dimension, 1>) {
     /* uses threads in 3 dimensions */
     xvec = x;
@@ -15,8 +14,7 @@ namespace mra{
   }
 
   /// Make outer product of quadrature points for vectorized algorithms
-  template<typename T>
-  SCOPE void make_xvec(const TensorView<T,2>& x, TensorView<T,2>& xvec,
+  SCOPE void make_xvec(const concepts::TensorView<2> auto& x, concepts::TensorView<2> auto& xvec,
                           std::integral_constant<Dimension, 2>) {
     const size_type K = x.dim(1);
     if (threadIdx.z == 0) {
@@ -32,8 +30,7 @@ namespace mra{
   }
 
   /// Make outer product of quadrature points for vectorized algorithms
-  template<typename T>
-  SCOPE void make_xvec(const TensorView<T,2>& x, TensorView<T,2>& xvec,
+  SCOPE void make_xvec(const concepts::TensorView<2> auto& x, concepts::TensorView<2> auto& xvec,
                           std::integral_constant<Dimension, 3>) {
     const size_type K = x.dim(1);
     for (size_type i=threadIdx.z; i<K; i += blockDim.z) {
@@ -55,7 +52,7 @@ namespace mra{
     const Domain<NDIM>& D,
     const T* gldata,
     const Key<NDIM>& key,
-    TensorView<T,2>& X, size_type K)
+    concepts::TensorView<2> auto& X, size_type K)
   {
     assert(X.dim(0) == NDIM);
     assert(X.dim(1) == K);
@@ -86,14 +83,15 @@ namespace mra{
     const T* gldata,
     const functorT& f,
     const Key<NDIM>& key,
-    const T thresh,
+    const T truncate_tol,
     // output
-    TensorView<T,3>& values,
+    concepts::TensorView<3> auto& values,
     size_type K,
     // temporaries
-    TensorView<T, 2>& x,
-    TensorView<T, 2>& xvec) {
-    if (is_negligible(f, D.template bounding_box<T>(key), truncate_tol(key,thresh))) {
+    concepts::TensorView<2> auto& x,
+    concepts::TensorView<2> auto& xvec)
+  {
+    if (is_negligible(f, D.template bounding_box<T>(key), truncate_tol)) {
         values = 0.0;
         /* TensorView assigment synchronizes */
     }
@@ -111,8 +109,8 @@ namespace mra{
       constexpr bool call_1d = (NDIM==1) && std::is_invocable_r<T, decltype(f), T>(); // f(x)
       constexpr bool call_2d = (NDIM==2) && std::is_invocable_r<T, decltype(f), T, T>(); // f(x,y)
       constexpr bool call_3d = (NDIM==3) && std::is_invocable_r<T, decltype(f), T, T, T>(); // f(x,y,z)
-      constexpr bool call_vec = std::is_invocable<decltype(f), const TensorView<T,2>&, T*, int>(); // vector API
-      static_assert(std::is_invocable<decltype(f), const TensorView<T,2>&, T*, int>());
+      constexpr bool call_vec = std::is_invocable<decltype(f), decltype(xvec), T*, int>(); // vector API
+      static_assert(std::is_invocable<decltype(f), decltype(xvec), T*, int>());
       static_assert(call_coord || call_1d || call_2d || call_3d || call_vec, "no working call");
 
       if constexpr (call_1d || call_2d || call_3d || call_vec) {

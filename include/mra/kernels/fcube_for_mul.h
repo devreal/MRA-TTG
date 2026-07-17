@@ -45,17 +45,18 @@ namespace mra {
     }
   }
 
-  template <typename T>
   SCOPE void phi_for_mul(
     const Level np,
     const Level nc,
     const Translation lp,
     const Translation lc,
-    TensorView<T, 2>& phi,
-    const TensorView<T, 1>& quad_x,
+    concepts::TensorView<2> auto& phi,
+    const concepts::TensorView<1> auto& quad_x,
     const size_type K)
   {
-    T scale = std::pow(2.0, T(np-nc));
+
+    using T = typename std::decay_t<decltype(phi)>::value_type;
+    T scale = std::pow(2.0, (np-nc));
 
     /**
      * The first K threads compute.
@@ -99,11 +100,11 @@ namespace mra {
     const Domain<NDIM>& D,
     const Key<NDIM>& child,
     const Key<NDIM>& parent,
-    const TensorView<T,NDIM>& coeffs,
-    TensorView<T, NDIM>& result_values,
-    const TensorView<T, 2>& phi_old,
-    const TensorView<T, 2>& phibar,
-    const TensorView<T, 1>& quad_x,
+    const concepts::TensorView<NDIM> auto& coeffs,
+    concepts::TensorView<NDIM> auto& result_values,
+    const concepts::TensorView<2> auto& phi_old,
+    const concepts::TensorView<2> auto& phibar,
+    const concepts::TensorView<1> auto& quad_x,
     const size_type K,
     T* workspace)
   {
@@ -122,10 +123,10 @@ namespace mra {
 #else
       T* phi = new T[K*K*NDIM];
 #endif
-      SHARED std::array<TensorView<T, 2>, NDIM> phi_views;
+      SHARED std::array<DenseTensorView<T, 2>, NDIM> phi_views;
       if(is_team_lead()){
         for (int d = 0; d < NDIM; ++d){
-          phi_views[d] = TensorView<T, 2>(&phi[d*K*K], K, K);
+          phi_views[d] = DenseTensorView<T, 2>(&phi[d*K*K], K, K);
         }
       }
       SYNCTHREADS();
@@ -133,13 +134,13 @@ namespace mra {
       const auto& parent_l = parent.translation();
       const auto& child_l = child.translation();
       for (size_type d=0; d < NDIM; ++d){
-        phi_for_mul<T>(parent.level(), child.level(), parent_l[d], child_l[d],
-                       phi_views[d], quad_x, K);
+        phi_for_mul(parent.level(), child.level(), parent_l[d], child_l[d],
+                    phi_views[d], quad_x, K);
       }
 
-      SHARED TensorView<T, NDIM> result_tmp;
+      SHARED DenseTensorView<T, NDIM> result_tmp;
       if (is_team_lead()) {
-        result_tmp = TensorView<T, NDIM>(workspace, result_values.dims());
+        result_tmp = DenseTensorView<T, NDIM>(workspace, result_values.dims());
       }
       SYNCTHREADS();
 

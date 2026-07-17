@@ -35,13 +35,14 @@
 #include <madness/mra/vmra.h>
 
 #include "mra/misc/options.h"
+#include "conv_factory.h"
 
 using namespace madness;
 
 static const double L = 12.0;      // box size
 static double thresh = 1e-6; // precision
 
-static double expnt = 1000.0;
+static double expnt = 100.0;
 
 using real_factory_t = madness::FunctionFactory<double, 3>;
 using real_function_t = madness::Function<double, 3>;
@@ -134,21 +135,17 @@ std::vector<real_function_3d> fixed_gaussians(size_t n, World &world) {
   return result;
 }
 
-void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
+void test(World &world, int N, int K, int Nop, int nrep, int seed, int initial_level) {
 
   std::chrono::time_point<std::chrono::high_resolution_clock> beg, end;
 
   default_random_generator.setstate(
       99); // Ensure all processes have the same state
 
-  double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
-  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(1);
-  ops[0].reset(new madness::GaussianConvolution1D<double>(K, coeff, expnt, 0, false));
-
   // f.make_nonstandard(false, true);
   // f.compress();
 
-  real_convolution_t op(world, ops, K);
+  auto op = mra::make_mad_convolution(expnt, K, Nop, world);
 
   //real_function_t opf = op(f);
 
@@ -162,7 +159,7 @@ void test(World &world, int N, int K, int nrep, int seed, int initial_level) {
       a = random_gaussians(N, world, seed);
     }
     make_nonstandard(world, a, true);
-    auto b = apply(world, op, a);
+    auto b = apply(world, *op, a);
     auto norms = norm2s(world, b);
     end = std::chrono::high_resolution_clock::now();
     if (world.rank() == 0) {
@@ -179,7 +176,8 @@ int main(int argc, char **argv) {
 
   auto opt = mra::OptionParser(argc, argv);
   int N = opt.parse("-N", 1);
-  int K = opt.parse("-K", 10);
+  int Nop = opt.parse("-O", 1);
+  int K = opt.parse("-K", 8);
   int nrep = opt.parse("-n", 3);
   int seed = opt.parse("-s", 5551212);
   int initial_level = opt.parse("-i", 2); // initial level for the Gaussian functions
@@ -200,7 +198,7 @@ int main(int argc, char **argv) {
   if (world.rank() == 0)
     FunctionDefaults<3>::print();
 
-  test(world, N, K, nrep, seed, initial_level);
+  test(world, N, K, Nop, nrep, seed, initial_level);
 
   finalize();
   return 0;

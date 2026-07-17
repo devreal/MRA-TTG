@@ -56,16 +56,16 @@ namespace mra {
         T rsq = 0.0;
         T maxw = 0.0; // max width of box
         for (Dimension d = 0; d < NDIM; ++d) {
-            maxw = std::max(maxw,hi(d)-lo(d));
-            T x = T(0.5)*(hi(d)+lo(d)) - origin(d);
-            rsq += x*x;
+          maxw = std::max(maxw,hi(d)-lo(d));
+          T x = T(0.5)*(hi(d)+lo(d)) - origin(d);
+          rsq += x*x;
         }
         T diagndim = T(0.5)*std::sqrt(T(NDIM));
         T boxradplusr = maxw*diagndim + maxr;
         // ttg::print(box, boxradplusr, bool(boxradplusr*boxradplusr < rsq));
         return (boxradplusr*boxradplusr < rsq);
-        }
-      };
+      }
+    };
   } // namespace mra
 
 #endif // MRA_POLYNOMIAL_H

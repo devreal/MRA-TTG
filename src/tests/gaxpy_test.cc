@@ -10,10 +10,10 @@ int main(int argc, char **argv) {
   double scalarA = 1.0, scalarB = -1.0;
   constexpr const mra::size_type K = 3;
 
-  mra::Tensor<double, 2> nodeA(K), nodeB(K), nodeC(K);
-  mra::TensorView<double, 2> nodeAv = nodeA.current_view();
-  mra::TensorView<double, 2> nodeBv = nodeB.current_view();
-  mra::TensorView<double, 2> nodeCv = nodeC.current_view();
+  mra::DenseTensor<double, 2> nodeA(K), nodeB(K), nodeC(K);
+  mra::DenseTensorView<double, 2> nodeAv = nodeA.current_view();
+  mra::DenseTensorView<double, 2> nodeBv = nodeB.current_view();
+  mra::DenseTensorView<double, 2> nodeCv = nodeC.current_view();
   for (int i=0; i<nodeA.size(); ++i){
     nodeAv[i] = i;
     nodeBv[i] = i;

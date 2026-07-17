@@ -29,13 +29,14 @@ namespace mra {
       Key<NDIM> key,
       size_type K,
       bool accumulate_NS,
-      const TensorView<T, NDIM>& node,
-      const TensorView<T, 2>& hg,
-      const TensorView<T, NDIM>& from_parent,
-      TensorView<T, NDIM>& s,
-      TensorView<T, NDIM>& tmp_node,
+      const concepts::TensorView<NDIM> auto& node,
+      const concepts::TensorView<2> auto& hg,
+      const concepts::TensorView<NDIM> auto& from_parent,
+      concepts::TensorView<NDIM> auto& s,
+      concepts::TensorView<NDIM> auto& tmp_node,
       T* workspace,
-      std::array<TensorView<T, NDIM>, Key<NDIM>::num_children()>& r_arr)
+      concepts::TensorViewArray<NDIM, Key<NDIM>::num_children()> auto& r_arr,
+      concepts::TensorView<NDIM> auto& result)
     {
       s = 0.0;
       tmp_node = node;
@@ -52,7 +53,7 @@ namespace mra {
       //std::cout << "MRA-RECONSTRUCT tmp_node " << key << "\n" << tmp_node << std::endl;
 
       //unfilter<T,K,NDIM>(node.get().coeffs, s);
-      transform<NDIM>(tmp_node, hg, s, workspace);
+      transform(tmp_node, hg, s, workspace);
 
       //std::cout << "MRA-RECONSTRUCT " << key << " node norm " << normf(node)
       //          << " from_parent norm " << normf(from_parent) << " s norm " << normf(s) << std::endl;
@@ -63,7 +64,16 @@ namespace mra {
         auto child_slice = get_child_slice<NDIM>(key, K, i);
         /* tmp layout: 2K^NDIM for s, K^NDIM for workspace, [K^NDIM]* for r fields */
         auto& r = r_arr[i];
+        if (r.empty()) {
+          /* child is zero so skip */
+          continue;
+        }
         r = s(child_slice);
+      }
+
+      // extract the result from the input node
+      if (!result.empty()) {
+        result = from_parent;
       }
     }
 
@@ -76,39 +86,56 @@ namespace mra {
       size_type N,
       size_type K,
       bool accumulate_NS,
-      TensorView<T, NDIM+1> node_view,
+      const concepts::TensorView<NDIM+1> auto node_view,
       T* tmp_ptr,
-      const TensorView<T, 2> hg,
-      const TensorView<T, NDIM+1> from_parent_view,
-      std::array<TensorView<T, NDIM+1>, Key<NDIM>::num_children()> r_arr)
+      const concepts::TensorView<2> auto hg,
+      const concepts::TensorView<NDIM+1> auto from_parent_view,
+      concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
+      concepts::TensorView<NDIM+1> auto result_view)
     {
       const bool is_t0 = (0 == thread_id());
 
       /* pick the r's for this function */
-      SHARED std::array<TensorView<T, NDIM>, Key<NDIM>::num_children()> block_r_arr;
-      SHARED TensorView<T, NDIM> s, tmp_node;
+      SHARED std::array<decltype(r_arr[0](0)), Key<NDIM>::num_children()> block_r_arr;
+      SHARED DenseTensorView<T, NDIM> s, tmp_node;
       SHARED T* workspace;
-      SHARED TensorView<T, NDIM> node, from_parent;
+      SHARED DenseTensorView<const T, NDIM> node;
+      SHARED DenseTensorView<const T, NDIM> from_parent;
+      SHARED DenseTensorView<T, NDIM> result;
 
       size_type blockId = blockIdx.x;
       T* block_tmp_ptr = &tmp_ptr[blockId*reconstruct_tmp_size<NDIM>(K)];
       if (is_t0) {
         const size_type TWOK2NDIM = std::pow(2*K,NDIM);
-        s           = TensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
-        tmp_node    = TensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
+        s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
+        tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
         workspace   = &block_tmp_ptr[2*TWOK2NDIM];
+        //assert(node_view.is_any_nonzero() || from_parent_view.is_any_nonzero() && "why did we even get here?!");
       }
 
       for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
+        if (node_view.is_zero(fnid) && from_parent_view.is_zero(fnid)) {
+          /* no work to do */
+          continue;
+        }
         if (is_t0) {
           node = node_view(fnid);
           from_parent = from_parent_view(fnid);
           for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
-            block_r_arr[i] = r_arr[i](fnid);
+            if (r_arr[i].is_zero(fnid)) {
+              block_r_arr[i] = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl expects a non-const view for all children
+            } else {
+              block_r_arr[i] = r_arr[i](fnid);
+            }
+          }
+          if (!result_view.is_zero(fnid)) {
+            result = result_view(fnid);
+          } else {
+            result = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl
           }
         }
         SYNCTHREADS();
-        reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr);
+        reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr, result);
       }
     }
   } // namespace detail
@@ -119,22 +146,24 @@ namespace mra {
     size_type N,
     size_type K,
     bool accumulate_NS,
-    TensorView<T, NDIM+1>& node,
-    const TensorView<T, 2>& hg,
-    const TensorView<T, NDIM+1>& from_parent,
-    const std::array<TensorView<T, NDIM+1>, mra::Key<NDIM>::num_children()>& r_arr,
+    const concepts::TensorView<NDIM+1> auto& node,
+    const concepts::TensorView<2> auto& hg,
+    const concepts::TensorView<NDIM+1> auto& from_parent,
+    const concepts::TensorViewArray<NDIM+1, mra::Key<NDIM>::num_children()> auto& r_arr,
+    concepts::TensorView<NDIM+1> auto& result,
     T* tmp,
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, smem_size, stream,
-      (key, N, K, accumulate_NS, node, tmp, hg, from_parent, r_arr));
+      (key, N, K, accumulate_NS, node, tmp, hg, from_parent, r_arr, result));
     checkSubmit();
   }
 
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit declaration */
   extern template
   void submit_reconstruct_kernel<double, 3>(
@@ -142,12 +171,14 @@ namespace mra {
     size_type N,
     size_type K,
     bool accumulate_NS,
-    TensorView<double, 3+1>& node,
-    const TensorView<double, 2>& hg,
-    const TensorView<double, 3+1>& from_parent,
-    const std::array<TensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,
+    const SparseTensorView<double, 3+1>& node,
+    const SparseTensorView<double, 2>& hg,
+    const SparseTensorView<double, 3+1>& from_parent,
+    const std::array<SparseTensorView<double, 3+1>, mra::Key<3>::num_children()>& r_arr,
+    SparseTensorView<double, 3+1>& result,
     double* tmp,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

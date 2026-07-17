@@ -7,9 +7,13 @@
 
 namespace mra{
   namespace detail{
-    template<typename T, Dimension NDIM>
-    SCOPE void cycledim(const TensorView<T, NDIM>& in, TensorView<T, NDIM>& out, int nshift, int start, int end){
+    SCOPE void cycledim(const concepts::TensorView auto& in, concepts::TensorView auto& out, int nshift, int start, int end){
 
+      using in_type = std::decay_t<decltype(in)>;
+      using out_type = std::decay_t<decltype(out)>;
+      static_assert(std::is_same_v<in_type, out_type>, "Input and output tensor views must have the same type.");
+      using T = typename in_type::value_type;
+      constexpr Dimension NDIM = in_type::ndim();
       SHARED std::array<int, NDIM> permute;
 
       if (is_team_lead()) {

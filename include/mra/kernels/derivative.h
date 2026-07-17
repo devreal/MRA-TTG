@@ -26,12 +26,12 @@ namespace mra {
     const Domain<NDIM>& D,
     const Key<NDIM>& parent,
     const Key<NDIM>& child,
-    const TensorView<T, NDIM>& coeffs,
-    TensorView<T, NDIM>& result,
-    TensorView<T, NDIM>& result_tmp,
-    const TensorView<T, 2>& phibar,
-    const TensorView<T, 2>& phi,
-    const TensorView<T, 1>& quad_x,
+    const concepts::TensorView<NDIM> auto& coeffs,
+    concepts::TensorView<NDIM> auto& result,
+    concepts::TensorView<NDIM> auto& result_tmp,
+    const concepts::TensorView<2> auto& phibar,
+    const concepts::TensorView<2> auto& phi,
+    const concepts::TensorView<1> auto& quad_x,
     const size_type K,
     T* tmp)
     {
@@ -111,26 +111,26 @@ namespace mra {
       const Key<NDIM>& left,
       const Key<NDIM>& center,
       const Key<NDIM>& right,
-      const TensorView<T, NDIM>& node_left,
-      const TensorView<T, NDIM>& node_center,
-      const TensorView<T, NDIM>& node_right,
-      const TensorView<T, 3>& operators,
-      TensorView<T, NDIM>& deriv,
-      TensorView<T, NDIM+1>& tmp,
-      TensorView<T, NDIM>& left_tmp,
-      TensorView<T, NDIM>& center_tmp,
-      TensorView<T, NDIM>& right_tmp,
-      const TensorView<T, 2>& phi,
-      const TensorView<T, 2>& phibar,
-      const TensorView<T, 1>& quad_x,
+      const concepts::TensorView<NDIM> auto& node_left,
+      const concepts::TensorView<NDIM> auto& node_center,
+      const concepts::TensorView<NDIM> auto& node_right,
+      const concepts::TensorView<3> auto& operators,
+      concepts::TensorView<NDIM> auto& deriv,
+      concepts::TensorView<NDIM+1> auto& tmp,
+      concepts::TensorView<NDIM> auto& left_tmp,
+      concepts::TensorView<NDIM> auto& center_tmp,
+      concepts::TensorView<NDIM> auto& right_tmp,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
       const int bc_left,
       const int bc_right,
       size_type axis,
       size_type K,
       T* workspace)
     {
-      SHARED TensorView<T, NDIM> tmp_result;
-      SHARED TensorView<T, NDIM> transform_result;
+      SHARED DenseTensorView<T, NDIM> tmp_result;
+      SHARED DenseTensorView<T, NDIM> transform_result;
       if (is_team_lead()){
         tmp_result = tmp(0);
         transform_result = tmp(1);
@@ -173,18 +173,18 @@ namespace mra {
       const Key<NDIM>& left,
       const Key<NDIM>& center,
       const Key<NDIM>& right,
-      const TensorView<T, NDIM>& node_left,
-      const TensorView<T, NDIM>& node_center,
-      const TensorView<T, NDIM>& node_right,
-      const TensorView<T, 2+1>& operators,
-      TensorView<T, NDIM>& deriv,
-      TensorView<T, NDIM+1>& tmp,
-      TensorView<T, NDIM>& left_tmp,
-      TensorView<T, NDIM>& center_tmp,
-      TensorView<T, NDIM>& right_tmp,
-      const TensorView<T, 2>& phi,
-      const TensorView<T, 2>& phibar,
-      const TensorView<T, 1>& quad_x,
+      const concepts::TensorView<NDIM> auto& node_left,
+      const concepts::TensorView<NDIM> auto& node_center,
+      const concepts::TensorView<NDIM> auto& node_right,
+      const concepts::TensorView<3> auto& operators,
+      concepts::TensorView<NDIM> auto& deriv,
+      concepts::TensorView<NDIM+1> auto& tmp,
+      concepts::TensorView<NDIM> auto& left_tmp,
+      concepts::TensorView<NDIM> auto& center_tmp,
+      concepts::TensorView<NDIM> auto& right_tmp,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
       const T g1,
       const T g2,
       const int bc_left,
@@ -193,8 +193,8 @@ namespace mra {
       size_type K,
       T* workspace)
     {
-      SHARED TensorView<T, NDIM> tmp_result;
-      SHARED TensorView<T, NDIM> transform_result;
+      SHARED DenseTensorView<T, NDIM> tmp_result;
+      SHARED DenseTensorView<T, NDIM> transform_result;
       if (is_team_lead()){
         tmp_result = tmp(0);
         transform_result = tmp(1);
@@ -242,14 +242,14 @@ namespace mra {
       const Key<NDIM>& left,
       const Key<NDIM>& center,
       const Key<NDIM>& right,
-      const TensorView<T, NDIM>& node_left,
-      const TensorView<T, NDIM>& node_center,
-      const TensorView<T, NDIM>& node_right,
-      const TensorView<T, 3>& operators,
-      TensorView<T, NDIM>& deriv,
-      const TensorView<T, 2>& phi,
-      const TensorView<T, 2>& phibar,
-      const TensorView<T, 1>& quad_x,
+      const concepts::TensorView<NDIM> auto& node_left,
+      const concepts::TensorView<NDIM> auto& node_center,
+      const concepts::TensorView<NDIM> auto& node_right,
+      const concepts::TensorView<3> auto& operators,
+      concepts::TensorView<NDIM> auto& deriv,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
       T* tmp,
       size_type K,
       const T g1,
@@ -260,18 +260,18 @@ namespace mra {
       {
         // if we reached here, all checks have passed, and we do the transform to compute the derivative
         // for a given axis by calling either derivative_inner() or derivative_boundary()
-        SHARED TensorView<T, NDIM> left_tmp, center_tmp, right_tmp;
-        SHARED TensorView<T, NDIM+1> tmp_result;
+        SHARED DenseTensorView<T, NDIM> left_tmp, center_tmp, right_tmp;
+        SHARED DenseTensorView<T, NDIM+1> tmp_result;
         SHARED T* workspace;
 
         size_type blockId = blockIdx.x;
         T* block_tmp_ptr = &tmp[blockId*derivative_tmp_size<NDIM>(K)];
         const size_type K2NDIM = std::pow(K, NDIM);
-        if(is_team_lead()){
-          tmp_result = TensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
-          left_tmp   = TensorView<T, NDIM>(&block_tmp_ptr[2*K2NDIM], K);
-          center_tmp = TensorView<T, NDIM>(&block_tmp_ptr[3*K2NDIM], K);
-          right_tmp  = TensorView<T, NDIM>(&block_tmp_ptr[4*K2NDIM], K);
+        if (is_team_lead()) {
+          tmp_result = DenseTensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
+          left_tmp   = DenseTensorView<T, NDIM>(&block_tmp_ptr[2*K2NDIM], K);
+          center_tmp = DenseTensorView<T, NDIM>(&block_tmp_ptr[3*K2NDIM], K);
+          right_tmp  = DenseTensorView<T, NDIM>(&block_tmp_ptr[4*K2NDIM], K);
           workspace = &block_tmp_ptr[5*K2NDIM];
         }
         SYNCTHREADS();
@@ -296,14 +296,14 @@ namespace mra {
       const Key<NDIM> left,
       const Key<NDIM> center,
       const Key<NDIM> right,
-      const TensorView<T, NDIM+1> node_left,
-      const TensorView<T, NDIM+1> node_center,
-      const TensorView<T, NDIM+1> node_right,
-      const TensorView<T, 3> operators,
-      TensorView<T, NDIM+1> deriv,
-      const TensorView<T, 2> phi,
-      const TensorView<T, 2> phibar,
-      const TensorView<T, 1> quad_x,
+      const concepts::TensorView<NDIM+1> auto node_left,
+      const concepts::TensorView<NDIM+1> auto node_center,
+      const concepts::TensorView<NDIM+1> auto node_right,
+      const concepts::TensorView<3> auto operators,
+      concepts::TensorView<NDIM+1> auto deriv,
+      const concepts::TensorView<2> auto phi,
+      const concepts::TensorView<2> auto phibar,
+      const concepts::TensorView<1> auto quad_x,
       T* tmp,
       size_type N,
       size_type K,
@@ -313,8 +313,18 @@ namespace mra {
       const int bc_left,
       const int bc_right)
     {
-      SHARED TensorView<T, NDIM> node_left_view, node_center_view, node_right_view, deriv_view;
+
+      static_assert(node_left.ndim() == NDIM+1, "node_left must be of dimension NDIM+1");
+      static_assert(node_center.ndim() == NDIM+1, "node_center must be of dimension NDIM+1");
+      static_assert(node_right.ndim() == NDIM+1, "node_right must be of dimension NDIM+1");
+
+      SHARED DenseTensorView<T, NDIM> deriv_view;
+      SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
+        if (deriv.is_zero(blockid)) {
+          /* nothing to do */
+          continue;
+        }
         if (is_team_lead()) {
           node_left_view = node_left(blockid);
           node_center_view = node_center(blockid);
@@ -336,14 +346,14 @@ namespace mra {
     const Key<NDIM>& left,
     const Key<NDIM>& center,
     const Key<NDIM>& right,
-    const TensorView<T, NDIM+1>& node_left,
-    const TensorView<T, NDIM+1>& node_center,
-    const TensorView<T, NDIM+1>& node_right,
-    const TensorView<T, 3>& operators,
-    TensorView<T, NDIM+1>& deriv,
-    const TensorView<T, 2>& phi,
-    const TensorView<T, 2>& phibar,
-    const TensorView<T, 1>& quad_x,
+    const concepts::TensorView<NDIM+1> auto node_left,
+    const concepts::TensorView<NDIM+1> auto node_center,
+    const concepts::TensorView<NDIM+1> auto node_right,
+    const concepts::TensorView<3> auto operators,
+    concepts::TensorView<NDIM+1> auto deriv,
+    const concepts::TensorView<2> auto phi,
+    const concepts::TensorView<2> auto phibar,
+    const concepts::TensorView<1> auto quad_x,
     T* tmp,
     size_type N,
     size_type K,
@@ -360,13 +370,14 @@ namespace mra {
     auto smem_size = std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
                               mTxmq_shmem_size<T>(2*K));
 
-    CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
+    //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::derivative_kernel, N, thread_dims, smem_size, stream,
       (D, key, left, center, right, node_left, node_center, node_right, operators,
         deriv, phi, phibar, quad_x, tmp, N, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instanatiation */
   extern template
   void submit_derivative_kernel<double, 3>(
@@ -375,14 +386,14 @@ namespace mra {
     const Key<3>& left,
     const Key<3>& center,
     const Key<3>& right,
-    const TensorView<double, 3+1>& node_left,
-    const TensorView<double, 3+1>& node_center,
-    const TensorView<double, 3+1>& node_right,
-    const TensorView<double, 3>& operators,
-    TensorView<double, 3+1>& deriv,
-    const TensorView<double, 2>& phi,
-    const TensorView<double, 2>& phibar,
-    const TensorView<double, 1>& quad_x,
+    const SparseTensorView<double, 3+1>& node_left,
+    const SparseTensorView<double, 3+1>& node_center,
+    const SparseTensorView<double, 3+1>& node_right,
+    const DenseTensorView<double, 3>& operators,
+    SparseTensorView<double, 3+1>& deriv,
+    const DenseTensorView<double, 2>& phi,
+    const DenseTensorView<double, 2>& phibar,
+    const DenseTensorView<double, 1>& quad_x,
     double* tmp,
     size_type N,
     size_type K,
@@ -392,6 +403,7 @@ namespace mra {
     const int bc_left,
     const int bc_right,
     ttg::device::Stream stream);
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra
 

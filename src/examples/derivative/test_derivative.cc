@@ -50,8 +50,8 @@ void test_derivative(std::size_t N, std::size_t K, Dimension axis, T precision, 
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(project_control);
   // auto start_d = make_start(project_d_control);
-  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, project_control, project_result);
-  auto project_d = make_project(db, gauss_deriv_buffer, N, K, max_level, functiondata, precision, project_control, project_d_result);
+  auto project = make_project(db, gauss_buffer, N, K, max_level, functiondata, precision, 0, 1.0, project_control, project_result);
+  auto project_d = make_project(db, gauss_deriv_buffer, N, K, max_level, functiondata, precision, 0, 1.0, project_control, project_d_result);
   // C(P)
   auto compress = make_compress(N, K, is_ns, functiondata, project_result, compress_result, "compress-cp");
   auto compress_d = make_compress(N, K, is_ns, functiondata, project_d_result, compress_d_result, "compress-Dcp");

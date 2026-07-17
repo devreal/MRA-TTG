@@ -10,7 +10,7 @@ namespace mra {
   namespace detail {
     template <typename T, Dimension NDIM>
     DEVSCOPE void norm_kernel_impl(
-      const TensorView<T, NDIM>& n,
+      const concepts::TensorView<NDIM> auto& n,
       T* result_norm,
       const std::array<T, Key<NDIM>::num_children()>& child_norms,
       size_type blockid,
@@ -30,19 +30,23 @@ namespace mra {
     template <typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void norm_kernel(
-      const TensorView<T, NDIM+1> node,
+      const concepts::TensorView<NDIM+1> auto node,
       T* result_norms,
       std::array<const T*, Key<NDIM>::num_children()> child_norms,
       size_type N,
       size_type K,
       const Key<NDIM>& key)
     {
-      const bool is_t0 = (0 == thread_id());
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
-      SHARED TensorView<T, NDIM> n;
+      SHARED DenseTensorView<const T, NDIM> n;
       SHARED std::array<T, Key<NDIM>::num_children()> block_child_norms;
       for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
-        if (is_t0) {
+        if (node.is_zero(blockid)) {
+          /* no work to do */
+          if (is_team_lead()) result_norms[blockid] = T(0.0);
+          continue;
+        }
+        if (is_team_lead()) {
           n = node(blockid);
           for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
             block_child_norms[i] = (child_norms[i] != nullptr) ? child_norms[i][blockid] : T(0.0);
@@ -60,8 +64,8 @@ namespace mra {
     const Key<NDIM>& key,
     size_type N,
     size_type K,
-    const TensorView<T, NDIM+1>& in,
-    TensorView<T, 1>& result_norms,
+    const concepts::TensorView<NDIM+1> auto& in,
+    concepts::TensorView<1> auto& result_norms,
     std::array<const T*, Key<NDIM>::num_children()>& child_norms,
     ttg::device::Stream stream)
   {

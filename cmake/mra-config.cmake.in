@@ -1,0 +1,39 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(ttg CONFIG)
+
+if("@MRA_MADNESS_VERSION@" STREQUAL "")
+  find_dependency(MADNESS CONFIG COMPONENTS world)
+else()
+  find_dependency(MADNESS @MRA_MADNESS_VERSION@ CONFIG COMPONENTS world)
+endif()
+
+set(MRA_BLASPP_ENABLED @MRA_BLASPP_ENABLED@)
+if(MRA_BLASPP_ENABLED)
+  find_dependency(blaspp CONFIG)
+endif()
+
+set(MRA_HAVE_CUDA @HAVE_CUDA@)
+set(MRA_HAVE_HIP  @HAVE_HIP@)
+
+include("${CMAKE_CURRENT_LIST_DIR}/mra-targets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MRAGPUWrappers.cmake")
+
+# Convenience aliases: downstream code can use mra::host, mra::cuda, mra::hip
+# regardless of whether it consumed MRA via add_subdirectory or find_package.
+# (ALIAS for IMPORTED targets requires CMake >= 3.18, which we already require.)
+add_library(mra::base     ALIAS mra::mra-base)
+add_library(mra::host     ALIAS mra::mra-host)
+if(TARGET mra::mra-cuda-base)
+  add_library(mra::cuda-base ALIAS mra::mra-cuda-base)
+endif()
+if(TARGET mra::mra-cuda)
+  add_library(mra::cuda ALIAS mra::mra-cuda)
+endif()
+if(TARGET mra::mra-hip)
+  add_library(mra::hip  ALIAS mra::mra-hip)
+endif()
+
+check_required_components(mra)

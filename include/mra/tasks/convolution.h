@@ -21,15 +21,13 @@
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
 
-namespace mra {
 
-  /********************************
-   * TODO:
-   * - MADNESS agressively screens out contributions, leading to less nodes at the bottom than we have in MRA.
-   * - We need to truncate the the convolution result to screen for norms smaller than the threshold.
-   * - The convolution kernel will return the resulting norm and we can send an empty node if the result is screened out.
-   * - Then we walk up the tree to adjust child leaf status.
-   */
+/**
+ * TODO: check the DOWN task to make sure we adjust the child leaf info
+ *       correctly based on the information we receive from the parent.
+ */
+
+namespace mra {
 
 
   namespace detail {
@@ -40,7 +38,10 @@ namespace mra {
 
       auto operator<=>(const KeyPair&) const = default;
       auto hash() const {
-        return source.hash() + dest.hash(); // TODO: make this better
+        HashValue hashvalue = source.level() ^ (static_cast<HashValue>(source.batch())<<48);
+        for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | source.translation()[d];
+        for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | dest.translation()[d];
+        return hashvalue;
       }
     };
 
@@ -48,35 +49,6 @@ namespace mra {
     std::ostream& operator<<(std::ostream& os, const KeyPair<NDIM>& kp) {
       return os << "(" << kp.source << "->" << kp.dest << ")";
     }
-
-
-    /**
-     * Struct that carries the leaf status for each child of a node.
-     * We ignore the per-function info here, only flagging it per child.
-     * This is sent from the down task to the leaf-adjust task, which receives the node
-     * from the shell0 task (or the down task if no prior node exists).
-     * Once the info is adjusted, the node is forwarded to the shallN tasks.
-     */
-    template<Dimension NDIM>
-    struct ChildLeafInfo : public ttg::TTValue<ChildLeafInfo<NDIM>> {
-      std::array<bool, Key<NDIM>::num_children()> is_child_leaf = { false };
-
-      void set_all_child_leaf(bool value) {
-        for (size_type i = 0; i < is_child_leaf.size(); ++i) {
-          is_child_leaf[i] = value;
-        }
-      }
-
-      template <typename Archive>
-      void serialize(Archive& ar) {
-        ar& this->is_child_leaf;
-      }
-
-      template <typename Archive>
-      void serialize(Archive& ar, const unsigned int) {
-        serialize(ar);
-      }
-    };
 
     template<size_type NDIM, std::size_t I, std::size_t... Is>
     void foreach_child_impl(const Key<NDIM>& key, auto&& fn,
@@ -95,37 +67,38 @@ namespace mra {
 
 
   /**
-   * Convolution entails many steps. For each node:
+   * Convolution entails several steps. For each node:
    *
    * 1) Apply the shell0 contribution.
    * 2) Screen the contributions based on the norms of the input node and the operator norm using the supplied threshold.
    *    Send the input node to the destination nodes and send the list contributions up to the parent.
-   * 3) Receive contributions from the children and merge them. Distribute the relevant contributions to our direct
-   *    neighbors (-x, +x, -y, +y, -z, +z), to ourselves, and to our parent.
-   * 4) Receive contributions from neighbors, ourselves, and parent, combine them, and send them down to the appropriate children and ourselves.
+   * 3) Receive contributions from the children and merge them. Distribute the relevant contributions to our
+   *    children and send the remaining merged contribution up to the parent.
+   * 4) Receive combined contributions from parent and distribute down to children.
+   *    Adjust the leaf status of the node based on the contributions (e.g. if we receive a contribution
+   *    from a neighbor but have no children then we must be a leaf, if we receive no contributions but have children then we must be empty).
+   *    Send the adjusted node to the shellN task.
    * 5) Iterate over all contributions we will receive by recursively instantiating a task using the pair of keys that
    *    describe the contribution (source and destination). This task will apply the contribution to the input node and send the result
    *    to the next contribution task in the list of contributions. After the last contribution has been applied we send the result to the output.
-   *
-   * TODO: we need to make sure there are tasks to receive the contributions from each neighbor. Each task needs to know whether their neighbor has
-   *       children and if they do but the task has no children itself the task needs to send empty lists of contributions for to each child's input.
-   *       Alternatively, we can use accumulate terminals that accumulate the contribution keys and have the parent adjust the number of accumulated
-   *       values based on the number of neighbors each task has. We still need to create the children but do not have to send empty inputs anymore.
    */
 
-  template <typename T, Dimension NDIM, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_convolution(size_type N, size_type K,
+  template <typename T, Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_convolution(const std::shared_ptr<FunctionSetT>& fns, size_type K,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> input,
                         ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> result,
                         const mra::GaussianConvolutionOperator<T, NDIM>& op,
                         const T thresh,
+                        const int truncate_mode,
+                        const T cell_min_width,
                         const std::string& name = "convolution",
                         ProcMap procmap = {},
                         DeviceMap devicemap = {}) {
 
     static_assert(NDIM == 3); // TODO: worth fixing?
 
-    using ChildLeafInfo = detail::ChildLeafInfo<NDIM>;
+    using ChildLeafInfo = typename mra::FunctionsCompressedNode<T, NDIM>::child_info_type;
 
     static constexpr const size_type num_children = Key<NDIM>::num_children();
 
@@ -167,14 +140,16 @@ namespace mra {
 
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> to_shellN;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> shell0_to_dispatch;
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_result;
+    //ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_result;
 
     ttg::Edge<mra::Key<NDIM>, std::vector<detail::KeyPair<NDIM>>> contribution_edge; // connecting the down task to the accumulate dispatch task
 
     ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> screener_to_accumulate;
 
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> down_to_adjust_leaf_node;
-    ttg::Edge<mra::Key<NDIM>, ChildLeafInfo> down_to_adjust_leaf_child_info;
+    //ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> shell0_to_shellN;
+    ttg::Edge<mra::Key<NDIM>, std::array<bool, Key<NDIM>::num_children()>> down_to_accumulate_leaf_info;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_to_adjust_leaf;
+    std::array<ttg::Edge<Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>, Key<NDIM>::num_children()> adjust_leaf_edges;
 
 
     /***************************************************************************************************************************************
@@ -194,7 +169,7 @@ namespace mra {
         if (key.level() == 0) {
           // root has no neighbors and no parent, so forward the contributions to the down task
           ttg::send<0>(key, std::move(contributions));
-          std::cout << "UP " << key << " is root with " << contributions.size() << " contributions" << std::endl;
+          std::cout << "MRA CONV UP " << contributions.size() << " contributions to distribute at root" << std::endl;
 
         } else {
 
@@ -247,10 +222,6 @@ namespace mra {
     /************************************************************************************************
      * Task that receives input from the corresponding UP task and its parent and distributes the keys to
      * the task that applies contributions on itself and to the child tasks.
-     *
-     * TODO: need to adjust the leaf status of children here if we start sending further down!
-     *       Route the result of shell0 through this task and adjust the leaf status based on
-     *       whether our children receive contributions.
      ***********************************************************************************************/
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> down_recursive_edge;
     auto down_contributions_tt = ttg::make_tt<Space>(
@@ -301,48 +272,73 @@ namespace mra {
 
         contributions.erase(backiter, contributions.end());
 
-        ChildLeafInfo child_leaf_info;
-        child_leaf_info.set_all_child_leaf(true); // assume all children are leafs and adjust below
 
+        size_type N = fns->num_functions(key);
+
+        /**
+         * We don't know which function(s) each contribution applies to.
+         * We mark whether any contribution extend the node's children
+         * and send that information to the adjust-leaf task.
+         */
+        std::array<bool, mra::Key<NDIM>::num_children()> child_empty;
+        for (auto& child : children(key)) {
+          child_empty[child.childindex()] = node.is_all_child_leaf(child);
+        }
+
+        std::vector<Key<NDIM>> child_empty_contributions;
+        std::vector<Key<NDIM>> child_empty_nodes;
         // send to all children
         for (auto child : children(key)) {
           auto dest_contributions = filter_dest(child, true, std::index_sequence<0>{});
           int num_contributions = dest_contributions.size();
-          if (dest_contributions.size() > 0 || !node.is_child_leaf(child)) {
-            // we have contributions or an existing child, send down to child
-            //std::cout << "DOWN " << key << " sending " << dest_contributions.size() << " contributions to dest " << child << std::endl;
-            //send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
+          if (num_contributions > 0) {
+            // send down contributions
             send_out(child, std::move(dest_contributions), std::integral_constant<std::size_t, 0>{});
-            child_leaf_info.is_child_leaf[child.childindex()] = false;
-          }
-          if (num_contributions > 0 && (node.invalid() || node.is_child_leaf(child))) {
-            // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
-            //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
-            send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
-            send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
+            child_empty[child.childindex()] = false;
+            if (node.invalid() || node.is_all_child_leaf(child)) {
+              //std::cout << "DOWN " << key << " child " << child << " is empty but receiving contributions" << std::endl;
+              // if the child is a leaf we need to send an empty contribution list to satisfy the second input on the way down
+              //std::cout << "DOWN " << key << " node empty or child " << child << " is leaf, sending empty node " << std::endl;
+              //send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
+              child_empty_contributions.push_back(child);
+              child_empty_nodes.push_back(child);
+              //send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
+            }
+          } else if (!node.is_all_child_leaf(child)) {
+            // we have no contributions but an existing child, send down an empty contribution list to the child
+            //std::cout << "DOWN " << key << " sending empty contributions to dest " << child << std::endl;
             //send_out(child, std::vector<detail::KeyPair<NDIM>>{}, std::integral_constant<std::size_t, 0>{});
-            //send_out(child, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 2>{}); // also send an empty node since the child task will expect one
-            child_leaf_info.is_child_leaf[child.childindex()] = false;
+            child_empty_contributions.push_back(child);
+            child_empty[child.childindex()] = false;
           }
+        }
+
+        if (!child_empty_contributions.empty()) {
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<0>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{}));
+#else
+          ttg::broadcast<0>(std::move(child_empty_contributions), std::vector<detail::KeyPair<NDIM>>{});
+#endif
+        }
+
+        if (!child_empty_nodes.empty()) {
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::broadcast<2>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{}));
+#else
+          ttg::broadcast<2>(std::move(child_empty_nodes), mra::FunctionsCompressedNode<T, NDIM>{});
+#endif
         }
 
         if (node.invalid()) {
-          // send an empty node to the leaf-adjust task because it will not get one from shell0
-          //std::cout << "DOWN " << key << " node is invalid, sending empty node to adjust leaf task" << std::endl;
-          send_out(key, mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 3>{});
+          // the accumulate task won't receive a node from shell0, so we need to send down an empty node
+          //std::cout << "DOWN " << key << " node is invalid, sending empty node to shellN" << std::endl;
+          send_out(key, node, std::integral_constant<std::size_t, 3>{});
         }
 
-        send_out(key, std::move(child_leaf_info), std::integral_constant<std::size_t, 4>{});
+        //std::cout << "DOWN " << key << " sending child leaf info " << child_empty << " to adjust leaf task" << std::endl;
+        send_out(key, std::move(child_empty), std::integral_constant<std::size_t, 4>{});
 
         contributions.erase(backiter, contributions.end());
-#if 0
-        if (contributions.size() > 0) {
-          std::cout << "DOWN " << key << " has " << contributions.size() << " contributions left! " << std::endl;
-          for (const auto& contribution : contributions) {
-            std::cout << "DOWN " << key << " LEFT contribution " << contribution.source << "->" << contribution.dest << std::endl;
-          }
-        }
-#endif // 0
 
         assert(contributions.empty() && "All contributions should have been sent!");
 
@@ -351,7 +347,7 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
 
       }, ttg::edges(down_contribution_edge, ttg::fuse(input, down_recursive_edge)),
-         ttg::edges(down_contribution_edge, contribution_edge, down_recursive_edge, down_to_adjust_leaf_node, down_to_adjust_leaf_child_info),
+         ttg::edges(down_contribution_edge, contribution_edge, down_recursive_edge, to_shellN, down_to_accumulate_leaf_info),
          "Down");
 
     /* Set the contribution reducer. On the way down, we receive from ourself, our parent, and 6 neighbors.
@@ -362,56 +358,20 @@ namespace mra {
     }, num_down_contributions);
 
 
-    /****************************************************************************************************************************
-     * Task that receives a node (either from shell0 if it exists already, or from down task if its new) and the leaf status of
-     * its children, adjusts the leaf status based on whether it has children or receives contributions, and sends it to shellN.
-     ****************************************************************************************************************************/
-    auto adjust_leaf_tt = ttg::make_tt<Space>(
-      [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node, const ChildLeafInfo& child_info) -> TASKTYPE {
-
-#ifndef MRA_ENABLE_HOST
-        auto sends = ttg::device::forward();
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
-          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
-        };
-#else
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
-          ttg::send<I>(k, std::forward<S>(out));
-        };
-#endif
-
-        if (node.invalid()) {
-          node = FunctionsCompressedNode<T, NDIM>(key, N);
-        }
-
-        for (auto child : children(key)) {
-          // TODO: drop the per-function leaf info from nodes
-          for (int i = 0; i < N; ++i) {
-            node.set_child_leaf(i, child.childindex(), child_info.is_child_leaf[child.childindex()]);
-          }
-        }
-
-        send_out(key, std::move(node), std::integral_constant<std::size_t, 0>{});
-
-#ifndef MRA_ENABLE_HOST
-        co_await std::move(sends);
-#endif // MRA_ENABLE_HOST
-      }, ttg::edges(down_to_adjust_leaf_node, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), "AdjustLeaf");
-
-
-    ttg::Edge<mra::Key<NDIM>, Tensor<T, 1>> norm_edge; // edge to send the cnorms from the screener to the accumulate task
+    ttg::Edge<mra::Key<NDIM>, DenseTensor<T, 1>> norm_edge; // edge to send the cnorms from the screener to the accumulate task
 
 
     /****************************************************
      * Task that computes the norm and forwards it.
      * NOTE: we separate this into its own task because
      *       we otherwise serialize the screening on
-     *       the device manager.
+     *       the device manager thread.
      ****************************************************/
     auto norm_tt = ttg::make_tt<Space>(
       [=](const Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
+        size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -424,10 +384,10 @@ namespace mra {
         };
 #endif
 
-        Tensor<T, 1> cnorms;
+        DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          cnorms = Tensor<T, 1>(N, ttg::scope::Allocate);
+          cnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
@@ -450,10 +410,12 @@ namespace mra {
      *       Taking the raw pointer here is a dirty hack!
      */
     auto screener_tt = ttg::make_tt<Space>(
-      [&, N, K, thresh, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
+      [&, K, thresh, truncate_mode, cell_min_width, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
                               const mra::Key<NDIM>& key,
                               const mra::FunctionsCompressedNode<T, NDIM>& in_node,
-                              const Tensor<T, 1>& cnorms) -> TASKTYPE {
+                              const DenseTensor<T, 1>& cnorms) -> TASKTYPE {
+
+        size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -475,7 +437,7 @@ namespace mra {
 
         if (!in_node.empty()){
 
-          const double tol = truncate_tol(key, thresh);
+          const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
 
           /**
            * Compute the cnorm using the norm kernel.
@@ -484,15 +446,17 @@ namespace mra {
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
-//#if 0
+          /**
+           * TODO: take the displacements from the MADNESS SeparatedConvolution operator.
+           */
           auto for_each = [&](auto&& fn){
-            for (int d0 = -3; d0 <= 3; ++d0) {
-              for (int d1 = -3; d1 <= 3; ++d1) {
-                for (int d2 = -3; d2 <= 3; ++d2) {
+            for (int d0 = -4; d0 <= 4; ++d0) {
+              for (int d1 = -4; d1 <= 4; ++d1) {
+                for (int d2 = -4; d2 <= 4; ++d2) {
                   if (d0 == 0 && d1 == 0 && d2 == 0) {
-                    continue; // skip self contribution since it is handled separately
+                    continue; // skip self contribution since it is handled separately in level0
                   }
-                  auto disp_key = mra::Key<NDIM>(0, {d0, d1, d2});
+                  auto disp_key = mra::Key<NDIM>(key.batch(), 0, {d0, d1, d2});
                   mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
                   if (!neighbor_key.is_valid() || neighbor_key == key) {
                     continue;
@@ -508,16 +472,19 @@ namespace mra {
            */
           for_each([&](const auto& disp_key, const auto& neighbor_key){
             auto op_data = op.get_op(key.level(), disp_key);
+            auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
             for (int i = 0; i < N; ++i) {
+              // we may have either one operator for all functions or one operator per function
+              auto opnorm = (opnorm_view.dim(0) == 1) ? opnorm_view(0, 0, 0, (int)NormId::Opnorm)
+                                                      : opnorm_view(i, 0, 0, (int)NormId::Opnorm);
               //std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
               //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
-              if (op_data->norm * cnorm_view(i) > tol / fac) {
+              if (opnorm * cnorm_view(i) > tol / fac) {
                 contributions.push_back({key, neighbor_key});
                 break; // if any of the coefficients pass the threshold we add the contribution
               }
             }
           });
-//#endif // 0
 
           //std::cout << "SCREEN " << key << " computed contributions " << contributions.size() << std::endl;
         }
@@ -527,14 +494,7 @@ namespace mra {
          */
         int num_empty = 0;
         for (auto child : children(key)) {
-          bool all_child_fn_leaf = true;
-          for (int i = 0; i < N; ++i) {
-            if (!in_node.is_child_leaf(i, child.childindex())) {
-              all_child_fn_leaf = false;
-              break;
-            }
-          }
-          if (all_child_fn_leaf) {
+          if (in_node.is_all_child_leaf(child)) {
             ++num_empty;
           }
         }
@@ -570,9 +530,11 @@ namespace mra {
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
     auto shell0_tt = ttg::make_tt<Space>(
-      [&, N, K, fac, thresh, name](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
+
+      size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
@@ -594,32 +556,31 @@ namespace mra {
       if (!in_node.empty()) {
 
         // for fixed distance, the 2nd arg to get_op needs to be mra::Key<NDIM>(key.level(), {0, 0, 0})
-        auto op_data = op.get_op(key.level(), mra::Key<NDIM>(key.level(), {0, 0, 0}));
+        auto op_data = op.get_op(key.level(), mra::Key<NDIM>(key.batch(), key.level(), {0, 0, 0}));
 
-        out.allocate(K, ttg::scope::Allocate);
+        /**
+         * TODO: instead of allocating a new sparsity object, come up with a way to pass in_node's sparsity
+         *       to allocate().
+         */
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+        sparsity.nonzero_if_any(in_node);
+        out.allocate(sparsity, K, ttg::scope::Allocate);
         out.set_ns();
         mra::apply_leaf_info(out, in_node);
-        // set child leaf information
-        //for (size_type i = 0; i < N; ++i) {
-        //  for (size_type c = 0; c < num_children; ++c) {
-        //    out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
-        //  }
-        //}
 
-        Tensor<T, 1> resnorms(N, TempScope);
-        T opnorm = op_data->norm;
-        T tol = truncate_tol(key, thresh);
+        DenseTensor<T, 1> resnorms(N, TempScope);
+        T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
+        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N, TempScope);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
-                                        out.coeffs().buffer(), tmp, resnorms.buffer());
+                                        out.coeffs().buffer(), tmp);
         input.add(op_data->norms.buffer());
         for (Dimension d = 0; d < NDIM; ++d) {
           input.add(op_data->data[d]->R.buffer());
@@ -638,7 +599,10 @@ namespace mra {
         auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
         auto empty_node_view = empty_node.coeffs().current_view();
         auto resnorms_view = resnorms.current_view();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, opnorm, fac, tol, /*in_node_view*/ empty_node_view,
+
+        auto sparseman = make_sparsity_manager(out);
+        sparseman.populate_device_sparsity();
+        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
                                             in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                             at, tmp.current_device_ptr(), ttg::device::current_stream());
 
@@ -653,19 +617,23 @@ namespace mra {
         for (size_type i = 0; i < N; ++i) {
           if (resnorms_host_view[i] != 0.0) {
             empty = false;
-            break;
+          } else {
+            // set function to zero
+            out.set_zero(i);
           }
         }
-        if (empty) out.make_empty(); // drop memory if the result is empty
+        if (empty) {
+          //std::cout << "SHELL0 " << key << " result is empty after applying shell 0 contribution, sending empty node" << std::endl;
+          out.make_empty();
+        }
       }
 
-      ttg::trace(name + "-shell0", key, " empty ", out.empty());
       send_out(key, std::move(out));
 
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
-    }, ttg::edges(input), ttg::edges(down_to_adjust_leaf_node), "Shell0");
+    }, ttg::edges(input), ttg::edges(to_shellN), "Shell0");
 
 
     /**
@@ -675,21 +643,26 @@ namespace mra {
     ttg::Edge<detail::KeyPair<NDIM>, std::vector<detail::KeyPair<NDIM>>> accumulate_contribution_recurse;
 
     /**
-     * Dispatch task receives the
+     * Dispatch task receives the input node and the list of contributions to apply to it.
+     * It sends the node and the contributions to the first shellN task, or sends the node directly
+     * to the output if there are no contributions to apply.
      */
     auto accumulate_dispatch = ttg::make_tt<Space>(
       [=](const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
-          const std::vector<detail::KeyPair<NDIM>>& contributions) -> TASKTYPE {
+          const std::vector<detail::KeyPair<NDIM>>& contributions,
+          const std::array<bool, mra::Key<NDIM>::num_children()>& child_empty) -> TASKTYPE {
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+        auto send_out = [&]<std::size_t I, typename S>(auto&& k, S&& out, std::integral_constant<std::size_t, I>){
           sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+          return false; // to allow using send_out in an initializer list
         };
 #else
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+        auto send_out = [&]<std::size_t I, typename S>(auto&& k, S&& out, std::integral_constant<std::size_t, I>){
           ttg::send<I>(k, std::forward<S>(out));
+          return false; // to allow using send_out in an initializer list
         };
 #endif
 
@@ -704,11 +677,23 @@ namespace mra {
           send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 1>{});
         }
 
+        /**
+         * Feed empty nodes to adjust-leaf task if needed, to make sure they have sufficient inputs.
+         */
+        [&]<std::size_t... Is>(std::index_sequence<Is...>){
+          return ((
+            child_empty[Is] && send_out(key, mra::FunctionsCompressedNode<T, NDIM>{},
+                                        std::integral_constant<std::size_t, 3+Is>{})
+          ), ...);
+        }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
+
 #ifndef MRA_ENABLE_HOST
         co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
-      }, ttg::edges(to_shellN, contribution_edge),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_result),
+      }, ttg::edges(to_shellN, contribution_edge, down_to_accumulate_leaf_info),
+         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_to_adjust_leaf,
+                    adjust_leaf_edges[0], adjust_leaf_edges[1], adjust_leaf_edges[2], adjust_leaf_edges[3],
+                    adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7]),
          "AccumulateDispatch");
 
     /**
@@ -719,7 +704,7 @@ namespace mra {
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
-      [&, N, K, fac, thresh, name](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
@@ -740,47 +725,43 @@ namespace mra {
       auto source = keypair.source;
       auto displacement = key - source;
 
-      //std::cout << "ACCUMULATE " << key << " in_node " << in_node.key() << " applying contribution " << contribution_keys.back()
+      size_type N = fns->num_functions(key);
+
+      //std::cout << "ACCUMULATE " << key << " in_node " << in_node << " applying contribution " << contribution
       //          << " with " << contribution_keys.size() << " contributions left" << std::endl;
 
       assert(!contribution_keys.empty());
       assert(contribution_keys.back() == keypair);
       assert(!contribution.empty());
-      assert(!in_node.invalid()); // we should always get a valid node from child adjust task
       // we allow for invalid nodes here because we may have contributions for nodes that previously did not exist
-      assert(key == in_node.key());
+      assert(in_node.invalid() || key == in_node.key());
 
       // remove the current key
       contribution_keys.pop_back();
 
       bool last_key = contribution_keys.empty();
+      SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+      sparsity.nonzero_if_any(in_node, contribution);
 
       mra::FunctionsCompressedNode<T, NDIM> out(key, N);
 
-      auto op_data = op.get_op(key.level(), mra::Key<NDIM>(displacement));
+      auto op_data = op.get_op(key.level(), displacement);
 
-      out.allocate(K, ttg::scope::Allocate);
+      out.allocate(sparsity, K, ttg::scope::Allocate);
 
       out.set_ns();
       mra::apply_leaf_info(out, in_node);
-      // set child leaf information
-      //for (size_type i = 0; i < N; ++i) {
-      //  for (size_type c = 0; c < num_children; ++c) {
-      //    out.set_child_leaf(i, c, in_node.is_child_leaf(i, c));
-      //  }
-      //}
-      Tensor<T, 1> resnorms;
-      T opnorm = op_data->norm;
-      T tol = truncate_tol(key, thresh);
-      std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
-      // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K)*N, TempScope);
+      DenseTensor<T, 1> resnorms;
+      const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
+      std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
+
+      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N, TempScope);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
       if (last_key) {
-        resnorms = Tensor<T, 1>(N, TempScope);
+        resnorms =  DenseTensor<T, 1>(N, TempScope);
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
@@ -804,7 +785,10 @@ namespace mra {
       auto contribution_view = contribution.coeffs().current_view();
       auto in_node_view = in_node.coeffs().current_view();
       auto resnorms_view = resnorms.current_view();
-      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, opnorm, fac, tol, in_node_view,
+
+      auto sparseman = make_sparsity_manager(out);
+      sparseman.populate_device_sparsity();
+      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
                                           contribution_view, out_view, resnorms_view, transr, transs,
                                           opnorms_view, at,
                                           tmp.current_device_ptr(), ttg::device::current_stream());
@@ -822,18 +806,26 @@ namespace mra {
         bool empty = true;
         auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
         for (size_type i = 0; i < N; ++i) {
+          //std::cout << "ACCUMULATE " << key << " result norm for function " << i << ": " << resnorms_host_view(i) << std::endl;
           if (resnorms_host_view(i) != 0.0) {
+            assert(out.is_nonzero(i) && "if the norm is non-zero we should have non-zero coefficients");
             empty = false;
-            break;
+          } else {
+            // TODO: should we allow modifying the sparsity on the host?
+            out.set_zero(i);
           }
         }
 
+        /**
+         * Drop the coefficients if the node is empty to save memory.
+         */
         if (empty) {
           out.make_empty(); // drop the memory but keep child info
         }
 
         // if this was the last contribution to apply, send the result to the output
         ttg::trace(name, key, ": last contribution, node empty: ", empty);
+        //std::cout << "ACCUMULATE " << key << " last contribution applied, sending result to output" << out << std::endl;
         send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 2>{});
       } else {
         // send the result to the next contribution task or output
@@ -845,12 +837,164 @@ namespace mra {
       co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(accumulate_node_recurse, screener_to_accumulate, accumulate_contribution_recurse),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_result),
+         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_to_adjust_leaf),
          "Accumulate");
 
+    /***************************************************************************************
+     * Task that receives the final output node and its children (or an empty node) and
+     * adjusts the leaf status of the node based on whether its children have data.
+     * Sends the result to the final output.
+     ***************************************************************************************/
+    auto adjust_leaf_info_tt = ttg::make_tt<Space>(
+      [=](const Key<NDIM>& key,
+          FunctionsCompressedNode<T, NDIM>&& node,
+          const mra::FunctionsCompressedNode<T, NDIM>& child0,
+          const mra::FunctionsCompressedNode<T, NDIM>& child1,
+          const mra::FunctionsCompressedNode<T, NDIM>& child2,
+          const mra::FunctionsCompressedNode<T, NDIM>& child3,
+          const mra::FunctionsCompressedNode<T, NDIM>& child4,
+          const mra::FunctionsCompressedNode<T, NDIM>& child5,
+          const mra::FunctionsCompressedNode<T, NDIM>& child6,
+          const mra::FunctionsCompressedNode<T, NDIM>& child7) -> TASKTYPE {
+        ttg::trace("AdjustLeafInfo", key, "is_all_child_leaf", node.is_all_child_leaf());
+
+        assert(!node.invalid() && "we should have received a valid node from the accumulate task");
+
+
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto&& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto&& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
+        size_type N = fns->num_functions(key);
+        constexpr size_type num_children = mra::Key<NDIM>::num_children();
+        constexpr std::size_t result_terminal = mra::Key<NDIM>::num_children();
+        std::array<const mra::FunctionsCompressedNode<T, NDIM>*, num_children> children
+                                    = {&child0, &child1, &child2, &child3, &child4, &child5, &child6, &child7};
+
+
+        //for (auto child : mra::children(key)) {
+        //  std::cout << "ADJUST LEAF INFO " << key << " child " << child << " " << *children[child.childindex()] << std::endl;
+        //}
+
+        /**
+         * For each function in each child, check if the children of the child are leafs and the child itself is empty.
+         * If so, mark the child as a leaf in the node.
+         */
+        for (size_type i = 0; i < N; ++i) {
+          for (size_type c = 0; c < num_children; ++c) {
+            bool is_child_leaf = false;
+            if (children[c]->invalid() || (children[c]->is_all_child_leaf(i) && children[c]->is_zero(i))) {
+              is_child_leaf = true;
+            }
+            node.set_child_leaf(i, c, is_child_leaf);
+          }
+        }
+
+        //std::cout << "ADJUST LEAF INFO " << key << " after adjustment node " << node << std::endl;
+
+        if (key.level() > 0) {
+          if (!(node.is_all_child_leaf() && node.is_all_zero())) {
+            /**
+             * Broadcast the node to the parent and the result (have to select the right output terminal).
+             * We send the node to the result only if it is not empty and has no children.
+             */
+            [&]<std::size_t... I>(std::index_sequence<I...>){
+              auto bcast = [&]<std::size_t J>(){
+#ifndef MRA_ENABLE_HOST
+                sends.push_back(ttg::device::broadcast<J, result_terminal>(std::make_tuple(key.parent(), key),
+                                                                           std::move(node)));
+#else
+                ttg::broadcast<J, result_terminal>(std::make_tuple(key.parent(), key),
+                                                   std::move(node));
+#endif
+                return true;
+              };
+              ((
+                (I == key.childindex() ? bcast.template operator()<I>() : false)
+              ), ...);
+            }(std::make_index_sequence<result_terminal>{});
+          } else {
+
+            /**
+             * If the node is empty and all children are leafs, we just send it up to the parent, but not to the result.
+             * This way we are dropping empty nodes on the way up.
+             * The lambda below helps us select the right output terminal based on which child we are.
+             */
+            [&]<std::size_t... I>(std::index_sequence<I...>){
+              auto do_send = [&]<std::size_t J>(){
+                send_out(key.parent(), std::move(node), std::integral_constant<std::size_t, J>{});
+                return true;
+              };
+              ((
+                (I == key.childindex() ? do_send.template operator()<I>() : false)
+              ), ...);
+            }(std::make_index_sequence<num_children>{});
+          }
+        } else {
+          // if we are the root we have no parent to send to, so we send the result directly to the output
+          send_out(key, std::move(node), std::integral_constant<std::size_t, result_terminal>{});
+        }
+
+#ifndef MRA_ENABLE_HOST
+          co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
+      }, ttg::edges(accumulate_to_adjust_leaf,
+                    adjust_leaf_edges[0], adjust_leaf_edges[1], adjust_leaf_edges[2], adjust_leaf_edges[3],
+                    adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7]),
+         ttg::edges(adjust_leaf_edges[0], adjust_leaf_edges[1], adjust_leaf_edges[2], adjust_leaf_edges[3],
+                    adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7],
+                    result),
+         "AdjustLeafInfo");
+
+
+
+#if 0
+
+    /****************************************************************************************************************************
+     * Task that receives a node (either from shell0 if it exists already, or from down task if its new) and the leaf status of
+     * its children, adjusts the leaf status based on whether it has children or receives contributions, and sends it to shellN.
+     ****************************************************************************************************************************/
+    auto adjust_leaf_tt = ttg::make_tt<Space>(
+      [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node, const std::array<bool, 8>& child_info) -> TASKTYPE {
+
+        size_type N = fns->num_functions(key);
+
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
+        };
+#else
+        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
+          ttg::send<I>(k, std::forward<S>(out));
+        };
+#endif
+
+        if (node.invalid()) {
+          node = FunctionsCompressedNode<T, NDIM>(key, N);
+        }
+
+        // TODO: drop the per-function leaf info from nodes
+        for (auto child : children(key)) {
+          node.set_child_empty(child.childindex(), child_info[child.childindex()]);
+        }
+
+        send_out(key, std::move(node), std::integral_constant<std::size_t, 0>{});
+
+#ifndef MRA_ENABLE_HOST
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
+      }, ttg::edges(shell0_to_shellN, down_to_adjust_leaf_child_info), ttg::edges(to_shellN), "AdjustLeaf");
 
     /***************************************************************************************
-     * Task that dispatches the result to adjust_parent, filling the boolean inputs
+     * Task that dispatches the result to adjust_parent, filling the LeafStatus inputs
      * for leaf nodes.
      * TODO: this task should be inlined somehow
      ***************************************************************************************/
@@ -859,8 +1003,8 @@ namespace mra {
 
     auto dispatch_adjust_parent_tt = ttg::make_tt<Space>(
       [=](const Key<NDIM>& key, const FunctionsCompressedNode<T, NDIM>& node) -> TASKTYPE {
-        ttg::trace("DispatchAdjustParent", key, "is_all_child_leaf", node.is_all_child_leaf());
-
+        ttg::trace("DispatchAdjustParent", key, "is_all_child_empty", node.is_all_child_empty());
+        size_type N = fns->num_functions(key);
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
         auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
@@ -873,10 +1017,18 @@ namespace mra {
 #endif
 
         detail::foreach_child(key, [&]<std::size_t I>(const Key<NDIM>& child){
-          if (node.is_child_leaf(child)) {
+          ttg::trace("DispatchAdjustParent", key, "checking child ", child, " is leaf or invalid ", node.is_child_empty(child));
+          if (node.is_child_empty(child)) {
+            detail::LeafInfo leaf_info(N);
+            auto leaf_info_view = leaf_info.host_view();
+            for (int n = 0; n < N; ++n) {
+              // if we are zero we are invalid, otherwise we are a leaf
+              leaf_info_view(n) = node.is_zero(n) ? LeafStatus::Invalid : LeafStatus::Leaf;
+            }
             //std::cout << "DISPATCH ADJUST PARENT " << key << " child " << child << " is leaf, sending true" << std::endl;
-            send_out(key, true, std::integral_constant<std::size_t, I>{});
+            send_out(key, std::move(leaf_info), std::integral_constant<std::size_t, I>{});
           }
+          send_out(key, node.is_child_empty(child), std::integral_constant<std::size_t, I>{});
         });
 
 #ifndef MRA_ENABLE_HOST
@@ -888,16 +1040,21 @@ namespace mra {
          "DispatchAdjustParent");
 
     /***************************************************************************************
-     * Task that receives the result node and booleans from their children indicating
+     * Task that receives the result node and LeafInfo from their children indicating
      * whether the child is empty. This allows us to adjust the child-leaf info of the
      * parent after all contributions have been accumulated.
      ***************************************************************************************/
     auto adjust_parent_tt = ttg::make_tt<Space>(
       [=](const Key<NDIM>& key, FunctionsCompressedNode<T, NDIM>&& node,
-          bool child0, bool child1, bool child2, bool child3,
-          bool child4, bool child5, bool child6, bool child7) -> TASKTYPE {
+          bool child0, bool child1,
+          bool child2, bool child3,
+          bool child4, bool child5,
+          bool child6, bool child7) -> TASKTYPE {
         // this task receives the leaf status of our children from the down task and sends it to our parent so that it can adjust its contribution count if necessary
-        auto child_info = std::array{child0, child1, child2, child3, child4, child5, child6, child7};
+        auto child_info = std::array{child0, child1, child2, child3,
+                                     child4, child5, child6, child7};
+
+        size_type N = fns->num_functions(key);
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -910,21 +1067,27 @@ namespace mra {
         };
 #endif
 
-        bool empty = node.empty();
-        if (!empty) {
-          // TODO: this is so awkward! Get rid of the N iterations
-          for (int n = 0; n < N; ++n) {
-            for (int i = 0; i < child_info.size(); ++i) {
-              node.set_child_leaf(n, i, child_info[i]);
-            }
-          }
+        for (size_t i = 0; i < num_children; ++i) {
+          node.set_child_empty(i, child_info[i]);
         }
+
+        assert(node.is_all_child_empty() || !node.invalid());
+
+        bool empty = false;
+        /**
+         * If our children are all empty we may be empty ourselves, if we're invalid or all zero.
+         * If our children are not all empty we cannot mark ourselves as empty.
+         */
+        if (node.is_all_child_empty() && (node.invalid() || node.empty() || node.is_all_zero())) {
+          empty = true;
+        }
+
         //std::cout << "ADJUST PARENT " << key << " is empty " << empty << std::endl;
         if (key.level() > 0) {
 #ifndef MRA_ENABLE_HOST
-          sends.push_back(select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent"));
+          sends.push_back(select_send_up(key, std::move(empty), std::make_index_sequence<num_children>{}, "adjust_parent"));
 #else  // MRA_ENABLE_HOST
-          select_send_up(key, empty, std::make_index_sequence<num_children>{}, "adjust_parent");
+          select_send_up(key, std::move(empty), std::make_index_sequence<num_children>{}, "adjust_parent");
 #endif // MRA_ENABLE_HOST
 
         }
@@ -948,6 +1111,7 @@ namespace mra {
                     adjust_parent_edges[4], adjust_parent_edges[5],
                     adjust_parent_edges[6], adjust_parent_edges[7],
                     result), "AdjustParent");
+#endif // 0
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       up_contributions_tt->set_keymap(procmap);
@@ -957,11 +1121,11 @@ namespace mra {
       //neighbor_dispatch_tt->set_keymap(procmap);
       //rebalance_down->set_keymap(procmap);
       shell0_tt->set_keymap(procmap);
-      adjust_leaf_tt->set_keymap(procmap);
+      adjust_leaf_info_tt->set_keymap(procmap);
       accumulate_dispatch->set_keymap(procmap);
       accumulate_tt->set_keymap([=](const detail::KeyPair<NDIM>& kp) { return procmap(kp.dest); });
-      dispatch_adjust_parent_tt->set_keymap(procmap);
-      adjust_parent_tt->set_keymap(procmap);
+      //dispatch_adjust_parent_tt->set_keymap(procmap);
+      //adjust_parent_tt->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       up_contributions_tt->set_devicemap(devicemap);
@@ -971,465 +1135,30 @@ namespace mra {
       //neighbor_dispatch_tt->set_devicemap(devicemap);
       //rebalance_down->set_devicemap(devicemap);
       shell0_tt->set_devicemap(devicemap);
-      adjust_leaf_tt->set_devicemap(devicemap);
+      adjust_leaf_info_tt->set_devicemap(devicemap);
       accumulate_dispatch->set_devicemap(devicemap);
       accumulate_tt->set_devicemap([=](const detail::KeyPair<NDIM>& kp) { return devicemap(kp.dest); });
-      dispatch_adjust_parent_tt->set_devicemap(devicemap);
-      adjust_parent_tt->set_devicemap(devicemap);
+      //dispatch_adjust_parent_tt->set_devicemap(devicemap);
+      //adjust_parent_tt->set_devicemap(devicemap);
     }
     // TODO: assemble TTG
 
     auto ins = std::make_tuple(screener_tt->template in<0>());
-    auto outs = std::make_tuple(adjust_parent_tt->template out<8>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(10);
+    auto outs = std::make_tuple(adjust_leaf_info_tt->template out<2>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(8);
     ops[0] = std::move(up_contributions_tt);
     ops[1] = std::move(down_contributions_tt);
     ops[2] = std::move(norm_tt);
     ops[3] = std::move(screener_tt);
     ops[4] = std::move(shell0_tt);
-    ops[5] = std::move(adjust_leaf_tt);
+    ops[5] = std::move(adjust_leaf_info_tt);
     ops[6] = std::move(accumulate_dispatch);
     ops[7] = std::move(accumulate_tt);
-    ops[8] = std::move(dispatch_adjust_parent_tt);
-    ops[9] = std::move(adjust_parent_tt);
+    //ops[8] = std::move(dispatch_adjust_parent_tt);
+    //ops[9] = std::move(adjust_parent_tt);
 
     return make_ttg(std::move(ops), ins, outs, name);
   }
-
-
-
-
-#if 0
-    /************************************************************************************************************
-     * A dispatch task that receives the input nodes and distributes them to the neighbors in all dimensions.
-     *************************************************************************************************************/
-    auto neighbor_dispatch_tt = ttg::make_tt(
-      [=](const mra::Key<NDIM>& key,
-          const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
-
-#ifndef MRA_ENABLE_HOST
-        auto sends = ttg::device::forward();
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
-          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
-        };
-#else
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
-          ttg::send<I>(k, std::forward<S>(out));
-        };
-#endif
-
-        assert(in_node.key() == key);
-
-        std::tuple<std::vector<Key<NDIM>>, std::vector<Key<NDIM>>, std::vector<Key<NDIM>>,
-                   std::vector<Key<NDIM>>, std::vector<Key<NDIM>>, std::vector<Key<NDIM>>> neighbor_keys_tuple;
-        auto send_to_neighbor = [&]<std::size_t I>(const Key<NDIM>& neighbor, std::index_sequence<I>) {
-          if (neighbor.is_valid()) {
-            std::cout << "NEIGHBOR DISPATCH " << key << " sending to neighbor " << neighbor << " on terminal " << I << std::endl;
-            std::get<I>(neighbor_keys_tuple).push_back(neighbor);
-          }
-        };
-        /**
-         * NOTE: outputs are swapped so that our left neighbor receives us on the right input.
-         */
-        send_to_neighbor(key.neighbor(0, -1), std::index_sequence<1>{});
-        send_to_neighbor(key.neighbor(0,  1), std::index_sequence<0>{});
-        send_to_neighbor(key.neighbor(1, -1), std::index_sequence<3>{});
-        send_to_neighbor(key.neighbor(1,  1), std::index_sequence<2>{});
-        send_to_neighbor(key.neighbor(2, -1), std::index_sequence<5>{});
-        send_to_neighbor(key.neighbor(2,  1), std::index_sequence<4>{});
-
-        if (key.level() == 0) {
-          // root has no neighbors, so just send to the down task
-          std::cout << "NEIGHBOR DISPATCH " << key << " is root, sending empty nodes to all neighbor inputs" << std::endl;
-          auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
-          std::get<0>(neighbor_keys_tuple).push_back(key);
-          std::get<1>(neighbor_keys_tuple).push_back(key);
-          std::get<2>(neighbor_keys_tuple).push_back(key);
-          std::get<3>(neighbor_keys_tuple).push_back(key);
-          std::get<4>(neighbor_keys_tuple).push_back(key);
-          std::get<5>(neighbor_keys_tuple).push_back(key);
-#ifndef MRA_ENABLE_HOST
-          sends.push_back(ttg::device::broadcast<0, 1, 2, 3, 4, 5>(std::move(neighbor_keys_tuple), std::move(empty_node)));
-          co_await std::move(sends);
-#else
-          ttg::broadcast<0, 1, 2, 3, 4, 5>(std::move(neighbor_keys_tuple), std::move(empty_node));
-#endif // MRA_ENABLE_HOST
-
-        } else {
-
-#ifndef MRA_ENABLE_HOST
-          sends.push_back(ttg::device::broadcast<0, 1, 2, 3, 4, 5>(std::move(neighbor_keys_tuple), in_node));
-          co_await std::move(sends);
-#else
-          ttg::broadcast<0, 1, 2, 3, 4, 5>(std::move(neighbor_keys_tuple), in_node);
-#endif // MRA_ENABLE_HOST
-        }
-      }, ttg::edges(input),
-         ttg::edges(neighbor_edges[0], neighbor_edges[1], neighbor_edges[2], neighbor_edges[3], neighbor_edges[4], neighbor_edges[5]),
-         name + "-neighbor-dispatch");
-
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> rebalance_recurse_edge;
-
-
-    /*****************************************************************************************************************************
-     * TT that receives lists of contributions from its children, combines them through a reducer terminal,
-     * and sends them to their neighbors and parent.
-     * TODO: this does not work as planned because the receiver's ancestors do not know that they receive something.
-     *       We will have to rethink this.
-     *****************************************************************************************************************************/
-
-    auto up_contributions_tt = ttg::make_tt(
-      [=](const mra::Key<NDIM>& key,
-          std::vector<detail::KeyPair<NDIM>>&& contributions) {
-        /**
-         * Combine contributions from children and send them to the appropriate neighbors and parent.
-         * We need to be careful to only send one message per neighbor/parent, so we will combine contributions that go to the same destination.
-         */
-
-        //ttg::trace(name + "-up", key, contributions.size());
-        std::cout << "UP " << key << " received " << contributions.size() << " contributions" << std::endl;
-
-        if (key.level() == 0) {
-          // root has no neighbors and no parent, so forward the contributions to the down task
-          ttg::send<0>(key, std::move(contributions));
-
-        } else {
-
-          /**
-           * Not the root.
-           * Iterate over our neighbors and send the contributions they are responsible for.
-           * We remove each key we have sent from the contributions vector so that at the end
-           * we are left with only contributions that need to be sent up to the parent.
-           */
-
-          auto backiter = contributions.end();
-
-          auto send_to_neighbor = [&](std::array<int, NDIM> displacement) {
-            std::vector<detail::KeyPair<NDIM>> neighbor_contributions;
-            auto neighbor = key + displacement;
-            if (!neighbor.is_valid()) {
-              return;
-            }
-            for (auto it = contributions.begin(); it != backiter; ++it) {
-              const auto& contribution = *it;
-              if (neighbor.is_ancestor_of(contribution.dest)) {
-                neighbor_contributions.push_back(contribution);
-                // replace with last element
-                --backiter;
-                *it = *backiter;
-                --it; // step back one so that the next iteration will not skip the element we just swapped in
-              }
-            }
-            std::cout << "UP " << key << " sending " << neighbor_contributions.size() << " contributions to neighbor " << neighbor << std::endl;
-            ttg::send<0>(neighbor, std::move(neighbor_contributions));
-          };
-
-          constexpr int num_neighbors = 6;
-          constexpr int num_children = Key<NDIM>::num_children();
-
-          // send to neighbors in the order of -x, +x, -y, +y, -z, +z
-          send_to_neighbor({-1,  0,  0});
-          send_to_neighbor({ 1,  0,  0});
-          send_to_neighbor({ 0, -1,  0});
-          send_to_neighbor({ 0,  1,  0});
-          send_to_neighbor({ 0,  0, -1});
-          send_to_neighbor({ 0,  0,  1});
-
-          // find the ones we are an ancestor for
-          send_to_neighbor({0, 0, 0});
-
-
-          // shrink the contributions vector to include only elements we have not sent yet
-          contributions.erase(backiter, contributions.end());
-
-          // send the rest up to the parent
-          std::cout << "UP " << key << " sending " << contributions.size() << " contributions to parent " << key.parent() << std::endl;
-          ttg::send<1>(key.parent(), std::move(contributions));
-
-        }
-
-      }, ttg::edges(up_contribution_edge, input), ttg::edges(down_contribution_edge, up_contribution_edge), name + "-up");
-#endif // 0
-
-#if 0
-    /**************************************************************************************************************************************************
-     * The TT that walks down the tree where each node receives its 6 neighbors and sets the reducer terminal size
-     * for the down-tree tasks where not all neighbors exist. On the way, we need to send empty nodes to our children that have no neighbors,
-     * based on whether our neighbors have children or not.
-     *
-     * TODO: sending sideways does not currently work. We have to go through the through until we figure out how to balance the tree properly.
-     *************************************************************************************************************************************************/
-     auto rebalance_down = ttg::make_tt([=, down_tt_ptr = down_contributions_tt.get()](
-                                            const mra::Key<NDIM>& key,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& in_node,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& neighbor_l0,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& neighbor_r0,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& neighbor_l1,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& neighbor_r1,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& neighbor_l2,
-                                            const mra::FunctionsCompressedNode<T, NDIM>& neighbor_r2) -> TASKTYPE
-      {
-
-#ifndef MRA_ENABLE_HOST
-        auto sends = ttg::device::forward();
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
-          sends.push_back(ttg::device::send<I>(k, std::forward<S>(out)));
-        };
-#else
-        auto send_out = [&]<std::size_t I, typename S>(auto& k, S&& out, std::integral_constant<std::size_t, I>){
-          ttg::send<I>(k, std::forward<S>(out));
-        };
-#endif
-
-        if (key.level() == 0) {
-          // root has no neighbors, so just fill in the neighbors of the children with empty nodes
-          assert(neighbor_l0.empty() && neighbor_r0.empty() && neighbor_l1.empty() && neighbor_r1.empty() &&
-                 neighbor_l2.empty() && neighbor_r2.empty() && "Root should have only neighbors!");
-        }
-
-#if 0
-        if (in_node.is_all_child_leaf()) {
-          // if all children are leafs we have no contributions coming up from the children, so we can just forward the contributions from our parent and neighbors down without rebalancing.
-          std::cout << "REBALANCE " << key << " is all leaf, nothing to do" << std::endl;
-        } else {
-#endif // 0
-
-          constexpr auto Left = std::integral_constant<typename Key<NDIM>::Direction, Key<NDIM>::Direction::Left>{};
-          constexpr auto Right = std::integral_constant<typename Key<NDIM>::Direction, Key<NDIM>::Direction::Right>{};
-          const auto neighbors = std::array{
-            std::make_tuple(std::ref(neighbor_l0), 0, Key<NDIM>::Direction::Left), std::make_tuple(std::ref(neighbor_r0), 0, Key<NDIM>::Direction::Right),
-            std::make_tuple(std::ref(neighbor_l1), 1, Key<NDIM>::Direction::Left), std::make_tuple(std::ref(neighbor_r1), 1, Key<NDIM>::Direction::Right),
-            std::make_tuple(std::ref(neighbor_l2), 2, Key<NDIM>::Direction::Left), std::make_tuple(std::ref(neighbor_r2), 2, Key<NDIM>::Direction::Right)
-          };
-
-          const std::array<bool, 2*NDIM> has_neighbor{!neighbor_l0.empty(), !neighbor_r0.empty(),
-                                                      !neighbor_l1.empty(), !neighbor_r1.empty(),
-                                                      !neighbor_l2.empty(), !neighbor_r2.empty()};
-
-          bool all_neighbors_empty = std::all_of(has_neighbor.begin(), has_neighbor.end(), [](bool b){ return !b; });
-          bool any_neighbor_nonempty = std::any_of(has_neighbor.begin(), has_neighbor.end(), [](bool b){ return b; });
-
-          bool all_child_leaf = in_node.is_all_child_leaf();
-
-          std::cout << "REBALANCE " << key << " has neighbors " << has_neighbor << ", all neighbors empty: " << all_neighbors_empty
-                    << ", any neighbor non-empty: " << any_neighbor_nonempty << ", all child leaf: " << all_child_leaf << "\n"
-                    << ", neighbor_l0 " << neighbor_l0.key() << " all child leaf: " << neighbor_l0.is_all_child_leaf() << ", invalid neighbor_l0: " << neighbor_l0.invalid() << "\n"
-                    << ", neighbor_r0 " << neighbor_r0.key() << " all child leaf: " << neighbor_r0.is_all_child_leaf() << ", invalid neighbor_r0: " << neighbor_r0.invalid() << "\n"
-                    << ", neighbor_l1 " << neighbor_l1.key() << " all child leaf: " << neighbor_l1.is_all_child_leaf() << ", invalid neighbor_l1: " << neighbor_l1.invalid() << "\n"
-                    << ", neighbor_r1 " << neighbor_r1.key() << " all child leaf: " << neighbor_r1.is_all_child_leaf() << ", invalid neighbor_r1: " << neighbor_r1.invalid() << "\n"
-                    << ", neighbor_l2 " << neighbor_l2.key() << " all child leaf: " << neighbor_l2.is_all_child_leaf() << ", invalid neighbor_l2: " << neighbor_l2.invalid() << "\n"
-                    << ", neighbor_r2 " << neighbor_r2.key()  <<" all child leaf: " << neighbor_r2.is_all_child_leaf() << ", invalid neighbor_r2: " << neighbor_r2.invalid()
-                    << std::endl;
-
-          if (all_neighbors_empty && all_child_leaf) {
-            // if all neighbors are empty and we have no contributions coming up from the children, we can just forward the contributions from our parent down without rebalancing.
-            std::cout << "REBALANCE " << key << " is all leaf and all neighbors empty, nothing to do" << std::endl;
-          } else {
-             std::cout << "REBALANCE " << key << " has non-empty neighbors, checking children" << std::endl;
-
-            /**
-             * For each dimension, check whether
-             * 1) a child is located on the boundary; or
-             * 2) no neighbor in that direction exists (i.e., our neighbor is empty or has no children).
-             * In either case, we need to send an empty node to the child in that direction since the child
-             * will not receive any contributions from that direction and needs to know to expect that.
-             *
-             * The lambda also returns the number of empty nodes sent out so that we can adjust the number of inputs
-             * to the reduction terminal on the way down.
-             */
-            auto check_child_exists = [&](const auto& node, const auto& child){
-              if (node.invalid()) {
-                return false;
-              }
-              for (int i = 0; i < N; ++i) {
-                if (node.is_child_leaf(i, child.childindex())) {
-                  return false;
-                }
-              }
-              return true;
-            };
-#if 0
-            auto rebalance_dir = [&](const auto& child, const auto& neighbor_node, auto disp, auto d, const std::string& dir_name) {
-              int num_empty = 0;
-              auto neighbor_key = neighbor_node.key();
-              auto child_neighbor = child.neighbor(d, static_cast<int>(disp()));
-              constexpr auto terminal_id = 2*d() + (disp() == Key<NDIM>::Direction::Left ? 0 : 1);
-#if 0
-              bool child_neighbor_exists = key.level() == 0 // level 1 always exists
-                                        || (child_neighbor.parent() == key)
-                                        || (!child.is_boundary(d, disp)
-                                          && (neighbor_key == child_neighbor.parent())
-                                          && !neighbor_node.is_all_child_leaf()
-                                          && !neighbor_node.invalid());
-
-              if (child.is_boundary(d, disp))
-                std::cout << "REBALANCE " << key << " child " << child << " is on the "
-                          << dir_name << " boundary in dimension " << d() << std::endl;
-              if (key.level() > 0 && (neighbor_key == child_neighbor.parent()) && (neighbor_node.is_all_child_leaf() || neighbor_node.invalid()))
-                std::cout << "REBALANCE " << key << " child " << child << " has " << dir_name << " neighbor " << child_neighbor << " parent "
-                          << neighbor_key << " that is all child leaf or is invalid in dimension " << d() << std::endl;
-#endif // 0
-
-              bool needs_empty_neighbor = false;
-              if (child.is_boundary(d, disp) && !check_is_child_leaf(in_node, child)) {
-                // if the child is on the boundary and is a leaf, it needs an empty neighbor to know to expect no contributions from that direction
-                std::cout << "REBALANCE " << key << " child " << child << " is on the "
-                          << dir_name << " boundary in dimension " << d() << " and is not a leaf, needs empty neighbor" << std::endl;
-                needs_empty_neighbor = true;
-              } else if (key.level() > 0) { // children of level 0 keys have all neighbors
-                if (child_neighbor.parent() == key) {
-                  // check if the child is a leaf and its neighbor is not, in which case we need to fill the input with an empty node.
-                  if (!check_is_child_leaf(in_node, child) && check_is_child_leaf(in_node, child_neighbor)) {
-                    std::cout << "REBALANCE " << key << " child " << child << " has neighbor " << child_neighbor
-                              << " that is our child but is a leaf, needs empty neighbor" << std::endl;
-                    needs_empty_neighbor = true;
-                  }
-                } else if (check_is_child_leaf(neighbor_node, child_neighbor) && neighbor_node.invalid()) {
-                  // if the neighbor in that direction is empty/invalid or all child leaf, we need to send an empty node to the child since it will not receive any contributions from that direction and needs to know to expect that.
-
-
-                }
-              }
-              } else if (key.level() > 0 && (neighbor_key == child_neighbor.parent()) && (neighbor_node.is_all_child_leaf() || neighbor_node.invalid())) {
-                // the neighbor is empty/invalid
-                needs_empty_neighbor = true;
-              }
-
-              if (needs_empty_neighbor) {
-                std::stringstream reason;
-#if 0
-                if (child.is_boundary(d, disp)) reason << "is on the " << dir_name << " boundary in dimension " << d() << " ";
-                if (neighbor_node.invalid()) reason << "has invalid " << dir_name << " neighbor " << child_neighbor << " in dimension " << d() << " ";
-                if (neighbor_node.is_all_child_leaf()) reason << "has " << dir_name << " neighbor " << child_neighbor
-                                                                << " parent " << neighbor_key << " all child leaf neighbor in dimension " << d() << " ";
-#endif // 0
-                std::cout << "REBALANCE " << key << " child " << child << " " << reason.str()
-                          << "sending empty node on terminal " << terminal_id << std::endl;
-                send_out(child, mra::FunctionsCompressedNode<T, NDIM>(), std::integral_constant<std::size_t, terminal_id>{});
-                ++num_empty;
-              }
-
-              if (any_neighbor_nonempty && neighbor_node.is_all_child_leaf() && (all_child_leaf || in_node.invalid()) && !child.is_boundary(d, disp)) {
-                // we have to make sure that our children's neighbors have their inputs satisfied
-                constexpr auto rev_terminal_id = 2*d() + (disp() == Key<NDIM>::Direction::Left ? 1 : 0);
-                std::cout << "REBALANCE " << key << " child " << child << " has at least one non-empty neighbor, sending empty node to child neighbor "
-                          << child_neighbor << " on terminal " << rev_terminal_id << std::endl;
-                send_out(child_neighbor, FunctionsCompressedNode<T, NDIM>(), std::integral_constant<std::size_t, rev_terminal_id>{});
-              }
-              return num_empty;
-            };
-#endif // 0
-
-            for (auto child : children(key)) {
-              int num_empty = 0;
-              bool child_exists = check_child_exists(in_node, child);
-              std::array<bool, 2*NDIM> child_has_neighbor{false, false, false, false, false, false};
-              /**
-               * First: check whether any of the neighbors of that child have contributions to send.
-               */
-              for (auto& neighbor : neighbors) {
-                auto& neighbor_node = std::get<0>(neighbor);
-                auto neighbor_key = neighbor_node.key();
-                int d = std::get<1>(neighbor);
-                int dir = static_cast<std::size_t>(std::get<2>(neighbor));
-                auto child_neighbor = child.neighbor(d, dir); // check the neighbor
-                std::cout << "REBALANCE " << key << " child " << child << "(exists " << child_exists << ") checking neighbor " << d << " " << dir << " " << neighbor_key << " child neighbor " << child_neighbor << std::endl;
-
-                if (child.is_boundary(d, std::get<2>(neighbor))) {
-                  std::cout << "REBALANCE " << key << " child " << child << " is on the boundary in direction " << d << " " << dir
-                            << ", treating as empty neighbor" << std::endl;
-                  continue;
-                }
-                if (child_neighbor.parent() == neighbor_key) {
-                  if (check_child_exists(neighbor_node, child_neighbor)) {
-                    std::cout << "REBALANCE " << key << " child " << child << " has neighbor " << child_neighbor
-                              << " that is a leaf, treating as empty neighbor" << std::endl;
-                    child_has_neighbor[&neighbor - &neighbors[0]] = true;
-                  } else {
-                    std::cout << "REBALANCE " << key << " child " << child << " child neighbor " << child_neighbor
-                              << " does not exist in " << neighbor_key << " (invalid " << neighbor_node.invalid()
-                              << ", all child leafs " << neighbor_node.is_all_child_leaf() << ")" << std::endl;
-                  }
-                } else if (child_neighbor.parent() == key) {
-                  // the child's neighbor is one of our children, so check whether that is a leaf.
-                  if (check_child_exists(in_node, child_neighbor)) {
-                    std::cout << "REBALANCE " << key << " child " << child << " has neighbor " << child_neighbor
-                              << " that is our child and is a leaf, treating as empty neighbor" << std::endl;
-                    child_has_neighbor[&neighbor - &neighbors[0]] = true;
-                  } else {
-                    std::cout << "REBALANCE " << key << " child " << child << " has neighbor " << child_neighbor
-                              << " that is our child but does not exist in our node (invalid " << in_node.invalid()
-                              << ", all child leafs " << in_node.is_all_child_leaf() << ")" << std::endl;
-                  }
-                }
-              }
-
-              bool has_neighbors = std::any_of(child_has_neighbor.begin(), child_has_neighbor.end(), [](bool b){ return b; });
-              std::cout << "REBALANCE " << key << " child " << child << " has neighbors: " << child_has_neighbor << std::endl;
-              if (child_exists || has_neighbors) {
-                /**
-                 * This child has at least one neighbor that sent something. Now go over all neighbors that don't exist and send an empty node
-                 * to fill their inputs.
-                 */
-                auto send_empty_if_no_neighbor = [&](auto dir, auto d, const std::string& dir_name) {
-                  constexpr auto terminal_id = 2*d() + (dir == Left ? 0 : 1);
-                  if (!child_has_neighbor[terminal_id]) {
-                    std::cout << "REBALANCE " << key << " child " << child << " has no " << dir_name << " neighbor, sending empty node on terminal "
-                              << terminal_id << std::endl;
-                    send_out(child, mra::FunctionsCompressedNode<T, NDIM>(), std::integral_constant<std::size_t, terminal_id>{});
-                    return 1;
-                  }
-                  return 0;
-                };
-
-                num_empty += send_empty_if_no_neighbor( Left, std::integral_constant<std::size_t, 0>{}, "left x");
-                num_empty += send_empty_if_no_neighbor(Right, std::integral_constant<std::size_t, 0>{}, "right x");
-                num_empty += send_empty_if_no_neighbor( Left, std::integral_constant<std::size_t, 1>{}, "left y");
-                num_empty += send_empty_if_no_neighbor(Right, std::integral_constant<std::size_t, 1>{}, "right y");
-                num_empty += send_empty_if_no_neighbor( Left, std::integral_constant<std::size_t, 2>{}, "left z");
-                num_empty += send_empty_if_no_neighbor(Right, std::integral_constant<std::size_t, 2>{}, "right z");
-
-                if (has_neighbors && !child_exists) {
-                  std::cout << "REBALANCE " << key << " child " << child << " is a leaf but has neighbors, sending down empty node" << std::endl;
-                  send_out(child, mra::FunctionsCompressedNode<T, NDIM>(), std::integral_constant<std::size_t, 6>{});
-                  ++num_empty;
-                }
-
-                if (num_empty > 0) {
-                  // set the input stream size for the child in the down task to expect the correct number of contributions
-                  std::cout << "REBALANCE " << key << " child " << child << " has " << num_empty
-                            << " empty neighbors, adjusting down contributions to " << num_down_contributions - num_empty << std::endl;
-                  down_tt_ptr->template set_argstream_size<0>(child, num_down_contributions - num_empty);
-                }
-
-              }
-
-#if 0
-              if (has_neighbors) {
-
-                num_empty += rebalance_dir(child, neighbor_l0,  Left, std::integral_constant<std::size_t, 0>{}, "left");
-                num_empty += rebalance_dir(child, neighbor_r0, Right, std::integral_constant<std::size_t, 0>{}, "right");
-                num_empty += rebalance_dir(child, neighbor_l1,  Left, std::integral_constant<std::size_t, 1>{}, "left");
-                num_empty += rebalance_dir(child, neighbor_r1, Right, std::integral_constant<std::size_t, 1>{}, "right");
-                num_empty += rebalance_dir(child, neighbor_l2,  Left, std::integral_constant<std::size_t, 2>{}, "left");
-                num_empty += rebalance_dir(child, neighbor_r2, Right, std::integral_constant<std::size_t, 2>{}, "right");
-
-              }
-#endif // 0
-            }
-          }
-
-#ifndef MRA_ENABLE_HOST
-          co_await std::move(sends);
-#endif // MRA_ENABLE_HOST
-//        }
-      }, ttg::edges(ttg::fuse(input, rebalance_recurse_edge), neighbor_edges[0], neighbor_edges[1], neighbor_edges[2], neighbor_edges[3], neighbor_edges[4], neighbor_edges[5]),
-         ttg::edges(neighbor_edges[0], neighbor_edges[1], neighbor_edges[2], neighbor_edges[3], neighbor_edges[4], neighbor_edges[5], rebalance_recurse_edge),
-         name + "-rebalance");
-
-#endif // 0
-
-
 
 } // namespace mra
 

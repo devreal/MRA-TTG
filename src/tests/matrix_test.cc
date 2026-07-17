@@ -20,11 +20,11 @@ static void test_mxm() {
    */
 
   constexpr const mra::size_type K = 3;
-  mra::Tensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
-  mra::TensorView<double, 2> nodeAv = nodeA.current_view();
-  mra::TensorView<double, 2> nodeBv = nodeB.current_view();
-  mra::TensorView<double, 2> nodeCv = nodeC.current_view();
-  mra::TensorView<double, 2> expectedv = expected.current_view();
+  mra::DenseTensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
+  mra::DenseTensorView<double, 2> nodeAv = nodeA.current_view();
+  mra::DenseTensorView<double, 2> nodeBv = nodeB.current_view();
+  mra::DenseTensorView<double, 2> nodeCv = nodeC.current_view();
+  mra::DenseTensorView<double, 2> expectedv = expected.current_view();
   for (int i=0; i<nodeA.size(); ++i){
     nodeAv[i] = 1;
     nodeBv[i] = 1;
@@ -88,11 +88,11 @@ static void test_mTxm() {
    */
 
   constexpr const mra::size_type K = 3;
-  mra::Tensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
-  mra::TensorView<double, 2> nodeAv = nodeA.current_view();
-  mra::TensorView<double, 2> nodeBv = nodeB.current_view();
-  mra::TensorView<double, 2> nodeCv = nodeC.current_view();
-  mra::TensorView<double, 2> expectedv = expected.current_view();
+  mra::DenseTensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
+  mra::DenseTensorView<double, 2> nodeAv = nodeA.current_view();
+  mra::DenseTensorView<double, 2> nodeBv = nodeB.current_view();
+  mra::DenseTensorView<double, 2> nodeCv = nodeC.current_view();
+  mra::DenseTensorView<double, 2> expectedv = expected.current_view();
   for (int i=0; i<nodeA.size(); ++i){
     nodeAv[i] = 1;
     nodeBv[i] = 1;
@@ -156,11 +156,11 @@ static void test_mxmT() {
    */
 
   constexpr const mra::size_type K = 3;
-  mra::Tensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
-  mra::TensorView<double, 2> nodeAv = nodeA.current_view();
-  mra::TensorView<double, 2> nodeBv = nodeB.current_view();
-  mra::TensorView<double, 2> nodeCv = nodeC.current_view();
-  mra::TensorView<double, 2> expectedv = expected.current_view();
+  mra::DenseTensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
+  mra::DenseTensorView<double, 2> nodeAv = nodeA.current_view();
+  mra::DenseTensorView<double, 2> nodeBv = nodeB.current_view();
+  mra::DenseTensorView<double, 2> nodeCv = nodeC.current_view();
+  mra::DenseTensorView<double, 2> expectedv = expected.current_view();
   for (int i=0; i<nodeA.size(); ++i){
     nodeAv[i] = 1;
     nodeBv[i] = 1;
@@ -223,11 +223,11 @@ static void test_mTxmT() {
    */
 
   constexpr const mra::size_type K = 3;
-  mra::Tensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
-  mra::TensorView<double, 2> nodeAv = nodeA.current_view();
-  mra::TensorView<double, 2> nodeBv = nodeB.current_view();
-  mra::TensorView<double, 2> nodeCv = nodeC.current_view();
-  mra::TensorView<double, 2> expectedv = expected.current_view();
+  mra::DenseTensor<double, 2> nodeA(K), nodeB(K), nodeC(K), expected(K);
+  mra::DenseTensorView<double, 2> nodeAv = nodeA.current_view();
+  mra::DenseTensorView<double, 2> nodeBv = nodeB.current_view();
+  mra::DenseTensorView<double, 2> nodeCv = nodeC.current_view();
+  mra::DenseTensorView<double, 2> expectedv = expected.current_view();
   for (int i=0; i<nodeA.size(); ++i){
     nodeAv[i] = 1;
     nodeBv[i] = 1;

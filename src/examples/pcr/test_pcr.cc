@@ -7,6 +7,14 @@
 
 using namespace mra;
 
+std::vector<ttg::TTBase*> all_tts;
+
+void print_incomplete_tasks() {
+  std::cout << "Incomplete tasks:" << std::endl;
+  for (auto tt : all_tts) {
+    tt->print_incomplete_tasks();
+  }
+}
 
 template<typename T, mra::Dimension NDIM>
 void test_pcr(std::size_t N, std::size_t K,
@@ -30,7 +38,7 @@ void test_pcr(std::size_t N, std::size_t K,
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, compress_reconstruct_result, gaxpy_result;
-  ttg::Edge<mra::Key<NDIM>, mra::Tensor<T, 1>> norm_result;
+  ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_result;
 
   // define N Gaussians
   //std::cout << "Defining " << N << " Gaussians with initial level "
@@ -61,25 +69,40 @@ void test_pcr(std::size_t N, std::size_t K,
   // put it into a buffer
   auto db = ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
   auto start = make_start(gaussians, project_control);
-  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), project_control, project_result, "project", pmap, dmap);
+  all_tts.push_back(start.get());
+  auto project = make_project(db, gaussians, K, max_level, functiondata, T(1e-6), 0, 1.0, project_control, project_result, "project", pmap, dmap);
+
+  all_tts.push_back(project.get());
   // C(P)
   auto compress = make_compress(gaussians, K, is_ns, functiondata, project_result, compress_result, "compress-cp", pmap, dmap);
-  // // R(C(P))
+  all_tts.push_back(compress.get());
+
+  auto print_sparsity_tt = ttg::make_tt([&](const mra::Key<NDIM>& key, const auto& node){
+    auto& sparsity = node.sparsity();
+    std::cout << "Sparsity for "  << key << " : " << sparsity << std::endl;
+  }, ttg::edges(compress_result), ttg::edges(), "print_sparsity");
+  all_tts.push_back(print_sparsity_tt.get());
+
+
+  // R(C(P))
   auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct-rcp", pmap, dmap);
+  all_tts.push_back(reconstruct.get());
   // C(R(C(P)))
   auto compress_r = make_compress(gaussians, K, is_ns, functiondata, reconstruct_result, compress_reconstruct_result, "compress-crcp", pmap, dmap);
+  all_tts.push_back(compress_r.get());
 
   // C(R(C(P))) - C(P)
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_reconstruct_result, compress_result, gaxpy_result, "gaxpy", pmap, dmap);
+  all_tts.push_back(gaxpy.get());
   // | C(R(C(P))) - C(P) |
   auto norm  = make_norm(gaussians, K, gaxpy_result, norm_result, "norm", pmap, dmap);
+  all_tts.push_back(norm.get());
   // final check
-  auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::Tensor<T, 1>& norms){
-    // TODO: check for the norm within machine precision
+  auto norm_check = ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& norms){
     auto norms_view = norms.current_view();
     for (size_type i = 0; i < norms_view.size(); ++i) {
       if (std::abs(norms_view[i]) > 1e-12) {
-        std::cout << "Final norm " << i << " in batch " << key.batch() << " : " << norms_view[i] << std::endl;
+        std::cout << "Final norm " << i << " in batch " << key.batch() << " : " << norms_view[i] << " (expected < 1e-12)" << std::endl;
       }
     }
   }, ttg::edges(norm_result), ttg::edges(), "norm-check");
@@ -134,8 +157,13 @@ int main(int argc, char **argv) {
   double expnt = opt.parse("-e", 1500.0); // default: 1000.0
   double domain_size = opt.parse("-d", 6.0); // size of the domain cube [-d,d]
   bool print_dot = opt.exists("-dot");
+  bool trace = opt.exists("-trace");
 
   mra::initialize(argc, argv, cores);
+
+  if (trace) {
+    ttg::trace_on();
+  }
 
   /**
    * TODO: we currently cannot precreate a TTG and run it because make_reconstruct primes the

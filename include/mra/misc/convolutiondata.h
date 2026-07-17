@@ -18,7 +18,7 @@ namespace mra {
 
   template <typename T>
   struct ConvolutionData {
-    Tensor<T, 2> R, S;
+    DenseTensor<T, 2> R, S;
     T normR, normS;
 
     ConvolutionData() : R(), S(), normR(0.0), normS(0.0) {}
@@ -47,16 +47,16 @@ namespace mra {
       T coeff;                                         // coefficient for the Gaussian
       const T* quad_x;                                 // quadrature points
       const T* quad_w;                                 // quadrature weights
-      Tensor<T, 3> c;                                  // autocorrelation coefficients
+      DenseTensor<T, 3> c;                                  // autocorrelation coefficients
       FunctionData<T, NDIM>& functiondata;             // function data
       FunctionData<T, NDIM>& functiondata2;            // second function data for rnlp at finer level
-      mutable std::map<Key<NDIM>, Tensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
-      mutable std::map<Key<NDIM>, Tensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
+      mutable std::map<Key<NDIM>, DenseTensor<T, 2>> rnlijcache;    // map for storing rnlij matrices
+      mutable std::map<Key<NDIM>, DenseTensor<T, 1>> rnlpcache;     // map for storing rnlp matrices
       mutable std::map<Key<NDIM>, std::shared_ptr<ns_type>> nscache; // map for storing ns matrices
       mutable std::mutex cachemutex;                   // mutex for thread safety
 
       void autoc(){
-        Tensor<T, 3> autocorrcoef(K, K, 4*K);
+        DenseTensor<T, 3> autocorrcoef(K, K, 4*K);
         auto autocorr_view = autocorrcoef.current_view();
         detail::autocorr_get<T>(K, autocorr_view);
         auto c_view = c.current_view();
@@ -75,7 +75,7 @@ namespace mra {
         autoc();
 
         // initialize rnlpcache with an empty tensor for issmall cases
-        Tensor<T, 1> rnlp; // initialize it to zero
+        DenseTensor<T, 1> rnlp; // initialize it to zero
         Key<NDIM> key(-SHRT_MAX, std::array<Translation, NDIM>({0}));
         cachemutex.lock();
         if (rnlpcache.find(key) == rnlpcache.end()) {
@@ -100,7 +100,7 @@ namespace mra {
       }
 
       // projection of a Gaussian onto double order polynomials
-      const Tensor<T, 1>& make_rnlp(Level n, Translation lx) const {
+      const DenseTensor<T, 1>& make_rnlp(Level n, Translation lx) const {
         mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = rnlpcache.find(key);
@@ -110,7 +110,7 @@ namespace mra {
           return r;
         }
 
-        Tensor<T, 1> rnlp(2*K);
+        DenseTensor<T, 1> rnlp(2*K);
         auto rnlp_view = rnlp.current_view();
         rnlp_view = 0.0;
 
@@ -155,7 +155,7 @@ namespace mra {
         return r;
       }
 
-      const Tensor<T, 1>& get_rnlp (Level n, Translation lx) const {
+      const DenseTensor<T, 1>& get_rnlp (Level n, Translation lx) const {
         mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = rnlpcache.find(key);
@@ -165,7 +165,7 @@ namespace mra {
           return r;
         }
 
-        Tensor<T, 1> rnlp;
+        DenseTensor<T, 1> rnlp;
         Level natlev = 0.5*std::log2(expnt) + 1; // natural level for Gaussian
 
         if (issmall(n, lx)) {
@@ -183,7 +183,7 @@ namespace mra {
         }
         else if (n < natlev) {
           // compute at a finer level
-          Tensor<T, 1> tmp(4*K), R(4*K), work(2*K);
+          DenseTensor<T, 1> tmp(4*K), R(4*K), work(2*K);
           const auto& r1 = get_rnlp(n+1, 2*lx);
           const auto& r2 = get_rnlp(n+1, 2*lx+1);
 
@@ -201,7 +201,7 @@ namespace mra {
           auto R_view = R.current_view();
           transform(tmp_view, hgTtwo_view, R_view, work.data());
 
-          rnlp = Tensor<T, 1>(2*K);
+          rnlp = DenseTensor<T, 1>(2*K);
           auto rnlp_view = rnlp.current_view();
           rnlp_view(slice1) = R_view(slice1);
 
@@ -220,7 +220,12 @@ namespace mra {
         }
       }
 
-      const Tensor<T, 2>& make_rnlij (Level n, Translation lx) const {
+      Convolution(Convolution&&) = default;
+      Convolution(const Convolution&) = delete;
+      Convolution& operator=(Convolution&&) = default;
+      Convolution& operator=(const Convolution&) = delete;
+
+      const DenseTensor<T, 2>& make_rnlij (const Level n, const Translation lx) {
         mra::Key<NDIM> key(0, n, std::array<Translation, NDIM>({lx}));
         cachemutex.lock();
         auto it = rnlijcache.find(key);
@@ -229,8 +234,8 @@ namespace mra {
           const auto& r = it->second;
           return r;
         }
-        Tensor<T, 1> R(4*K);
-        Tensor<T, 2> rnlij(K, K);
+        DenseTensor<T, 1> R(4*K);
+        DenseTensor<T, 2> rnlij(K, K);
         auto R_view = R.current_view();
 
         const auto& rnlp1 = get_rnlp(n, lx-1);
@@ -273,11 +278,11 @@ namespace mra {
         }
 
         if (!issmall(n, lx)) {
-          Tensor<T, 2> R, S, work;
-          Tensor<T, 2> tmp(2*K, 2*K);
-          const Tensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
-          const Tensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
-          const Tensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
+          DenseTensor<T, 2> R, S, work;
+          DenseTensor<T, 2> tmp(2*K, 2*K);
+          const DenseTensor<T, 2>& rm = make_rnlij(n+1, 2*lx-1);
+          const DenseTensor<T, 2>& r0 = make_rnlij(n+1, 2*lx);
+          const DenseTensor<T, 2>& rp = make_rnlij(n+1, 2*lx+1);
 
           auto tmp_view = tmp.current_view();
           auto rm_view = rm.current_view();
@@ -295,9 +300,9 @@ namespace mra {
 
           const auto& hgT = functiondata.get_hgT();
           auto hgT_view = hgT.current_view();
-          R = Tensor<T, 2>(2*K, 2*K);
-          S = Tensor<T, 2>(K, K);
-          work = Tensor<T, 2>(2*K, 2*K);
+          R = DenseTensor<T, 2>(2*K, 2*K);
+          S = DenseTensor<T, 2>(K, K);
+          work = DenseTensor<T, 2>(2*K, 2*K);
           auto R_view = R.current_view();
           auto S_view = S.current_view();
 
@@ -355,7 +360,7 @@ namespace mra {
       T norm = 1.0, sum = 0.0;
 
       for (size_type d = 0; d < NDIM; ++d) {
-        Tensor<T, 2> ns_r(2*K, 2*K);
+        DenseTensor<T, 2> ns_r(2*K, 2*K);
         const auto& ref_view = ns[d]->R.current_view();
         const auto& ns_sview = ns[d]->S.current_view();
         auto ns_rview = ns_r.current_view();
