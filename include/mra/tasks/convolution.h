@@ -104,18 +104,20 @@ namespace mra {
     // Shared by shell0_tt and accumulate_tt: they never contend for the same
     // batch group (TTG only ever batches tasks of the same TT together), but
     // the registry itself is one-per-device, lazily constructing a
-    // ConvolutionBatchPool for a given device the first time either task type
-    // actually runs there -- see ConvolutionBatchPoolRegistry in
-    // kernels/convolution.h. max_batch_size no longer sizes the pool (it now
-    // grows on demand); it only bounds how many tasks set_batch_matcher below
-    // will ever group into one launch.
-    std::shared_ptr<detail::ConvolutionBatchPoolRegistry<T, NDIM>> conv_pool;
+    // BatchPool<ConvolutionBatchArg<T,NDIM>> for a given device the first time
+    // either task type actually runs there -- BatchPool/BatchPoolRegistry
+    // (mra/misc/device_batch_pool.h) are generic over the tuple type, so any
+    // future batched kernel can reuse them with its own tuple instead of a
+    // bespoke pool. max_batch_size no longer sizes the pool (it now grows on
+    // demand); it only bounds how many tasks set_batch_matcher below will
+    // ever group into one launch.
+    std::shared_ptr<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>> conv_pool;
     if (enable_conv_batching) {
-      conv_pool = std::make_shared<detail::ConvolutionBatchPoolRegistry<T, NDIM>>(ttg::device::num_devices());
+      conv_pool = std::make_shared<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices());
     }
 #else
-    // ConvolutionBatchPoolRegistry only exists on device builds; this placeholder
-    // only exists so the (shared host/device) task lambdas below can
+    // BatchPoolRegistry only exists on device builds; this placeholder only
+    // exists so the (shared host/device) task lambdas below can
     // unconditionally list conv_pool in their capture list -- it is never
     // accessed on host builds.
     std::nullptr_t conv_pool = nullptr;
@@ -629,10 +631,14 @@ namespace mra {
         if (enable_conv_batching) {
           // shell0's kernel roles: "in" is always the empty accumulator, "f" is the
           // node's own coefficients -- coop() must expose both in that order.
-          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp);
+          // transr/transs/opnorms_view also travel through coop() since batching
+          // is level-only now (not same-displacement too), so a batch mate may
+          // have different operator data -- see the batching-support comment on
+          // ConvolutionBatchArg in kernels/convolution.h.
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
+                                                                  transr, transs, opnorms_view);
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
-          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol,
-                                                            transr, transs, opnorms_view, at);
+          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol, at);
         } else
 #endif // MRA_ENABLE_HOST
         {
@@ -825,10 +831,14 @@ namespace mra {
       sparseman.populate_device_sparsity();
 #ifndef MRA_ENABLE_HOST
       if (enable_conv_batching) {
-        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp);
+        // transr/transs/opnorms_view also travel through coop() since batching
+        // is level-only now (not same-displacement too), so a batch mate may
+        // have different operator data -- see the batching-support comment on
+        // ConvolutionBatchArg in kernels/convolution.h.
+        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
+                                                                       transr, transs, opnorms_view);
         // followers: the leader's batched launch already wrote our slice of out/resnorms.
-        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol,
-                                                          transr, transs, opnorms_view, at);
+        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol, at);
       } else
 #endif // MRA_ENABLE_HOST
       {
@@ -1197,22 +1207,17 @@ namespace mra {
           },
           max_batch_size);
 
-      // accumulate_tt: same op-data-cache reasoning, but keyed on (level, displacement).
-      // Compare displacement translations component-wise rather than via Key::operator-/==,
-      // since those also compare/propagate the Batch field that get_op() ignores -- using
-      // them directly would just miss legitimate batching opportunities whenever
-      // Key.batch() != 0, not a correctness bug, but worth avoiding.
+      // accumulate_tt: level-only, same as shell0_tt -- deliberately NOT also
+      // requiring the same displacement. Requiring same (level, displacement)
+      // made batches mostly size 1 in practice (two accumulate_tt tasks rarely
+      // apply the same neighbor offset at the same moment); transr/transs/opnorms
+      // now travel per-member (see ConvolutionBatchArg) precisely so this can be
+      // relaxed to level-only, at the cost of a few hundred extra bytes of view
+      // descriptors per member -- not the underlying filter-matrix data, which
+      // TensorView only points to.
       accumulate_tt->set_batch_matcher(
           [](const detail::KeyPair<NDIM>& head, const detail::KeyPair<NDIM>& cand) {
-            if (head.dest.level() != cand.dest.level()) return false;
-            const auto& dh = head.dest.translation();
-            const auto& sh = head.source.translation();
-            const auto& dc = cand.dest.translation();
-            const auto& sc = cand.source.translation();
-            for (Dimension d = 0; d < NDIM; ++d) {
-              if ((dh[d] - sh[d]) != (dc[d] - sc[d])) return false;
-            }
-            return true;
+            return head.dest.level() == cand.dest.level();
           },
           max_batch_size);
     }
