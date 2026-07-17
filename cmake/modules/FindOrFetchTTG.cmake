@@ -10,7 +10,7 @@ include(FetchContent)
 FetchContent_Declare(
       ttg
       GIT_REPOSITORY      https://github.com/devreal/ttg.git
-	  GIT_TAG             bump-madness
+	  GIT_TAG             ttg-kernel-batching
 	  #GIT_TAG             924a8bacacabaa0be5279c19616a01e8c211197c
   )
 

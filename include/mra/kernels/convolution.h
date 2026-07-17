@@ -3,8 +3,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <mutex>
 #include <numbers>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include "mra/misc/allocator.h"
 #include "mra/ops/mxm.h"
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
@@ -394,6 +400,391 @@ namespace mra{
                  resnorms, transr, transs, opnorms, at, tmp));
     checkSubmit();
   }
+
+#ifndef MRA_ENABLE_HOST
+  /**
+   * Batching support for the convolution kernel, used by ttg::device::coop()/
+   * TT::set_batch_matcher() in mra/tasks/convolution.h. Batching is only ever
+   * done across tasks at the same (level, displacement), which guarantees
+   * K/fac/tol/transr/transs/opnorms/at are bitwise identical for every member
+   * (see mra/misc/conv_mad.h::GaussianConvolutionOperator::get_op and
+   * mra/ops/functions.h::truncate_tol) -- only in/f/result/resnorms/tmp and
+   * the per-member function count N_m differ.
+   */
+  namespace detail {
+
+#if defined(MRA_ENABLE_CUDA)
+    inline void check_cuda_rt(cudaError_t err, const char* what) {
+      if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("ConvolutionBatchPool: ") + what + " failed: " + cudaGetErrorString(err));
+      }
+    }
+#elif defined(MRA_ENABLE_HIP)
+    inline void check_hip_rt(hipError_t err, const char* what) {
+      if (err != hipSuccess) {
+        throw std::runtime_error(std::string("ConvolutionBatchPool: ") + what + " failed: " + hipGetErrorString(err));
+      }
+    }
+#endif
+
+    /**
+     * Bundles everything convolution_kernel_batched needs for one batch member.
+     * in_view/f_view are only ever read inside the kernel; result_view/resnorms_view
+     * are written. Constness is enforced at the point of use (via a `const auto&`
+     * local binding before calling operator()) rather than in this struct's field
+     * types, since there is no converting constructor from SparseTensorView<T,...>
+     * to SparseTensorView<const T,...> to build the latter from the views the
+     * surrounding task already holds.
+     */
+    template <typename T, Dimension NDIM>
+    struct ConvolutionBatchArg {
+      SparseTensorView<T, NDIM+1> in_view;
+      SparseTensorView<T, NDIM+1> f_view;
+      SparseTensorView<T, NDIM+1> result_view;
+      DenseTensorView<T, 1> resnorms_view;
+      T* tmp = nullptr;
+      size_type block_offset = 0; // exclusive prefix-sum start for this member within the launch
+      size_type n = 0;            // number of blocks (functions) this member contributes
+
+      ConvolutionBatchArg() = default;
+      ConvolutionBatchArg(SparseTensorView<T, NDIM+1> in_view,
+                          SparseTensorView<T, NDIM+1> f_view,
+                          SparseTensorView<T, NDIM+1> result_view,
+                          DenseTensorView<T, 1> resnorms_view,
+                          T* tmp, size_type block_offset, size_type n)
+      : in_view(in_view), f_view(f_view), result_view(result_view), resnorms_view(resnorms_view)
+      , tmp(tmp), block_offset(block_offset), n(n)
+      { }
+    };
+
+    /**
+     * One combined launch covering `num_members` independent nodes sharing one
+     * (K, fac, tol, transr, transs, opnorms, at). Grid size = total number of
+     * blocks across all members (sum of each member's N_m); each block looks
+     * up which member it belongs to via a prefix-sum `block_offset` field on
+     * each arg (linear scan -- num_members is bounded by set_batch_matcher's
+     * max_batch_size, so this is cheap compared to the mTxmq calls that follow).
+     */
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void convolution_kernel_batched(
+      size_type num_members,
+      ConvolutionBatchArg<T, NDIM>* args,   // device ptr, size num_members
+      size_type total_blocks,
+      size_type K,
+      const T fac,
+      const T tol,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto transs,
+      const concepts::TensorView<4> auto opnorms_view,
+      const std::array<bool, 2> at)
+    {
+      SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, result;
+      SHARED DenseTensorView<const T, NDIM> f, in;
+      SHARED size_type s_member, s_local;
+
+      const size_type K2NDIM = std::pow(K, NDIM);
+      const size_type TWOK2NDIM = std::pow(2*K, NDIM);
+
+      for (size_type blockId = blockIdx.x; blockId < total_blocks; blockId += gridDim.x) {
+        if (is_team_lead()) {
+          size_type m = 0;
+          while ((m + 1) < num_members && args[m+1].block_offset <= blockId) ++m;
+          s_member = m;
+          s_local  = blockId - args[m].block_offset;
+        }
+        SYNCTHREADS();
+        const size_type member = s_member;
+        const size_type i      = s_local;
+        auto& arg = args[member];
+
+        if (arg.result_view.is_zero(i)) {
+          // nothing to do
+          if (is_team_lead() && !arg.resnorms_view.empty()) {
+            arg.resnorms_view[i] = 0.0;
+          }
+          continue;
+        }
+        if (is_team_lead()) {
+          // const& forces operator()'s read-only overload; result_view stays
+          // mutable since the kernel writes through it.
+          const auto& in_view = arg.in_view;
+          const auto& f_view  = arg.f_view;
+          auto& result_view   = arg.result_view;
+
+          T* block_tmp_ptr = &arg.tmp[i*convolution_tmp_size<NDIM>(K)];
+          f0        = DenseTensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
+          resultc   = DenseTensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
+          work1     = DenseTensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
+          work2     = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
+          in     = in_view(i);
+          f      = f_view(i);
+          result = result_view(i);
+        }
+        SYNCTHREADS();
+        if (arg.f_view.is_zero(i)) {
+          /* copy input to output */
+          result = in;
+          if (!arg.resnorms_view.empty()) {
+            auto resnorm = normf(result);
+            if (is_team_lead()) {
+              arg.resnorms_view[i] = resnorm;
+            }
+          }
+          continue;
+        }
+
+        // opid indexes opnorms_view by *local* function index within the member's
+        // own node, not the flattened blockId -- do not conflate the two.
+        int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0;
+
+        convolution_kernel_impl<T, NDIM>(Key<NDIM>{}, opid, Key<NDIM>{}, K, fac, tol,
+                                         transr, transs, opnorms_view, at, in, f, f0,
+                                         resultc, result, work1, work2,
+                                         arg.resnorms_view.empty() ? nullptr : &arg.resnorms_view[i]);
+      }
+    }
+
+    /**
+     * Per-device pool of pinned host / device arrays used to build ONE
+     * convolution_kernel_batched launch from the ttg::device::coop-collected
+     * batch. Memory is per-device, not per-stream: any slot may be reused for
+     * any stream submitted on this pool's device. There is no fixed slot
+     * count and no blocking wait -- acquire() scans for a slot whose previous
+     * submission has completed (a non-blocking event query) and, if none is
+     * free, grows the pool by one more slot rather than stalling the caller.
+     * Host storage uses DeviceAllocator<T> (the same pinned-memory allocator
+     * used for ttg::Buffer elsewhere in this codebase) instead of hand-rolled
+     * cudaHostRegister calls.
+     */
+    template <typename T, Dimension NDIM>
+    struct ConvolutionBatchPool {
+      using arg_t = ConvolutionBatchArg<T, NDIM>;
+
+      struct slot_t {
+        std::vector<arg_t, DeviceAllocator<arg_t>> host_args; // pinned host storage
+        arg_t* dev_args = nullptr;
+        std::size_t dev_capacity = 0;
+#if defined(MRA_ENABLE_CUDA)
+        cudaEvent_t event;
+#elif defined(MRA_ENABLE_HIP)
+        hipEvent_t event;
+#endif
+        bool event_recorded = false; // false until this slot has been submitted at least once
+
+        slot_t() {
+#if defined(MRA_ENABLE_CUDA)
+          check_cuda_rt(cudaEventCreate(&event), "cudaEventCreate");
+#elif defined(MRA_ENABLE_HIP)
+          check_hip_rt(hipEventCreate(&event), "hipEventCreate");
+#endif
+        }
+
+        slot_t(const slot_t&) = delete;
+        slot_t& operator=(const slot_t&) = delete;
+
+        ~slot_t() {
+#if defined(MRA_ENABLE_CUDA)
+          if (dev_args) cudaFree(dev_args);
+          cudaEventDestroy(event);
+#elif defined(MRA_ENABLE_HIP)
+          if (dev_args) hipFree(dev_args);
+          hipEventDestroy(event);
+#endif
+        }
+      };
+
+      explicit ConvolutionBatchPool(int device) : device(device) { }
+
+      ConvolutionBatchPool(const ConvolutionBatchPool&) = delete;
+      ConvolutionBatchPool& operator=(const ConvolutionBatchPool&) = delete;
+
+      /* Never blocks: returns a slot with device-side capacity for at least
+       * num_members entries, ready to be filled via slot_t::host_args. */
+      slot_t& acquire(std::size_t num_members) {
+        std::lock_guard<std::mutex> lock(mtx);
+        for (auto& sp : slots) {
+          if (!sp->event_recorded || event_ready(sp->event)) {
+            ensure_capacity(*sp, num_members);
+            return *sp;
+          }
+        }
+        slots.push_back(std::make_unique<slot_t>());
+        auto& s = *slots.back();
+        ensure_capacity(s, num_members);
+        return s;
+      }
+
+      /* Call right after the H2D copy + kernel launch have been issued on `stream`. */
+      void mark_submitted(slot_t& s, ttg::device::Stream stream) {
+#if defined(MRA_ENABLE_CUDA)
+        check_cuda_rt(cudaEventRecord(s.event, stream), "cudaEventRecord");
+#elif defined(MRA_ENABLE_HIP)
+        check_hip_rt(hipEventRecord(s.event, stream), "hipEventRecord");
+#endif
+        s.event_recorded = true;
+      }
+
+      int device;
+
+     private:
+#if defined(MRA_ENABLE_CUDA)
+      static bool event_ready(cudaEvent_t event) {
+        cudaError_t err = cudaEventQuery(event);
+        if (err == cudaSuccess) return true;
+        if (err == cudaErrorNotReady) return false;
+        check_cuda_rt(err, "cudaEventQuery");
+        return false; // unreachable
+      }
+#elif defined(MRA_ENABLE_HIP)
+      static bool event_ready(hipEvent_t event) {
+        hipError_t err = hipEventQuery(event);
+        if (err == hipSuccess) return true;
+        if (err == hipErrorNotReady) return false;
+        check_hip_rt(err, "hipEventQuery");
+        return false; // unreachable
+      }
+#endif
+
+      void ensure_capacity(slot_t& s, std::size_t num_members) {
+        if (num_members > s.dev_capacity) {
+          if (s.dev_args) {
+#if defined(MRA_ENABLE_CUDA)
+            check_cuda_rt(cudaFree(s.dev_args), "cudaFree");
+#elif defined(MRA_ENABLE_HIP)
+            check_hip_rt(hipFree(s.dev_args), "hipFree");
+#endif
+          }
+#if defined(MRA_ENABLE_CUDA)
+          check_cuda_rt(cudaMalloc(&s.dev_args, num_members*sizeof(arg_t)), "cudaMalloc");
+#elif defined(MRA_ENABLE_HIP)
+          check_hip_rt(hipMalloc(&s.dev_args, num_members*sizeof(arg_t)), "hipMalloc");
+#endif
+          s.dev_capacity = num_members;
+        }
+        s.host_args.reserve(num_members);
+      }
+
+      std::mutex mtx;
+      std::vector<std::unique_ptr<slot_t>> slots;
+    };
+
+    /**
+     * Lazily constructs one ConvolutionBatchPool per device, the first time
+     * that device is actually used (rather than eagerly allocating memory on
+     * every device up front). Construction happens from inside a device task,
+     * so ttg::device::current_device() -- used as the index -- already
+     * reflects the correct CUDA/HIP context; no explicit
+     * cudaSetDevice/hipSetDevice bookkeeping is needed here.
+     */
+    template <typename T, Dimension NDIM>
+    struct ConvolutionBatchPoolRegistry {
+      explicit ConvolutionBatchPoolRegistry(int num_devices) : entries(num_devices) { }
+
+      ConvolutionBatchPool<T, NDIM>& get(int device) {
+        auto& e = entries[device];
+        std::call_once(e.once, [&]{ e.pool = std::make_unique<ConvolutionBatchPool<T, NDIM>>(device); });
+        return *e.pool;
+      }
+
+     private:
+      struct entry_t {
+        std::once_flag once;
+        std::unique_ptr<ConvolutionBatchPool<T, NDIM>> pool;
+      };
+      std::vector<entry_t> entries;
+    };
+
+  } // namespace detail
+
+  /**
+   * Batched counterpart of submit_convolution_kernel: launches one kernel on
+   * behalf of every member already marshaled into slot.host_args (by the
+   * caller, via detail::submit_convolution_batch_leader below), sharing one
+   * (K, fac, tol, transr, transs, opnorms, at) across the whole batch.
+   */
+  template <typename T, Dimension NDIM>
+  void submit_convolution_kernel_batched(
+    detail::ConvolutionBatchPool<T, NDIM>& pool,
+    typename detail::ConvolutionBatchPool<T, NDIM>::slot_t& slot,
+    size_type K,
+    const T fac,
+    const T tol,
+    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+    const concepts::TensorView<4> auto& opnorms,
+    const std::array<bool, 2>& at,
+    ttg::device::Stream stream)
+  {
+    using arg_t = typename detail::ConvolutionBatchPool<T, NDIM>::arg_t;
+    const size_type num_members = static_cast<size_type>(slot.host_args.size());
+    const auto& last_arg = slot.host_args.back();
+    const size_type total_blocks = last_arg.block_offset + last_arg.n;
+
+#if defined(MRA_ENABLE_CUDA)
+    detail::check_cuda_rt(cudaMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
+                                          cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
+#elif defined(MRA_ENABLE_HIP)
+    detail::check_hip_rt(hipMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
+                                        hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
+#endif
+
+    Dim3 thread_dims = max_thread_dims(2*K);
+    auto smem_size = mTxmq_shmem_size<T>(2*K);
+
+    CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_blocks, thread_dims, smem_size, stream,
+                (num_members, slot.dev_args, total_blocks, K, fac, tol, transr, transs, opnorms, at));
+    checkSubmit();
+
+    pool.mark_submitted(slot, stream);
+  }
+
+  namespace detail {
+
+    /**
+     * Shared by shell0_tt and accumulate_tt in mra/tasks/convolution.h: given
+     * the batch_view returned by their own `co_await ttg::device::coop<KeyT>(...)`
+     * (which must stay inline in each coroutine -- only the ordinary,
+     * non-suspending code below is worth sharing), marshal every member into
+     * the current device's pool and submit one combined kernel launch if this
+     * task is the batch's leader.
+     */
+    template <typename T, Dimension NDIM, typename BatchView>
+    void submit_convolution_batch_leader(
+      BatchView& batch,
+      ConvolutionBatchPoolRegistry<T, NDIM>& registry,
+      size_type K,
+      const T fac,
+      const T tol,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
+      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
+      const concepts::TensorView<4> auto& opnorms_view,
+      const std::array<bool, 2>& at)
+    {
+      if (!batch.is_leader()) return;
+
+      const std::size_t nb = batch.size();
+      auto& pool = registry.get(ttg::device::current_device());
+      auto& slot = pool.acquire(nb);
+      slot.host_args.clear();
+      size_type running_offset = 0;
+      for (std::size_t m = 0; m < nb; ++m) {
+        auto& m_in       = batch[m].template get<0>();
+        auto& m_f        = batch[m].template get<1>();
+        auto& m_result   = batch[m].template get<2>();
+        auto& m_resnorms = batch[m].template get<3>();
+        auto& m_tmp      = batch[m].template get<4>();
+        size_type m_n = m_result.dim(0);
+        slot.host_args.emplace_back(m_in, m_f, m_result, m_resnorms,
+                                    m_tmp.current_device_ptr(), running_offset, m_n);
+        running_offset += m_n;
+      }
+      submit_convolution_kernel_batched<T, NDIM>(pool, slot, K, fac, tol, transr, transs,
+                                                  opnorms_view, at, ttg::device::current_stream());
+    }
+
+  } // namespace detail
+#endif // !MRA_ENABLE_HOST
 
 #if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instantiation */

@@ -94,9 +94,32 @@ namespace mra {
                         const T cell_min_width,
                         const std::string& name = "convolution",
                         ProcMap procmap = {},
-                        DeviceMap devicemap = {}) {
+                        DeviceMap devicemap = {},
+                        bool enable_conv_batching = false,
+                        std::size_t max_batch_size = 32) {
 
     static_assert(NDIM == 3); // TODO: worth fixing?
+
+#ifndef MRA_ENABLE_HOST
+    // Shared by shell0_tt and accumulate_tt: they never contend for the same
+    // batch group (TTG only ever batches tasks of the same TT together), but
+    // the registry itself is one-per-device, lazily constructing a
+    // ConvolutionBatchPool for a given device the first time either task type
+    // actually runs there -- see ConvolutionBatchPoolRegistry in
+    // kernels/convolution.h. max_batch_size no longer sizes the pool (it now
+    // grows on demand); it only bounds how many tasks set_batch_matcher below
+    // will ever group into one launch.
+    std::shared_ptr<detail::ConvolutionBatchPoolRegistry<T, NDIM>> conv_pool;
+    if (enable_conv_batching) {
+      conv_pool = std::make_shared<detail::ConvolutionBatchPoolRegistry<T, NDIM>>(ttg::device::num_devices());
+    }
+#else
+    // ConvolutionBatchPoolRegistry only exists on device builds; this placeholder
+    // only exists so the (shared host/device) task lambdas below can
+    // unconditionally list conv_pool in their capture list -- it is never
+    // accessed on host builds.
+    std::nullptr_t conv_pool = nullptr;
+#endif // MRA_ENABLE_HOST
 
     using ChildLeafInfo = typename mra::FunctionsCompressedNode<T, NDIM>::child_info_type;
 
@@ -530,7 +553,7 @@ namespace mra {
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
     auto shell0_tt = ttg::make_tt<Space>(
-      [&, K, fac, thresh, truncate_mode, cell_min_width, name](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
@@ -602,9 +625,21 @@ namespace mra {
 
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
-        submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
-                                            in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
-                                            at, tmp.current_device_ptr(), ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+        if (enable_conv_batching) {
+          // shell0's kernel roles: "in" is always the empty accumulator, "f" is the
+          // node's own coefficients -- coop() must expose both in that order.
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp);
+          // followers: the leader's batched launch already wrote our slice of out/resnorms.
+          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol,
+                                                            transr, transs, opnorms_view, at);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
+                                              in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
+                                              at, tmp.current_device_ptr(), ttg::device::current_stream());
+        }
 
 #ifndef MRA_ENABLE_HOST
         // wait for the norms to come back
@@ -704,7 +739,7 @@ namespace mra {
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
-      [&, K, fac, thresh, truncate_mode, cell_min_width, name](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
@@ -788,10 +823,20 @@ namespace mra {
 
       auto sparseman = make_sparsity_manager(out);
       sparseman.populate_device_sparsity();
-      submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
-                                          contribution_view, out_view, resnorms_view, transr, transs,
-                                          opnorms_view, at,
-                                          tmp.current_device_ptr(), ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+      if (enable_conv_batching) {
+        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp);
+        // followers: the leader's batched launch already wrote our slice of out/resnorms.
+        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol,
+                                                          transr, transs, opnorms_view, at);
+      } else
+#endif // MRA_ENABLE_HOST
+      {
+        submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
+                                            contribution_view, out_view, resnorms_view, transr, transs,
+                                            opnorms_view, at,
+                                            tmp.current_device_ptr(), ttg::device::current_stream());
+      }
 
 #ifndef MRA_ENABLE_HOST
       // wait for norms to come back
@@ -1141,6 +1186,38 @@ namespace mra {
       //dispatch_adjust_parent_tt->set_devicemap(devicemap);
       //adjust_parent_tt->set_devicemap(devicemap);
     }
+
+#ifndef MRA_ENABLE_HOST
+    if (enable_conv_batching) {
+      // shell0_tt: GaussianConvolutionOperator::get_op caches by (level, disp.translation())
+      // with disp always {0,0,0} here, so same level => bitwise-identical transr/transs/opnorms.
+      shell0_tt->set_batch_matcher(
+          [](const mra::Key<NDIM>& head, const mra::Key<NDIM>& cand) {
+            return head.level() == cand.level();
+          },
+          max_batch_size);
+
+      // accumulate_tt: same op-data-cache reasoning, but keyed on (level, displacement).
+      // Compare displacement translations component-wise rather than via Key::operator-/==,
+      // since those also compare/propagate the Batch field that get_op() ignores -- using
+      // them directly would just miss legitimate batching opportunities whenever
+      // Key.batch() != 0, not a correctness bug, but worth avoiding.
+      accumulate_tt->set_batch_matcher(
+          [](const detail::KeyPair<NDIM>& head, const detail::KeyPair<NDIM>& cand) {
+            if (head.dest.level() != cand.dest.level()) return false;
+            const auto& dh = head.dest.translation();
+            const auto& sh = head.source.translation();
+            const auto& dc = cand.dest.translation();
+            const auto& sc = cand.source.translation();
+            for (Dimension d = 0; d < NDIM; ++d) {
+              if ((dh[d] - sh[d]) != (dc[d] - sc[d])) return false;
+            }
+            return true;
+          },
+          max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
+
     // TODO: assemble TTG
 
     auto ins = std::make_tuple(screener_tt->template in<0>());
