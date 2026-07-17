@@ -92,9 +92,9 @@ jobs:
       if: ${{ matrix.device == 'host' }}
       working-directory: ${{github.workspace}}/build
       shell: bash
-      run: ./src/mra-mad-deriv-host-parsec
+      run: ./src/tests/mra-mad-deriv-host-parsec
     - name: Test PCR [host]
       if: ${{ matrix.device == 'host' }}
       working-directory: ${{github.workspace}}/build
       shell: bash
-      run: ./src/mra-pcr-host-parsec
+      run: ./src/examples/mra-pcr-host-parsec
