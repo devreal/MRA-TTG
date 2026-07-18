@@ -95,7 +95,7 @@ namespace mra {
                         const std::string& name = "convolution",
                         ProcMap procmap = {},
                         DeviceMap devicemap = {},
-                        bool enable_conv_batching = false,
+                        bool enable_conv_batching = true,
                         std::size_t max_batch_size = 32) {
 
     static_assert(NDIM == 3); // TODO: worth fixing?
