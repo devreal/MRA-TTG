@@ -460,8 +460,8 @@ namespace mra{
       DenseTensorView<T, 1>,                   // resnorms_view
       T*,                                      // tmp
       size_type,                               // n: number of blocks (functions) this member contributes
-      std::array<SparseTensorView<T, 4>, NDIM>, // transr (this member's own operator data)
-      std::array<SparseTensorView<T, 4>, NDIM>, // transs
+      std::array<DenseTensorView<T, 4>, NDIM>, // transr (this member's own operator data)
+      std::array<DenseTensorView<T, 4>, NDIM>, // transs
       DenseTensorView<T, 4>                    // opnorms
     >;
 
