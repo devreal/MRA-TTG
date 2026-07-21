@@ -3,6 +3,7 @@
 
 #include <ttg.h>
 #include "mra/kernels.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
@@ -32,6 +33,30 @@ namespace mra{
     ProcMap procmap = {},
     DeviceMap devicemap = {})
   {
+    // Batching is controlled process-wide via mra::set_batch_size(), not per
+    // call here -- see mra/misc/batch_size.h. Read once, at graph-construction
+    // time: this bakes the decision into do_reconstruct/its matcher below, so
+    // calling set_batch_size() again after this graph exists has no effect on it.
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_reconstruct_batching = mra::batching_enabled();
+
+#ifndef MRA_ENABLE_HOST
+    // reconstruct's only "operator data" is hg, a single two-scale filter
+    // matrix from FunctionData that never varies by level or position (see
+    // mra/kernels/reconstruct.h's batching-support comment) -- so, like
+    // compress, batching here is unrestricted from the start.
+    std::shared_ptr<detail::BatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>> reconstruct_pool;
+    if (enable_reconstruct_batching) {
+      reconstruct_pool = std::make_shared<detail::BatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>>(ttg::device::num_devices());
+    }
+#else
+    // BatchPoolRegistry only exists on device builds; this placeholder only
+    // exists so the (shared host/device) do_reconstruct lambda below can
+    // unconditionally list reconstruct_pool in its capture list -- it is
+    // never accessed on host builds.
+    std::nullptr_t reconstruct_pool = nullptr;
+#endif // MRA_ENABLE_HOST
+
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> S("S");  // passes scaling functions down
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T,NDIM>> P("Primer"); // primer for root
 
@@ -56,7 +81,7 @@ namespace mra{
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) p->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) p->set_devicemap(devicemap);
 
-    auto do_reconstruct = [&, fns, K, accumulate_NS, name](const mra::Key<NDIM>& key,
+    auto do_reconstruct = [&, fns, K, accumulate_NS, name, enable_reconstruct_batching, reconstruct_pool](const mra::Key<NDIM>& key,
                                             const mra::FunctionsCompressedNode<T, NDIM>& node,
                                             const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       size_type N = fns->num_functions(key);
@@ -212,9 +237,23 @@ namespace mra{
       auto hg_view = hg.current_view();
       auto from_parent_view = from_parent.coeffs().current_view();
       auto result_view = result.coeffs().current_view();
-      submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
-                                r_ptrs, result_view, tmp_scratch.current_device_ptr(),
-                                ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+      if (enable_reconstruct_batching) {
+        // key travels through coop() since reconstruct_kernel_impl reads
+        // key.level() -- see the batching-support comment in
+        // kernels/reconstruct.h. node_view/from_parent_view/r_ptrs/result_view
+        // keep the exact roles submit_reconstruct_kernel uses below.
+        auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view, tmp_scratch,
+                                                                from_parent_view, r_ptrs, result_view);
+        // followers: the leader's batched launch already wrote our slice of r_arr/result.
+        detail::submit_reconstruct_batch_leader<T, NDIM>(batch, *reconstruct_pool, K, accumulate_NS, hg_view);
+      } else
+#endif // MRA_ENABLE_HOST
+      {
+        submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
+                                  r_ptrs, result_view, tmp_scratch.current_device_ptr(),
+                                  ttg::device::current_stream());
+      }
 
 #ifdef MRA_CHECK_NORMS
       norms.compute();
@@ -259,6 +298,14 @@ namespace mra{
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) s->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) s->set_devicemap(devicemap);
+
+#ifndef MRA_ENABLE_HOST
+    if (enable_reconstruct_batching) {
+      s->set_batch_matcher(
+          [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+          max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     /* assemble the Reconstruct TTG */
     auto ins = std::make_tuple(s->template in<0>(), s->template in<0>());

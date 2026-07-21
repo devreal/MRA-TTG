@@ -3,6 +3,7 @@
 
 #include <ttg.h>
 #include "mra/kernels.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
@@ -39,6 +40,31 @@ namespace mra
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
 
+    // Batching is controlled process-wide via mra::set_batch_size(), not per
+    // call here -- see mra/misc/batch_size.h. Read once, at graph-construction
+    // time: this bakes the decision into do_compress/its matcher below, so
+    // calling set_batch_size() again after this graph exists has no effect on it.
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_compress_batching = mra::batching_enabled();
+
+#ifndef MRA_ENABLE_HOST
+    // compress's only "operator data" is hgT, a single two-scale filter matrix
+    // from FunctionData that never varies by level or position (see
+    // mra/kernels/compress.h's batching-support comment) -- so unlike
+    // convolution, batching here has no level/position restriction to begin
+    // with; it's unrestricted from the start.
+    std::shared_ptr<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>> compress_pool;
+    if (enable_compress_batching) {
+      compress_pool = std::make_shared<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>>(ttg::device::num_devices());
+    }
+#else
+    // BatchPoolRegistry only exists on device builds; this placeholder only
+    // exists so the (shared host/device) do_compress lambda below can
+    // unconditionally list compress_pool in its capture list -- it is never
+    // accessed on host builds.
+    std::nullptr_t compress_pool = nullptr;
+#endif // MRA_ENABLE_HOST
+
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> filter_in(name + "-filter_in");
 
     /**
@@ -69,7 +95,7 @@ namespace mra
     /* append out edge to set of edges */
     auto compress_out_edges = std::tuple_cat(send_leaves_up_edges, std::make_tuple(out));
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
-    auto do_compress = [&, fns, K, is_ns, name](const mra::Key<NDIM>& key,
+    auto do_compress = [&, fns, K, is_ns, name, enable_compress_batching, compress_pool](const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in1,
@@ -203,9 +229,23 @@ namespace mra
           auto rcoeffs_view = d.current_view();
           auto hgT_view = hgT.current_view();
 
-          submit_compress_kernel(key, N, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
-                                tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
-                                ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+          if (enable_compress_batching) {
+            // key travels through coop() since compress_kernel_impl reads
+            // key.level() -- see the batching-support comment in
+            // kernels/compress.h. in_view/coeffs_view/rcoeffs_view/input_views
+            // keep the exact roles submit_compress_kernel uses below.
+            auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
+                                                                    tmp_scratch, d_sumsq, input_views);
+            // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
+            detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view);
+          } else
+#endif // MRA_ENABLE_HOST
+          {
+            submit_compress_kernel(key, N, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
+                                  tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
+                                  ttg::device::current_stream());
+          }
           norms.compute();
           /* wait for kernel and transfer sums back */
 #ifndef MRA_ENABLE_HOST
@@ -276,6 +316,19 @@ namespace mra
       std::get<1>(ttt)->set_devicemap(devicemap);
       std::get<2>(ttt)->set_devicemap(devicemap);
     }
+
+#ifndef MRA_ENABLE_HOST
+    if (enable_compress_batching) {
+      // Unrestricted matcher: any two do_compress tasks may batch together,
+      // regardless of level or position, up to max_batch_size -- safe because
+      // compress's only shared operator data (hgT) never varies by level or
+      // position to begin with (see kernels/compress.h's batching-support
+      // comment), unlike convolution which needed a similar relaxation.
+      std::get<1>(ttt)->set_batch_matcher(
+          [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+          max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(std::get<2>(ttt)->template in<0>());
     auto outs = std::make_tuple(std::get<1>(ttt)->template out<8>());
