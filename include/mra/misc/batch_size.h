@@ -24,7 +24,7 @@ namespace mra {
 
   namespace detail {
     inline std::atomic<std::size_t>& batch_size_state() {
-      static std::atomic<std::size_t> value{1}; // default: batching disabled (<=1)
+      static std::atomic<std::size_t> value{128}; // default: batching disabled (<=1)
       return value;
     }
   } // namespace detail
