@@ -631,14 +631,14 @@ namespace mra {
         if (enable_conv_batching) {
           // shell0's kernel roles: "in" is always the empty accumulator, "f" is the
           // node's own coefficients -- coop() must expose both in that order.
-          // transr/transs/opnorms_view also travel through coop() since batching
-          // is level-only now (not same-displacement too), so a batch mate may
-          // have different operator data -- see the batching-support comment on
-          // ConvolutionBatchArg in kernels/convolution.h.
+          // transr/transs/opnorms_view/tol/at also travel through coop() since
+          // batching is unrestricted now (any level, any displacement), so a
+          // batch mate may have entirely different operator data -- see the
+          // batching-support comment on ConvolutionBatchArg in kernels/convolution.h.
           auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
-                                                                  transr, transs, opnorms_view);
+                                                                  transr, transs, opnorms_view, tol, at);
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
-          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol, at);
+          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac);
         } else
 #endif // MRA_ENABLE_HOST
         {
@@ -831,14 +831,14 @@ namespace mra {
       sparseman.populate_device_sparsity();
 #ifndef MRA_ENABLE_HOST
       if (enable_conv_batching) {
-        // transr/transs/opnorms_view also travel through coop() since batching
-        // is level-only now (not same-displacement too), so a batch mate may
-        // have different operator data -- see the batching-support comment on
-        // ConvolutionBatchArg in kernels/convolution.h.
+        // transr/transs/opnorms_view/tol/at also travel through coop() since
+        // batching is unrestricted now (any level, any displacement), so a
+        // batch mate may have entirely different operator data -- see the
+        // batching-support comment on ConvolutionBatchArg in kernels/convolution.h.
         auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
-                                                                       transr, transs, opnorms_view);
+                                                                       transr, transs, opnorms_view, tol, at);
         // followers: the leader's batched launch already wrote our slice of out/resnorms.
-        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, tol, at);
+        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac);
       } else
 #endif // MRA_ENABLE_HOST
       {
@@ -1199,26 +1199,23 @@ namespace mra {
 
 #ifndef MRA_ENABLE_HOST
     if (enable_conv_batching) {
-      // shell0_tt: GaussianConvolutionOperator::get_op caches by (level, disp.translation())
-      // with disp always {0,0,0} here, so same level => bitwise-identical transr/transs/opnorms.
+      // Unrestricted matchers: any two tasks of the same TT may batch
+      // together, regardless of level or displacement, up to max_batch_size.
+      // Level-only matching (an earlier, narrower version of this) still made
+      // accumulate_tt's batches mostly size 1 in practice (two tasks rarely
+      // reach even the same level at the same moment, let alone the same
+      // displacement). Everything that could differ across levels/displacements
+      // -- tol, at, transr, transs, opnorms -- now travels per-member (see
+      // ConvolutionBatchArg), so nothing here needs to be verified equal
+      // between head and cand; the cost is a few hundred extra bytes of view/
+      // scalar descriptors per member, not the underlying filter-matrix data,
+      // which TensorView only points to.
       shell0_tt->set_batch_matcher(
-          [](const mra::Key<NDIM>& head, const mra::Key<NDIM>& cand) {
-            return head.level() == cand.level();
-          },
+          [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
           max_batch_size);
 
-      // accumulate_tt: level-only, same as shell0_tt -- deliberately NOT also
-      // requiring the same displacement. Requiring same (level, displacement)
-      // made batches mostly size 1 in practice (two accumulate_tt tasks rarely
-      // apply the same neighbor offset at the same moment); transr/transs/opnorms
-      // now travel per-member (see ConvolutionBatchArg) precisely so this can be
-      // relaxed to level-only, at the cost of a few hundred extra bytes of view
-      // descriptors per member -- not the underlying filter-matrix data, which
-      // TensorView only points to.
       accumulate_tt->set_batch_matcher(
-          [](const detail::KeyPair<NDIM>& head, const detail::KeyPair<NDIM>& cand) {
-            return head.dest.level() == cand.dest.level();
-          },
+          [](const detail::KeyPair<NDIM>&, const detail::KeyPair<NDIM>&) { return true; },
           max_batch_size);
     }
 #endif // MRA_ENABLE_HOST

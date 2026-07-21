@@ -424,21 +424,20 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
   /**
    * Batching support for the convolution kernel, used by ttg::device::coop()/
-   * TT::set_batch_matcher() in mra/tasks/convolution.h. Batching is only ever
-   * done across tasks at the same tree level, which guarantees K/fac/tol/at
-   * are bitwise identical for every member (see mra/ops/functions.h::truncate_tol
-   * and accumulate_tt's `at = {true, source.level()>0}` -- source.level() ==
-   * dest.level() always, so same dest level implies same `at` too). Matching
-   * is deliberately NOT narrowed to same displacement as well: requiring the
-   * same (level, displacement) -- and thus the same transr/transs/opnorms,
-   * per mra/misc/conv_mad.h::GaussianConvolutionOperator::get_op's cache key
-   * -- made accumulate_tt's batches mostly size 1 in practice (two tasks
-   * rarely apply the same neighbor offset at the same moment). Instead,
-   * transr/transs/opnorms travel PER MEMBER in the tuple below; the extra
-   * data is just a few small view descriptors (~200 bytes/member, not the
-   * underlying filter-matrix data, which TensorView only points to), a good
-   * trade for letting same-level tasks with different displacements batch
-   * together.
+   * TT::set_batch_matcher() in mra/tasks/convolution.h. Batching is unrestricted:
+   * set_batch_matcher's predicate always returns true, so any tasks of the
+   * same TT can end up in the same batch (up to max_batch_size), regardless of
+   * level or displacement. Only K and fac are truly global constants shared by
+   * every possible member; everything else that could vary -- tol, at,
+   * transr, transs, opnorms -- travels PER MEMBER in the tuple below.
+   * Level-only matching (an earlier, narrower version of this) already made
+   * accumulate_tt's batches mostly size 1 in practice (two tasks rarely reach
+   * the same level, let alone the same displacement, at the same moment); the
+   * unrestricted matcher maximizes batch sizes at the cost of a few hundred
+   * extra bytes of view/scalar descriptors per member (not the underlying
+   * filter-matrix data, which TensorView only points to) and a device kernel
+   * that no longer gets to assume anything is uniform across a launch besides
+   * K/fac.
    */
   namespace detail {
 
@@ -449,8 +448,9 @@ namespace mra{
      * local binding before calling operator()) rather than in the tuple's
      * element types, since there is no converting constructor from
      * SparseTensorView<T,...> to SparseTensorView<const T,...> to build the
-     * latter from the views the surrounding task already holds. transr/transs/
-     * opnorms are per-member (see the batching-support comment above for why).
+     * latter from the views the surrounding task already holds. tol/at/transr/
+     * transs/opnorms are all per-member (see the batching-support comment
+     * above for why) -- only K/fac stay batch-wide kernel parameters.
      */
     template <typename T, Dimension NDIM>
     using ConvolutionBatchArg = std::tuple<
@@ -462,7 +462,9 @@ namespace mra{
       size_type,                               // n: number of blocks (functions) this member contributes
       std::array<DenseTensorView<T, 4>, NDIM>, // transr (this member's own operator data)
       std::array<DenseTensorView<T, 4>, NDIM>, // transs
-      DenseTensorView<T, 4>                    // opnorms
+      DenseTensorView<T, 4>,                   // opnorms
+      T,                                       // tol: this member's own truncate_tol(...)
+      std::array<bool, 2>                      // at: this member's own apply-terms flags
     >;
 
     /* Named indices into ConvolutionBatchArg, so callers don't sprinkle magic
@@ -477,12 +479,14 @@ namespace mra{
       static constexpr std::size_t transr        = 6;
       static constexpr std::size_t transs        = 7;
       static constexpr std::size_t opnorms       = 8;
+      static constexpr std::size_t tol           = 9;
+      static constexpr std::size_t at            = 10;
     };
 
     /**
-     * One combined launch covering `num_members` independent nodes sharing one
-     * (K, fac, tol, at) -- transr/transs/opnorms are per-member, not shared
-     * (see the batching-support comment above). Grid is 3D: blockIdx.y selects
+     * One combined launch covering `num_members` independent nodes sharing
+     * only (K, fac) -- tol/at/transr/transs/opnorms are all per-member (see
+     * the batching-support comment above). Grid is 3D: blockIdx.y selects
      * the batch member (gridDim.y == num_members), blockIdx.x the function
      * index within that member (gridDim.x == the largest N_m across the whole
      * batch); members with fewer than gridDim.x functions simply have their
@@ -499,9 +503,7 @@ namespace mra{
     GLOBALSCOPE void convolution_kernel_batched(
       ConvolutionBatchArg<T, NDIM>* args,   // device ptr, size == gridDim.y
       size_type K,
-      const T fac,
-      const T tol,
-      const std::array<bool, 2> at)
+      const T fac)
     {
       using idx = ConvolutionBatchArgIdx;
 
@@ -510,9 +512,9 @@ namespace mra{
       const size_type n = std::get<idx::n>(arg);
 
       for (size_type i = blockIdx.x; i < n; i += gridDim.x) {
-        convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, tol,
+        convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<idx::tol>(arg),
                                          std::get<idx::transr>(arg), std::get<idx::transs>(arg),
-                                         std::get<idx::opnorms>(arg), at,
+                                         std::get<idx::opnorms>(arg), std::get<idx::at>(arg),
                                          std::get<idx::in_view>(arg), std::get<idx::f_view>(arg),
                                          std::get<idx::result_view>(arg), std::get<idx::resnorms_view>(arg),
                                          std::get<idx::tmp>(arg), i);
@@ -524,8 +526,8 @@ namespace mra{
   /**
    * Batched counterpart of submit_convolution_kernel: launches one kernel on
    * behalf of every member already marshaled into slot.host_args (by the
-   * caller, via detail::submit_convolution_batch_leader below), sharing
-   * (K, fac, tol, at) across the whole batch -- transr/transs/opnorms are
+   * caller, via detail::submit_convolution_batch_leader below), sharing only
+   * (K, fac) across the whole batch -- tol/at/transr/transs/opnorms are
    * per-member, already inside slot.host_args. Grid is (max_n, num_members, 1)
    * -- see convolution_kernel_batched's comment for why.
    */
@@ -535,8 +537,6 @@ namespace mra{
     typename detail::BatchPool<detail::ConvolutionBatchArg<T, NDIM>>::slot_t& slot,
     size_type K,
     const T fac,
-    const T tol,
-    const std::array<bool, 2>& at,
     ttg::device::Stream stream)
   {
     using idx = detail::ConvolutionBatchArgIdx;
@@ -560,7 +560,7 @@ namespace mra{
     Dim3 grid_dims(max_n, num_members, 1);
 
     CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_dims, thread_dims, smem_size, stream,
-                (slot.dev_args, K, fac, tol, at));
+                (slot.dev_args, K, fac));
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
@@ -574,18 +574,16 @@ namespace mra{
      * (which must stay inline in each coroutine -- only the ordinary,
      * non-suspending code below is worth sharing), marshal every member into
      * the current device's pool and submit one combined kernel launch if this
-     * task is the batch's leader. Each member's OWN transr/transs/opnorms are
-     * read from its own coop() args (get<5..7>), not shared across the batch --
-     * see the batching-support comment on ConvolutionBatchArg for why.
+     * task is the batch's leader. Each member's OWN tol/transr/transs/opnorms/at
+     * are read from its own coop() args (get<5..9>), not shared across the
+     * batch -- see the batching-support comment on ConvolutionBatchArg for why.
      */
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_convolution_batch_leader(
       BatchView& batch,
       BatchPoolRegistry<ConvolutionBatchArg<T, NDIM>>& registry,
       size_type K,
-      const T fac,
-      const T tol,
-      const std::array<bool, 2>& at)
+      const T fac)
     {
       if (!batch.is_leader()) return;
 
@@ -602,11 +600,13 @@ namespace mra{
         auto& m_transr   = batch[m].template get<5>();
         auto& m_transs   = batch[m].template get<6>();
         auto& m_opnorms  = batch[m].template get<7>();
+        auto& m_tol      = batch[m].template get<8>();
+        auto& m_at       = batch[m].template get<9>();
         slot.host_args.emplace_back(m_in, m_f, m_result, m_resnorms,
                                     m_tmp.current_device_ptr(), static_cast<size_type>(m_result.dim(0)),
-                                    m_transr, m_transs, m_opnorms);
+                                    m_transr, m_transs, m_opnorms, m_tol, m_at);
       }
-      submit_convolution_kernel_batched<T, NDIM>(pool, slot, K, fac, tol, at, ttg::device::current_stream());
+      submit_convolution_kernel_batched<T, NDIM>(pool, slot, K, fac, ttg::device::current_stream());
     }
 
   } // namespace detail
