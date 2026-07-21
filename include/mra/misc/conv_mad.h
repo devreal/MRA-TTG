@@ -1,6 +1,7 @@
 #ifndef CONV_MAD_H
 #define CONV_MAD_H
 
+#include <atomic>
 #include <memory>
 #include <array>
 #include <mutex>
@@ -27,6 +28,59 @@ namespace mra {
     Rank,   // stored rank of the operator
     Count
   };
+
+  namespace detail {
+
+#if defined(__cpp_lib_atomic_shared_ptr)
+    /** True atomic<shared_ptr<T>> (C++20, P0718), used whenever the standard
+     * library actually implements it. */
+    template <typename SharedPtrT>
+    using atomic_shared_ptr = std::atomic<SharedPtrT>;
+#else
+    /**
+     * Fallback for standard libraries that advertise C++20 but do not (yet)
+     * implement std::atomic<std::shared_ptr<T>> -- e.g. the libc++ shipped
+     * with the Clang on this machine. Built on the free-standing
+     * std::atomic_load/store/compare_exchange overloads for shared_ptr,
+     * which every standard library has provided since C++11: they were
+     * deprecated in C++20 in favor of the type above, but remain available
+     * and are still the only portable option where the new API is missing.
+     * Same interface as the subset of std::atomic<shared_ptr> used below
+     * (default-construct, load/store, compare_exchange_strong), so callers
+     * don't need to know which one they got.
+     */
+    template <typename SharedPtrT>
+    class atomic_shared_ptr {
+    public:
+      atomic_shared_ptr() noexcept = default;
+      atomic_shared_ptr(SharedPtrT desired) noexcept : m_ptr(std::move(desired)) { }
+
+      atomic_shared_ptr(const atomic_shared_ptr&) = delete;
+      atomic_shared_ptr& operator=(const atomic_shared_ptr&) = delete;
+
+      SharedPtrT load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return std::atomic_load_explicit(&m_ptr, order);
+      }
+
+      void store(SharedPtrT desired, std::memory_order order = std::memory_order_seq_cst) noexcept {
+        std::atomic_store_explicit(&m_ptr, std::move(desired), order);
+      }
+
+      operator SharedPtrT() const noexcept { return load(); }
+
+      bool compare_exchange_strong(SharedPtrT& expected, SharedPtrT desired,
+                                    std::memory_order success,
+                                    std::memory_order failure) noexcept {
+        return std::atomic_compare_exchange_strong_explicit(&m_ptr, &expected, std::move(desired),
+                                                             success, failure);
+      }
+
+    private:
+      SharedPtrT m_ptr;
+    };
+#endif // __cpp_lib_atomic_shared_ptr
+
+  } // namespace detail
 
   template <typename T>
   struct ConvolutionData1D {
@@ -70,6 +124,56 @@ namespace mra {
   };
 
   /**
+   * Cache for ConvolutionData1D objects. The cache is indexed by the displacement, which is a signed integer.
+   * The cache is used to avoid recomputing the ConvolutionData1D for the same displacement multiple times.
+   * The cache is thread-safe and uses atomic shared pointers to manage the lifetime of
+   */
+  template <typename T, int MaxDistance>
+  struct ConvolutionData1DCache {
+
+    static_assert(MaxDistance > 0, "ConvolutionData1DCache: MaxDistance must be positive");
+
+    using pointer_type = std::shared_ptr<const ConvolutionData1D<T>>;
+    using atomic_pointer_type = detail::atomic_shared_ptr<pointer_type>;
+
+  private:
+    std::array<std::array<atomic_pointer_type, 2 * MaxDistance + 1>, MAX_LEVEL> m_data; // indexed by displacement + MaxDistance
+
+  public:
+    ConvolutionData1DCache() : m_data() { }
+    ~ConvolutionData1DCache() = default;
+
+    bool has_data(int level, int displacement) const {
+      if (level > MAX_LEVEL || level < 0 || displacement < -MaxDistance || displacement > MaxDistance) {
+        throw std::out_of_range("ConvolutionData1DCache: displacement or level out of range");
+      }
+      return !!m_data[level][displacement + MaxDistance].load(std::memory_order_relaxed);
+    }
+
+    pointer_type get_data(int level, int displacement) const {
+      if (level > MAX_LEVEL || level < 0 || displacement < -MaxDistance || displacement > MaxDistance) {
+        throw std::out_of_range("ConvolutionData1DCache: displacement or level out of range");
+      }
+      return m_data[level][displacement + MaxDistance].load(std::memory_order_acquire);
+    }
+
+    /**
+     * Returns true if the new data was set, false if the data was already set by another thread.
+     * The data is set atomically using compare_exchange_strong, so if another thread has already
+     * set the data, this function will return false and the new data will be discarded.
+     */
+    bool set_data(int level, int displacement, pointer_type data) {
+      if (level > MAX_LEVEL || level < 0 || displacement < -MaxDistance || displacement > MaxDistance) {
+        throw std::out_of_range("ConvolutionData1DCache: displacement or level out of range");
+      }
+      pointer_type expected = nullptr;
+      return m_data[level][displacement + MaxDistance].compare_exchange_strong(expected, std::move(data),
+                                                                               std::memory_order_release,
+                                                                               std::memory_order_relaxed);
+    }
+  };
+
+  /**
    * MRA/TTG wrapper around the MADNESS SeparatedConvolution operator.
    * This class is responsible for generating the ConvolutionData for a given level and displacement.
    * Provides the operators in buffers so they can be used in device kernels.
@@ -110,9 +214,11 @@ namespace mra {
       auto key = Key<NDIM>(0, n, disp.translation());
       auto it = _datacache.find(key);
       if (it != _datacache.end()) {
+        auto& data = it->second;
         cachemutex.unlock();
-        return it->second;
+        return data;
       }
+      cachemutex.unlock();
       /**
        * First time looking for this Level/displacement.
        * We generate the data out of MADNESS and store our own version of it.
@@ -121,22 +227,15 @@ namespace mra {
        */
       auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
       for (int d = 0; d < NDIM; ++d) {
-        auto key_1d = std::make_pair(n, disp.translation()[d]);
-        auto it = _opcache.find(key_1d);
-        if (it == _opcache.end()) {
-          cachemutex.unlock();
+        if (!_op1d_cache.has_data(n, disp.translation()[d])) {
           // compute new data
           auto data = make_op1d(n, disp.translation()[d], d);
-          cachemutex.lock();
-          // check if someone else generated this data
-          it = _opcache.find(key_1d);
-          if (it == _opcache.end()) {
-            auto [it_, inserted] = _opcache.insert(std::make_pair(key_1d, std::move(data)));
-            it = it_;
-          }
+          // try to set the data in the cache, may be discarded if another thread already set it
+          _op1d_cache.set_data(n, disp.translation()[d], std::move(data));
         }
-        assert(it != _opcache.end());
-        data->data[d] = it->second;
+        assert(_op1d_cache.has_data(n, disp.translation()[d])
+              && "ConvolutionData1DCache should have data after make_op1d");
+        data->data[d] = _op1d_cache.get_data(n, disp.translation()[d]);
       }
       /**
        * Assemble the norms for each dimension and store the fac of each term.
@@ -174,10 +273,12 @@ namespace mra {
         norms_view(c, 0, 0, (int)NormId::Opnorm) = norm;
         norms_view(c, 0, 0, (int)NormId::Rank) = mad_ops.size();
       }
+      cachemutex.lock();
       it = _datacache.find(key);
       if (it != _datacache.end()) {
+        auto& data = it->second;
         cachemutex.unlock();
-        return it->second;
+        return data;
       }
       // insert new
       _datacache.insert(std::make_pair(key, data));
@@ -191,7 +292,7 @@ namespace mra {
     int m_max_rank = 0;
     // our own cache of full operator data for each [Level, Translation] (encoded as Key)
     // includes all terms and dimensions
-    mutable std::map<std::pair<Level, Translation>, std::shared_ptr<const ConvolutionData1D<T>>> _opcache;
+    mutable ConvolutionData1DCache<T, 4> _op1d_cache; // MADNESS uses [-4,4] as the maximum distance for screening
     mutable std::map<Key<NDIM>, std::shared_ptr<const ConvolutionData<T, NDIM>>> _datacache;
     mutable std::mutex cachemutex;
 
