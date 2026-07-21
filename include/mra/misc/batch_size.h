@@ -20,11 +20,20 @@
  * reach its own coop() call, so the enable/disable decision cannot safely be
  * re-read per task invocation once matching has started.
  */
+
+#ifdef MRA_ENABLE_HOST
+// batching disabled on host builds
+#define MRA_BATCH_SIZE_DEFAULT 1
+#else
+// batching enabled on device builds, default size 128 (arbitrary, but not too small)
+#define MRA_BATCH_SIZE_DEFAULT 128
+#endif
+
 namespace mra {
 
   namespace detail {
     inline std::atomic<std::size_t>& batch_size_state() {
-      static std::atomic<std::size_t> value{128}; // default: batching disabled (<=1)
+      static std::atomic<std::size_t> value{MRA_BATCH_SIZE_DEFAULT};
       return value;
     }
   } // namespace detail
