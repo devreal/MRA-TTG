@@ -4,6 +4,7 @@
 #include <iostream>
 #include <ttg.h>
 #include "mra/kernels.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
@@ -94,11 +95,17 @@ namespace mra {
                         const T cell_min_width,
                         const std::string& name = "convolution",
                         ProcMap procmap = {},
-                        DeviceMap devicemap = {},
-                        bool enable_conv_batching = true,
-                        std::size_t max_batch_size = 32) {
+                        DeviceMap devicemap = {}) {
 
     static_assert(NDIM == 3); // TODO: worth fixing?
+
+    // Batching is controlled process-wide via mra::set_batch_size(), not per
+    // call here -- see mra/misc/batch_size.h. Read once, at graph-construction
+    // time: this bakes the decision into the tasks/matchers built below, so
+    // calling set_batch_size() again after this graph exists has no effect on
+    // it (deliberate -- see batch_size.h for why).
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_conv_batching = mra::batching_enabled();
 
 #ifndef MRA_ENABLE_HOST
     // Shared by shell0_tt and accumulate_tt: they never contend for the same
