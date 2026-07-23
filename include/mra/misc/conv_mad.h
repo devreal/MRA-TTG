@@ -4,15 +4,15 @@
 #include <atomic>
 #include <memory>
 #include <array>
-#include <mutex>
-#include <map>
 #include <utility>
 
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
+#include <madness/world/worldhashmap.h>
 #include <madness/mra/operator.h>
 #include <madness/mra/convolution1d.h>
 #include "mra/misc/types.h"
+#include "mra/misc/key.h"
 
 namespace mra {
 
@@ -80,6 +80,137 @@ namespace mra {
     };
 #endif // __cpp_lib_atomic_shared_ptr
 
+    /// Key for the per-dimension 1D convolution operator cache. Unlike the aggregate
+    /// cache (keyed by Key<NDIM>, which already spans all dimensions), lookups here must
+    /// also distinguish which dimension the entry belongs to.
+    struct Op1DKey {
+      Level n = 0;
+      Dimension d = 0;
+      Translation l = 0;
+
+      Op1DKey() = default;
+      Op1DKey(Level n, Dimension d, Translation l) : n(n), d(d), l(l) { }
+
+      bool operator==(const Op1DKey& other) const {
+        return n == other.n && d == other.d && l == other.l;
+      }
+
+      /// Combines n, d, l into a single hash value; follows the same style as Key<NDIM>::hash().
+      HashValue hash() const {
+        HashValue h = static_cast<HashValue>(static_cast<uint32_t>(l));
+        h = (h << 16) ^ static_cast<HashValue>(d);
+        h = (h << 16) ^ static_cast<HashValue>(static_cast<uint16_t>(n));
+        return h;
+      }
+    };
+
+    /**
+     * Hash functor bridging our own KeyT::hash() (returning HashValue, i.e. uint64_t) to
+     * madness::ConcurrentHashMap's expected hashfunT (returning madness::hashT, i.e.
+     * std::size_t). We cannot rely on madness's generic hash_value()/t.hash() plumbing
+     * here: on platforms where size_t and uint64_t are distinct types of the same width
+     * (e.g. macOS/LP64, where hashT is `unsigned long` but HashValue is `unsigned long
+     * long`), its SFINAE check requires an exact type match and fails to compile.
+     */
+    template <typename KeyT>
+    struct HashFunctor {
+      madness::hashT operator()(const KeyT& key) const {
+        return static_cast<madness::hashT>(key.hash());
+      }
+    };
+
+    enum class CacheEntryState : uint8_t { Empty = 0, Requested = 1, Ready = 2 };
+
+    /**
+     * A concurrent, memoizing cache keyed by KeyT that computes each distinct value at
+     * most once, even when many tasks request the same key concurrently.
+     *
+     * The first task to request a given key becomes its "owner" (claim() marks the entry
+     * Requested/processing) and is responsible for computing the value and publish()-ing
+     * it. Any other task requesting the same key while it is still Requested does not
+     * redo the work; it calls acquire() to block (with progressive backoff, via
+     * madness::MutexWaiter) until the owner publishes the result. This lets concurrent
+     * tasks that need several related keys (e.g. one per dimension) split up the work
+     * instead of every task recomputing everything itself: a task can claim() several
+     * keys up front, compute the ones it owns, and only acquire()-wait on the rest.
+     *
+     * Built on madness::ConcurrentHashMap, which requires the mapped value to be
+     * copy-constructible (entries are stored as copied std::pair<const K,V>). Since the
+     * actual payload must be updated in place by whichever task ends up computing it, we
+     * store a copyable std::shared_ptr<Cell> in the map and do the claim/publish/acquire
+     * synchronization lock-free on the Cell itself via atomic_shared_ptr -- the map is
+     * only ever used for the cheap "find-or-create the Cell for this key" step.
+     */
+    template <typename KeyT, typename ValueT>
+    class SharedComputeCache {
+    public:
+      using pointer_type = std::shared_ptr<const ValueT>;
+
+    private:
+      struct Cell {
+        std::atomic<CacheEntryState> state{CacheEntryState::Empty};
+        atomic_shared_ptr<pointer_type> value;
+      };
+      using cellptr_type = std::shared_ptr<Cell>;
+      using map_type = madness::ConcurrentHashMap<KeyT, cellptr_type, HashFunctor<KeyT>>;
+
+      mutable map_type m_map;
+
+      cellptr_type get_or_create_cell(const KeyT& key) const {
+        {
+          // fast path: entry already exists, only need a (shared) read lock
+          typename map_type::const_accessor cacc;
+          if (m_map.find(cacc, key)) {
+            return cacc->second;
+          }
+        }
+        // slow path: entry may not exist yet; insert() blocks until it can exclusively
+        // create-or-observe the entry, so exactly one caller constructs the Cell.
+        typename map_type::accessor acc;
+        if (m_map.insert(acc, key)) {
+          acc->second = std::make_shared<Cell>();
+        }
+        return acc->second;
+      }
+
+    public:
+      /// Handle returned by claim(); pass to publish() (if owner) or acquire() (otherwise).
+      struct Ticket {
+        cellptr_type cell;
+        bool owner = false;
+      };
+
+      /**
+       * Claims responsibility for computing the value for `key`. If `Ticket::owner` is
+       * true, the caller must compute the value and call publish(). Otherwise some other
+       * task already claimed (or already finished) this key; call acquire() to obtain the
+       * result once it is ready.
+       */
+      Ticket claim(const KeyT& key) const {
+        cellptr_type cell = get_or_create_cell(key);
+        CacheEntryState expected = CacheEntryState::Empty;
+        bool owner = cell->state.compare_exchange_strong(expected, CacheEntryState::Requested,
+                                                           std::memory_order_acq_rel,
+                                                           std::memory_order_acquire);
+        return Ticket{std::move(cell), owner};
+      }
+
+      /// Publishes the computed value for a ticket obtained via claim() with owner == true.
+      void publish(const Ticket& ticket, pointer_type data) const {
+        ticket.cell->value.store(std::move(data), std::memory_order_release);
+        ticket.cell->state.store(CacheEntryState::Ready, std::memory_order_release);
+      }
+
+      /// Blocks (with progressive backoff) until the value is ready, then returns it.
+      pointer_type acquire(const Ticket& ticket) const {
+        madness::MutexWaiter waiter;
+        while (ticket.cell->state.load(std::memory_order_acquire) != CacheEntryState::Ready) {
+          waiter.wait();
+        }
+        return ticket.cell->value.load(std::memory_order_acquire);
+      }
+    };
+
   } // namespace detail
 
   template <typename T>
@@ -124,56 +255,6 @@ namespace mra {
   };
 
   /**
-   * Cache for ConvolutionData1D objects. The cache is indexed by the displacement, which is a signed integer.
-   * The cache is used to avoid recomputing the ConvolutionData1D for the same displacement multiple times.
-   * The cache is thread-safe and uses atomic shared pointers to manage the lifetime of
-   */
-  template <typename T, int MaxDistance>
-  struct ConvolutionData1DCache {
-
-    static_assert(MaxDistance > 0, "ConvolutionData1DCache: MaxDistance must be positive");
-
-    using pointer_type = std::shared_ptr<const ConvolutionData1D<T>>;
-    using atomic_pointer_type = detail::atomic_shared_ptr<pointer_type>;
-
-  private:
-    std::array<std::array<atomic_pointer_type, 2 * MaxDistance + 1>, MAX_LEVEL> m_data; // indexed by displacement + MaxDistance
-
-  public:
-    ConvolutionData1DCache() : m_data() { }
-    ~ConvolutionData1DCache() = default;
-
-    bool has_data(int level, int displacement) const {
-      if (level > MAX_LEVEL || level < 0 || displacement < -MaxDistance || displacement > MaxDistance) {
-        throw std::out_of_range("ConvolutionData1DCache: displacement or level out of range");
-      }
-      return !!m_data[level][displacement + MaxDistance].load(std::memory_order_relaxed);
-    }
-
-    pointer_type get_data(int level, int displacement) const {
-      if (level > MAX_LEVEL || level < 0 || displacement < -MaxDistance || displacement > MaxDistance) {
-        throw std::out_of_range("ConvolutionData1DCache: displacement or level out of range");
-      }
-      return m_data[level][displacement + MaxDistance].load(std::memory_order_acquire);
-    }
-
-    /**
-     * Returns true if the new data was set, false if the data was already set by another thread.
-     * The data is set atomically using compare_exchange_strong, so if another thread has already
-     * set the data, this function will return false and the new data will be discarded.
-     */
-    bool set_data(int level, int displacement, pointer_type data) {
-      if (level > MAX_LEVEL || level < 0 || displacement < -MaxDistance || displacement > MaxDistance) {
-        throw std::out_of_range("ConvolutionData1DCache: displacement or level out of range");
-      }
-      pointer_type expected = nullptr;
-      return m_data[level][displacement + MaxDistance].compare_exchange_strong(expected, std::move(data),
-                                                                               std::memory_order_release,
-                                                                               std::memory_order_relaxed);
-    }
-  };
-
-  /**
    * MRA/TTG wrapper around the MADNESS SeparatedConvolution operator.
    * This class is responsible for generating the ConvolutionData for a given level and displacement.
    * Provides the operators in buffers so they can be used in device kernels.
@@ -210,32 +291,41 @@ namespace mra {
      * Assembles ConvolutionData for the level and displacement.
      */
     std::shared_ptr<const ConvolutionData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
-      cachemutex.lock();
       auto key = Key<NDIM>(0, n, disp.translation());
-      auto it = _datacache.find(key);
-      if (it != _datacache.end()) {
-        auto& data = it->second;
-        cachemutex.unlock();
-        return data;
+      auto agg_ticket = _datacache.claim(key);
+      if (!agg_ticket.owner) {
+        // Someone else is already computing (or has finished) this exact aggregate;
+        // nothing to split further for an identical request, so just wait for it.
+        return _datacache.acquire(agg_ticket);
       }
-      cachemutex.unlock();
       /**
-       * First time looking for this Level/displacement.
+       * We are responsible for computing the aggregate data for this Level/displacement.
        * We generate the data out of MADNESS and store our own version of it.
-       * Start with assembling the ConvolutionData1D for each dimension.
-       * The 1D data is cached so we might reuse if from other displacements.
+       * Start with assembling the ConvolutionData1D for each dimension. The 1D data is
+       * cached so it may be reused across displacements/dimensions.
+       *
+       * First pass: claim every per-dimension slot we can. Dimensions nobody else is
+       * computing yet are computed right here; dimensions another concurrent get_op()
+       * call already claimed (for this or any other displacement that happens to share
+       * the same (level, dimension, translation)) are left pending, so the work of
+       * computing the NDIM pieces is shared across concurrent tasks instead of every
+       * task redoing all of them.
        */
       auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
-      for (int d = 0; d < NDIM; ++d) {
-        if (!_op1d_cache.has_data(n, disp.translation()[d])) {
-          // compute new data
-          auto data = make_op1d(n, disp.translation()[d], d);
-          // try to set the data in the cache, may be discarded if another thread already set it
-          _op1d_cache.set_data(n, disp.translation()[d], std::move(data));
+      std::array<typename op1d_cache_type::Ticket, NDIM> op1d_tickets;
+      for (Dimension d = 0; d < NDIM; ++d) {
+        op1d_tickets[d] = _op1d_cache.claim(detail::Op1DKey(n, d, disp.translation()[d]));
+        if (op1d_tickets[d].owner) {
+          auto data1d = make_op1d(n, disp.translation()[d], d);
+          _op1d_cache.publish(op1d_tickets[d], data1d);
+          data->data[d] = std::move(data1d);
         }
-        assert(_op1d_cache.has_data(n, disp.translation()[d])
-              && "ConvolutionData1DCache should have data after make_op1d");
-        data->data[d] = _op1d_cache.get_data(n, disp.translation()[d]);
+      }
+      // Second pass: wait for whatever we didn't own to be published by its owner.
+      for (Dimension d = 0; d < NDIM; ++d) {
+        if (!op1d_tickets[d].owner) {
+          data->data[d] = _op1d_cache.acquire(op1d_tickets[d]);
+        }
       }
       /**
        * Assemble the norms for each dimension and store the fac of each term.
@@ -273,28 +363,22 @@ namespace mra {
         norms_view(c, 0, 0, (int)NormId::Opnorm) = norm;
         norms_view(c, 0, 0, (int)NormId::Rank) = mad_ops.size();
       }
-      cachemutex.lock();
-      it = _datacache.find(key);
-      if (it != _datacache.end()) {
-        auto& data = it->second;
-        cachemutex.unlock();
-        return data;
-      }
-      // insert new
-      _datacache.insert(std::make_pair(key, data));
-      cachemutex.unlock();
+      _datacache.publish(agg_ticket, data);
       return data;
     }
 
   private:
+    using op1d_cache_type = detail::SharedComputeCache<detail::Op1DKey, ConvolutionData1D<T>>;
+    using data_cache_type = detail::SharedComputeCache<Key<NDIM>, ConvolutionData<T, NDIM>>;
+
     // madness separate convolution object, provided by application
     std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>> m_mad_conv_sep_vec;
     int m_max_rank = 0;
+    // our own cache of 1D operator data for each [Level, Dimension, Translation]
+    mutable op1d_cache_type _op1d_cache;
     // our own cache of full operator data for each [Level, Translation] (encoded as Key)
     // includes all terms and dimensions
-    mutable ConvolutionData1DCache<T, 4> _op1d_cache; // MADNESS uses [-4,4] as the maximum distance for screening
-    mutable std::map<Key<NDIM>, std::shared_ptr<const ConvolutionData<T, NDIM>>> _datacache;
-    mutable std::mutex cachemutex;
+    mutable data_cache_type _datacache;
 
     template<typename TV>
     void copy_from_madtensor(TV&& tv, const madness::Tensor<T>& m) const {
