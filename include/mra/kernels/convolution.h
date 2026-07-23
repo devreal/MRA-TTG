@@ -13,6 +13,7 @@
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
 #include "mra/misc/conv_mad.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
 #include "mra/misc/types.h"
