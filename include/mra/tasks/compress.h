@@ -55,7 +55,7 @@ namespace mra
     // with; it's unrestricted from the start.
     std::shared_ptr<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>> compress_pool;
     if (enable_compress_batching) {
-      compress_pool = std::make_shared<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>>(ttg::device::num_devices());
+      compress_pool = std::make_shared<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
     }
 #else
     // BatchPoolRegistry only exists on device builds; this placeholder only

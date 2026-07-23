@@ -177,7 +177,9 @@ namespace mra::detail {
    */
   template <typename Arg>
   struct BatchPoolRegistry {
-    explicit BatchPoolRegistry(int num_devices) : entries(num_devices) { }
+    explicit BatchPoolRegistry(int num_devices, int max_batch_size)
+    : entries(num_devices), max_batch_size(max_batch_size)
+    { }
 
     BatchPool<Arg>& get(int device_id) {
       auto& e = entries[device_id];
@@ -185,12 +187,15 @@ namespace mra::detail {
       return *e.pool;
     }
 
+    int get_max_batch_size() const { return max_batch_size; }
+
    private:
     struct entry_t {
       std::once_flag once;
       std::unique_ptr<BatchPool<Arg>> pool;
     };
     std::vector<entry_t> entries;
+    int max_batch_size;
   };
 
 } // namespace mra::detail

@@ -588,8 +588,8 @@ namespace mra{
       if (!batch.is_leader()) return;
 
       const std::size_t nb = batch.size();
-      auto& pool = registry.get(ttg::device::current_device());
-      auto& slot = pool.acquire(nb);
+      auto& pool = registry.get(registry.get_max_batch_size());
+      auto& slot = pool.acquire(mra::get_batch_size()); // allocate space for full batch
       slot.host_args.clear();
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_in       = batch[m].template get<0>();

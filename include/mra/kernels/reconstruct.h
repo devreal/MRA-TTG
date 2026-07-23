@@ -332,7 +332,7 @@ namespace mra {
 
       const std::size_t nb = batch.size();
       auto& pool = registry.get(ttg::device::current_device());
-      auto& slot = pool.acquire(nb);
+      auto& slot = pool.acquire(registry.get_max_batch_size());
       slot.host_args.clear();
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_key             = batch[m].template get<0>();
