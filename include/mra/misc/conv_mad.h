@@ -29,6 +29,33 @@ namespace mra {
     Count
   };
 
+  template <typename T>
+  struct ConvolutionData1D {
+
+    // 4D: count x rank x [R|S] x 2D operator matrix
+    // count should either be 1 or the number of functions to which the operators are applied
+    using tensor_type = DenseTensor<T, 4>;
+
+    /**
+     * We store R and S in separate tensors because they have different dimensions (2K and K).
+     */
+    tensor_type R, S;
+
+    ConvolutionData1D() : R(), S(){}
+    ConvolutionData1D(size_type count, size_type rank, size_type K)
+    : R(std::array{count, rank, 2*K, 2*K}, ttg::scope::SyncIn)
+    , S(std::array{count, rank, K, K}, ttg::scope::SyncIn)
+    { }
+    ConvolutionData1D(tensor_type&& R_,
+                      tensor_type&& S_)
+    : R(std::move(R_))
+    , S(std::move(S_))
+    { }
+    ConvolutionData1D(const ConvolutionData1D&) = default;
+    ConvolutionData1D(ConvolutionData1D&&) = default;
+    ~ConvolutionData1D() = default;
+  };
+
   namespace detail {
 
 #if defined(__cpp_lib_atomic_shared_ptr)
@@ -211,34 +238,158 @@ namespace mra {
       }
     };
 
-  } // namespace detail
-
-  template <typename T>
-  struct ConvolutionData1D {
-
-    // 4D: count x rank x [R|S] x 2D operator matrix
-    // count should either be 1 or the number of functions to which the operators are applied
-    using tensor_type = DenseTensor<T, 4>;
+    enum class Op1DCellState : uint8_t { Empty = 0, Initializing = 1, InProgress = 2, Ready = 3 };
 
     /**
-     * We store R and S in separate tensors because they have different dimensions (2K and K).
+     * Concurrent cache + work-splitting scheduler for per-(level, dimension, translation)
+     * 1D convolution operator tensors.
+     *
+     * Building one such tensor loops over every (function, separated-term) pair, calling
+     * into MADNESS to assemble that pair's block of the R/S tensors. That loop can be long
+     * (separated-expansion rank is often tens to hundreds of terms), and a plain
+     * claim/compute/publish scheme (as used by SharedComputeCache) has exactly one task
+     * run the whole loop while every other task waiting on the same key sits in a pure
+     * spin-wait. Each (c,i) pair writes to a disjoint slice of the tensor, and MADNESS's
+     * own per-term operator accessors/caches (ConvolutionND::getop, Convolution1D's
+     * SimpleCache-based nonstandard()) are self-contained and already safe to call
+     * concurrently from different (c,i), so any task that shows up for the same key can
+     * steal whichever (c,i) pairs are still unclaimed instead of only ever waiting.
+     *
+     * Protocol per key:
+     *   claim()      -- get-or-create the entry; `creator` tells the caller whether it
+     *                    must call init().
+     *   init()       -- (creator only) allocate the shared tensor and the flat list of
+     *                    (c,i) work items, then open the entry up for contributions.
+     *   contribute() -- (anyone holding a ticket) grab and compute whatever unclaimed
+     *                    items remain; returns as soon as none are left -- it does not
+     *                    block waiting on other tasks' in-flight items.
+     *   acquire()    -- (anyone) blocks until every item is done, then returns the
+     *                    finished, immutable tensor.
      */
-    tensor_type R, S;
+    template <typename T>
+    class Op1DCache {
+    public:
+      using pointer_type = std::shared_ptr<const ConvolutionData1D<T>>;
 
-    ConvolutionData1D() : R(), S(){}
-    ConvolutionData1D(size_type count, size_type rank, size_type K)
-    : R(std::array{count, rank, 2*K, 2*K}, ttg::scope::SyncIn)
-    , S(std::array{count, rank, K, K}, ttg::scope::SyncIn)
-    { }
-    ConvolutionData1D(tensor_type&& R_,
-                      tensor_type&& S_)
-    : R(std::move(R_))
-    , S(std::move(S_))
-    { }
-    ConvolutionData1D(const ConvolutionData1D&) = default;
-    ConvolutionData1D(ConvolutionData1D&&) = default;
-    ~ConvolutionData1D() = default;
-  };
+      struct WorkItem {
+        size_type c;
+        size_type i;
+      };
+
+    private:
+      struct Cell {
+        std::atomic<Op1DCellState> state{Op1DCellState::Empty};
+        // Written once by the creator, before the InProgress/Ready release-store below;
+        // every other access happens-after observing that store (see contribute()), so
+        // these need no synchronization of their own.
+        std::shared_ptr<ConvolutionData1D<T>> tensor;
+        std::vector<WorkItem> items;
+        // Per-item claim flags and the outstanding-item counter *do* need to be atomic:
+        // many contributors race on them concurrently.
+        std::vector<std::atomic<bool>> claimed;
+        std::atomic<size_type> remaining{0};
+        atomic_shared_ptr<pointer_type> value;
+      };
+      using cellptr_type = std::shared_ptr<Cell>;
+      using map_type = madness::ConcurrentHashMap<Op1DKey, cellptr_type, HashFunctor<Op1DKey>>;
+
+      mutable map_type m_map;
+
+      cellptr_type get_or_create_cell(const Op1DKey& key) const {
+        {
+          typename map_type::const_accessor cacc;
+          if (m_map.find(cacc, key)) {
+            return cacc->second;
+          }
+        }
+        typename map_type::accessor acc;
+        if (m_map.insert(acc, key)) {
+          acc->second = std::make_shared<Cell>();
+        }
+        return acc->second;
+      }
+
+    public:
+      /// Handle returned by claim(); pass to init()/contribute()/acquire().
+      struct Ticket {
+        cellptr_type cell;
+        bool creator = false;
+      };
+
+      /// Claims (get-or-creates) the entry for `key`. `creator == true` means this call
+      /// must follow up with init() before anyone can contribute() or acquire().
+      Ticket claim(const Op1DKey& key) const {
+        cellptr_type cell = get_or_create_cell(key);
+        Op1DCellState expected = Op1DCellState::Empty;
+        bool creator = cell->state.compare_exchange_strong(expected, Op1DCellState::Initializing,
+                                                             std::memory_order_acq_rel,
+                                                             std::memory_order_acquire);
+        return Ticket{std::move(cell), creator};
+      }
+
+      /// Creator-only: installs the shared tensor and its flat list of (c,i) work items,
+      /// then opens the entry for contributions (or marks it Ready immediately if there
+      /// happen to be no items).
+      void init(const Ticket& ticket, std::shared_ptr<ConvolutionData1D<T>> tensor,
+                std::vector<WorkItem> items) const {
+        auto& cell = *ticket.cell;
+        cell.tensor = std::move(tensor);
+        const size_type n_items = static_cast<size_type>(items.size());
+        cell.items = std::move(items);
+        cell.claimed = std::vector<std::atomic<bool>>(n_items);
+        if (n_items == 0) {
+          cell.value.store(pointer_type(cell.tensor), std::memory_order_relaxed);
+          cell.state.store(Op1DCellState::Ready, std::memory_order_release);
+        } else {
+          cell.remaining.store(n_items, std::memory_order_relaxed);
+          cell.state.store(Op1DCellState::InProgress, std::memory_order_release);
+        }
+      }
+
+      /// Grabs and computes whatever (c,i) items nobody has claimed yet, calling
+      /// `compute(c, i, tensor)` for each. Returns once no unclaimed items remain; does
+      /// not wait for items other contributors are still working on (use acquire() for
+      /// that). The last contribution to finish marks the entry Ready.
+      template <typename F>
+      void contribute(const Ticket& ticket, F&& compute) const {
+        auto& cell = *ticket.cell;
+        if (!ticket.creator) {
+          // Wait out the brief Initializing window (tensor/work-list allocation) so
+          // cell.items/cell.tensor are safe to read below.
+          madness::MutexWaiter waiter;
+          Op1DCellState s;
+          while ((s = cell.state.load(std::memory_order_acquire)) == Op1DCellState::Empty ||
+                 s == Op1DCellState::Initializing) {
+            waiter.wait();
+          }
+        }
+        for (size_type k = 0; k < cell.items.size(); ++k) {
+          bool expected = false;
+          if (cell.claimed[k].compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                       std::memory_order_relaxed)) {
+            const WorkItem item = cell.items[k];
+            compute(item.c, item.i, *cell.tensor);
+            if (cell.remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+              // We were the last item to finish: the tensor is now fully populated.
+              cell.value.store(pointer_type(cell.tensor), std::memory_order_release);
+              cell.state.store(Op1DCellState::Ready, std::memory_order_release);
+            }
+          }
+        }
+      }
+
+      /// Blocks (with progressive backoff) until every item is done, then returns the
+      /// finished tensor.
+      pointer_type acquire(const Ticket& ticket) const {
+        madness::MutexWaiter waiter;
+        while (ticket.cell->state.load(std::memory_order_acquire) != Op1DCellState::Ready) {
+          waiter.wait();
+        }
+        return ticket.cell->value.load(std::memory_order_acquire);
+      }
+    };
+
+  } // namespace detail
 
   template<typename T, size_type NDIM>
   struct ConvolutionData {
@@ -304,28 +455,36 @@ namespace mra {
        * Start with assembling the ConvolutionData1D for each dimension. The 1D data is
        * cached so it may be reused across displacements/dimensions.
        *
-       * First pass: claim every per-dimension slot we can. Dimensions nobody else is
-       * computing yet are computed right here; dimensions another concurrent get_op()
-       * call already claimed (for this or any other displacement that happens to share
-       * the same (level, dimension, translation)) are left pending, so the work of
-       * computing the NDIM pieces is shared across concurrent tasks instead of every
-       * task redoing all of them.
+       * This happens in three passes over the NDIM dimensions rather than one:
+       *  1. claim (get-or-create) every per-dimension cache entry, and let whichever
+       *     call is first to claim a given (level, dimension, translation) allocate its
+       *     tensor and the flat list of (function, term) work items;
+       *  2. contribute to every dimension we hold a ticket for -- grabbing and computing
+       *     whatever work items nobody else has claimed yet;
+       *  3. acquire the (by then likely-finished) result for each dimension, blocking
+       *     only on whatever items are still in flight.
+       * Splitting this way means that when several tasks need overlapping (or the same)
+       * (level, dimension, translation) 1D tensors concurrently, they all pitch in on the
+       * (function, term) loop that fills each tensor instead of one task running that
+       * whole loop alone while the others just sit in a spin-wait on the result.
        */
       auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
       std::array<typename op1d_cache_type::Ticket, NDIM> op1d_tickets;
       for (Dimension d = 0; d < NDIM; ++d) {
         op1d_tickets[d] = _op1d_cache.claim(detail::Op1DKey(n, d, disp.translation()[d]));
-        if (op1d_tickets[d].owner) {
-          auto data1d = make_op1d(n, disp.translation()[d], d);
-          _op1d_cache.publish(op1d_tickets[d], data1d);
-          data->data[d] = std::move(data1d);
+        if (op1d_tickets[d].creator) {
+          auto [tensor, items] = make_op1d_shell();
+          _op1d_cache.init(op1d_tickets[d], std::move(tensor), std::move(items));
         }
       }
-      // Second pass: wait for whatever we didn't own to be published by its owner.
       for (Dimension d = 0; d < NDIM; ++d) {
-        if (!op1d_tickets[d].owner) {
-          data->data[d] = _op1d_cache.acquire(op1d_tickets[d]);
-        }
+        Translation l = disp.translation()[d];
+        _op1d_cache.contribute(op1d_tickets[d], [&, n, l, d](size_type c, size_type i, ConvolutionData1D<T>& tensor) {
+          compute_op1d_entry(n, l, d, c, i, tensor);
+        });
+      }
+      for (Dimension d = 0; d < NDIM; ++d) {
+        data->data[d] = _op1d_cache.acquire(op1d_tickets[d]);
       }
       /**
        * Assemble the norms for each dimension and store the fac of each term.
@@ -368,7 +527,7 @@ namespace mra {
     }
 
   private:
-    using op1d_cache_type = detail::SharedComputeCache<detail::Op1DKey, ConvolutionData1D<T>>;
+    using op1d_cache_type = detail::Op1DCache<T>;
     using data_cache_type = detail::SharedComputeCache<Key<NDIM>, ConvolutionData<T, NDIM>>;
 
     // madness separate convolution object, provided by application
@@ -389,31 +548,26 @@ namespace mra {
     }
 
     /**
-     * Assembles ConvolutionData1D for the level and displacement, for the given dimension.
-     * Note that the same 1D data may be shared across multiple dimensions and/or terms,
-     * depending on what MADNESS provides.
-     * This function does not modify the cache.
-     * Assumes all convolution objects have the same K.
+     * Allocates a fresh ConvolutionData1D tensor and returns it together with the flat
+     * list of (function, term) work items whose computation actually needs MADNESS --
+     * i.e. every (c,i) with i < the real rank of function c's separated expansion.
+     * Padding entries (i beyond that rank, up to m_max_rank) are zero and cheap, so
+     * they're filled in here directly rather than turned into their own work items.
+     * Independent of level/dimension/displacement, so it's fast enough to always run on
+     * the task that wins the Op1DCache claim() race, without needing to be split further.
      */
-    std::shared_ptr<const ConvolutionData1D<T>> make_op1d(Level n, Translation l, Dimension d) const {
-      auto data = std::make_shared<ConvolutionData1D<T>>(m_mad_conv_sep_vec.size(), m_max_rank, m_mad_conv_sep_vec.front()->get_k());
-      auto rv = data->R.view_on(ttg::device::Device::host());
-      auto sv = data->S.view_on(ttg::device::Device::host());
-      for (int c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
+    std::pair<std::shared_ptr<ConvolutionData1D<T>>, std::vector<typename op1d_cache_type::WorkItem>>
+    make_op1d_shell() const {
+      auto tensor = std::make_shared<ConvolutionData1D<T>>(m_mad_conv_sep_vec.size(), m_max_rank,
+                                                             m_mad_conv_sep_vec.front()->get_k());
+      auto rv = tensor->R.view_on(ttg::device::Device::host());
+      auto sv = tensor->S.view_on(ttg::device::Device::host());
+      std::vector<typename op1d_cache_type::WorkItem> items;
+      for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
         auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
-        int i = 0;
-        for (i = 0; i < mad_ops.size(); ++i) {
-          const madness::ConvolutionData1D<T>* cd_mad;
-          std::shared_ptr<const madness::Convolution1D<T> > conv1d = mad_ops[i].getop(d);
-          cd_mad = conv1d->nonstandard(n, l);
-          if (!(cd_mad->R.size() == 0 && cd_mad->T.size() == 0)) {
-            copy_from_madtensor(rv(c, i), cd_mad->R);
-            //copy_from_madtensor(rv(i, 1), cd_mad->RU);
-            //copy_from_madtensor(rv(i, 2), cd_mad->RVT);
-            copy_from_madtensor(sv(c, i), cd_mad->T); // S = T for us
-            //copy_from_madtensor(sv(i, 1), cd_mad->TU);
-            //copy_from_madtensor(sv(i, 2), cd_mad->TVT);
-          }
+        size_type i = 0;
+        for (; i < mad_ops.size(); ++i) {
+          items.push_back({c, i});
         }
         // fill in the rest of the tensors with zeros
         for (; i < m_max_rank; ++i) {
@@ -421,7 +575,28 @@ namespace mra {
           sv(c, i) = 0.0;
         }
       }
-      return data;
+      return {std::move(tensor), std::move(items)};
+    }
+
+    /**
+     * Computes a single (function, term) entry of the 1D operator tensor for
+     * (n, d, l) and writes it into that entry's disjoint slice of `tensor`.
+     * Safe to run concurrently with other (c,i) entries of the very same tensor:
+     * different terms use different MADNESS Convolution1D instances (each with its own
+     * internal, thread-safe SimpleCache), get_ops()/getop() are plain accessors into
+     * already-built state, and each (c,i) only ever touches its own slice of `tensor`.
+     */
+    void compute_op1d_entry(Level n, Translation l, Dimension d, size_type c, size_type i,
+                             ConvolutionData1D<T>& tensor) const {
+      auto rv = tensor.R.view_on(ttg::device::Device::host());
+      auto sv = tensor.S.view_on(ttg::device::Device::host());
+      auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+      std::shared_ptr<const madness::Convolution1D<T>> conv1d = mad_ops[i].getop(d);
+      const madness::ConvolutionData1D<T>* cd_mad = conv1d->nonstandard(n, l);
+      if (!(cd_mad->R.size() == 0 && cd_mad->T.size() == 0)) {
+        copy_from_madtensor(rv(c, i), cd_mad->R);
+        copy_from_madtensor(sv(c, i), cd_mad->T); // S = T for us
+      }
     }
 
 
