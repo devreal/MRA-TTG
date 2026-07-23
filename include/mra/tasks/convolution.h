@@ -120,7 +120,7 @@ namespace mra {
     // ever group into one launch.
     std::shared_ptr<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>> conv_pool;
     if (enable_conv_batching) {
-      conv_pool = std::make_shared<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices());
+      conv_pool = std::make_shared<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
     }
 #else
     // BatchPoolRegistry only exists on device builds; this placeholder only
