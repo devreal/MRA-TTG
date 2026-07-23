@@ -444,31 +444,19 @@ namespace mra {
     std::shared_ptr<const ConvolutionData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
       auto key = Key<NDIM>(0, n, disp.translation());
       auto agg_ticket = _datacache.claim(key);
-      if (!agg_ticket.owner) {
-        // Someone else is already computing (or has finished) this exact aggregate;
-        // nothing to split further for an identical request, so just wait for it.
-        return _datacache.acquire(agg_ticket);
-      }
+
       /**
-       * We are responsible for computing the aggregate data for this Level/displacement.
-       * We generate the data out of MADNESS and store our own version of it.
-       * Start with assembling the ConvolutionData1D for each dimension. The 1D data is
-       * cached so it may be reused across displacements/dimensions.
-       *
-       * This happens in three passes over the NDIM dimensions rather than one:
-       *  1. claim (get-or-create) every per-dimension cache entry, and let whichever
-       *     call is first to claim a given (level, dimension, translation) allocate its
-       *     tensor and the flat list of (function, term) work items;
-       *  2. contribute to every dimension we hold a ticket for -- grabbing and computing
-       *     whatever work items nobody else has claimed yet;
-       *  3. acquire the (by then likely-finished) result for each dimension, blocking
-       *     only on whatever items are still in flight.
-       * Splitting this way means that when several tasks need overlapping (or the same)
-       * (level, dimension, translation) 1D tensors concurrently, they all pitch in on the
-       * (function, term) loop that fills each tensor instead of one task running that
-       * whole loop alone while the others just sit in a spin-wait on the result.
+       * Claim and contribute to the per-dimension 1D tensors *before* checking whether
+       * we own the aggregate entry. _op1d_cache is keyed only by (level, dimension,
+       * translation), independent of which aggregate call is asking for it, so a task
+       * that loses the race for this exact (level, displacement) aggregate can still
+       * usefully help fill in the very same 1D tensors the winner needs -- instead of
+       * only ever spin-waiting on a result it played no part in computing. Concretely:
+       * if several tasks call get_op() for the same displacement concurrently, all of
+       * them now pitch in on the (function, term) loop below; only the single winner
+       * goes on to acquire() the finished tensors, run the norms computation and
+       * publish the aggregate.
        */
-      auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
       std::array<typename op1d_cache_type::Ticket, NDIM> op1d_tickets;
       for (Dimension d = 0; d < NDIM; ++d) {
         op1d_tickets[d] = _op1d_cache.claim(detail::Op1DKey(n, d, disp.translation()[d]));
@@ -483,6 +471,20 @@ namespace mra {
           compute_op1d_entry(n, l, d, c, i, tensor);
         });
       }
+
+      if (!agg_ticket.owner) {
+        // Someone else is already assembling (or has finished) this exact aggregate.
+        // We've already helped compute whatever 1D pieces it needs above; nothing more
+        // we can contribute for an identical request, so just wait for the publish.
+        return _datacache.acquire(agg_ticket);
+      }
+
+      /**
+       * We are responsible for computing the aggregate data for this Level/displacement.
+       * The 1D tensors were already claimed/contributed to above; acquire() blocks only
+       * on whatever items (if any) are still being finished by other contributors.
+       */
+      auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
       for (Dimension d = 0; d < NDIM; ++d) {
         data->data[d] = _op1d_cache.acquire(op1d_tickets[d]);
       }
