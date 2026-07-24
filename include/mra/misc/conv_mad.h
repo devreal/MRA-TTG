@@ -205,6 +205,7 @@ namespace mra {
       struct Ticket {
         cellptr_type cell;
         bool owner = false;
+        bool ready = false;
       };
 
       /**
@@ -219,7 +220,7 @@ namespace mra {
         bool owner = cell->state.compare_exchange_strong(expected, CacheEntryState::Requested,
                                                            std::memory_order_acq_rel,
                                                            std::memory_order_acquire);
-        return Ticket{std::move(cell), owner};
+        return Ticket{std::move(cell), owner, expected == CacheEntryState::Ready};
       }
 
       /// Publishes the computed value for a ticket obtained via claim() with owner == true.
@@ -314,6 +315,7 @@ namespace mra {
       struct Ticket {
         cellptr_type cell;
         bool creator = false;
+        bool ready = false;
       };
 
       /// Claims (get-or-creates) the entry for `key`. `creator == true` means this call
@@ -324,7 +326,7 @@ namespace mra {
         bool creator = cell->state.compare_exchange_strong(expected, Op1DCellState::Initializing,
                                                              std::memory_order_acq_rel,
                                                              std::memory_order_acquire);
-        return Ticket{std::move(cell), creator};
+        return Ticket{std::move(cell), creator, expected == Op1DCellState::Ready};
       }
 
       /// Creator-only: installs the shared tensor and its flat list of (c,i) work items,
@@ -463,6 +465,11 @@ namespace mra {
     std::shared_ptr<const ConvolutionData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {
       auto key = Key<NDIM>(0, n, disp.translation());
       auto agg_ticket = _datacache.claim(key);
+
+      if (agg_ticket.ready) {
+        // Someone else already finished this exact aggregate; just return it.
+        return _datacache.acquire(agg_ticket);
+      }
 
       /**
        * Claim and contribute to the per-dimension 1D tensors *before* checking whether
