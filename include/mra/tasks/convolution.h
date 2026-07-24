@@ -532,9 +532,7 @@ namespace mra {
                 nused++;
                 continue;
               }
-              //if (std::find(contributions.begin(), contributions.end(), detail::KeyPair<NDIM>{key, neighbor_key}) != contributions.end()) {
-              //  continue; // we have already added this contribution
-              //}
+
               auto op_data = op.get_op(key.level(), disp_key);
               auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
               auto opnorm = opnorm_view(opnorm_index, 0, 0, (int)NormId::Opnorm);
@@ -542,7 +540,9 @@ namespace mra {
               //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
               if (opnorm * cnorm_view(i) > tol / fac) {
                 assert(neighbor_key.level() == key.level() && "neighbor key should be at the same level as the current key");
-                contributions.push_back({key, neighbor_key});
+                if (std::find(contributions.begin(), contributions.end(), detail::KeyPair<NDIM>{key, neighbor_key}) == contributions.end()) {
+                  contributions.push_back({key, neighbor_key});
+                }
                 nused++;
               }
             }
