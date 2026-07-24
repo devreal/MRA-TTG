@@ -661,8 +661,6 @@ namespace mra {
         auto empty_node_view = empty_node.coeffs().current_view();
         auto resnorms_view = resnorms.current_view();
 
-        auto sparseman = make_sparsity_manager(out);
-        sparseman.populate_device_sparsity();
 #ifndef MRA_ENABLE_HOST
         if (enable_conv_batching) {
           // shell0's kernel roles: "in" is always the empty accumulator, "f" is the
@@ -671,13 +669,19 @@ namespace mra {
           // batching is unrestricted now (any level, any displacement), so a
           // batch mate may have entirely different operator data -- see the
           // batching-support comment on ConvolutionBatchArg in kernels/convolution.h.
+          // out.coeffs() (the real tensor, not just its view) travels through
+          // too, so the batch leader can read its sparsity and aggregate every
+          // member's bytes into one pinned buffer + one H2D copy instead of
+          // each member pushing its own via SparsityManager here.
           auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
-                                                                  transr, transs, opnorms_view, tol, at);
+                                                                  transr, transs, opnorms_view, tol, at, out.coeffs());
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
           detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac);
         } else
 #endif // MRA_ENABLE_HOST
         {
+          auto sparseman = make_sparsity_manager(out);
+          sparseman.populate_device_sparsity();
           submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
                                               in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
@@ -863,21 +867,25 @@ namespace mra {
       auto in_node_view = in_node.coeffs().current_view();
       auto resnorms_view = resnorms.current_view();
 
-      auto sparseman = make_sparsity_manager(out);
-      sparseman.populate_device_sparsity();
 #ifndef MRA_ENABLE_HOST
       if (enable_conv_batching) {
         // transr/transs/opnorms_view/tol/at also travel through coop() since
         // batching is unrestricted now (any level, any displacement), so a
         // batch mate may have entirely different operator data -- see the
         // batching-support comment on ConvolutionBatchArg in kernels/convolution.h.
+        // out.coeffs() (the real tensor, not just its view) travels through
+        // too, so the batch leader can read its sparsity and aggregate every
+        // member's bytes into one pinned buffer + one H2D copy instead of
+        // each member pushing its own via SparsityManager here.
         auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
-                                                                       transr, transs, opnorms_view, tol, at);
+                                                                       transr, transs, opnorms_view, tol, at, out.coeffs());
         // followers: the leader's batched launch already wrote our slice of out/resnorms.
         detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac);
       } else
 #endif // MRA_ENABLE_HOST
       {
+        auto sparseman = make_sparsity_manager(out);
+        sparseman.populate_device_sparsity();
         submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,

@@ -2,11 +2,37 @@
 #define MRA_SPARSITY_MANAGER_H
 
 
+#include "mra/misc/allocator.h"
 #include "mra/tensor/sparsity.h"
+#include "mra/tensor/tensor.h"
+#include "mra/tensor/functionnode.h"
 
 #include <ttg/parsec/devicefunc.h>
 
+#ifndef MRA_ENABLE_HOST
+#include "mra/misc/device_batch_pool.h"
+#endif // !MRA_ENABLE_HOST
+
 namespace mra {
+
+#ifndef MRA_ENABLE_HOST
+  namespace detail {
+    /**
+     * Process-wide, per-device pool of pinned staging buffers shared by every
+     * SparsityManager/MockTensor construction, so that pushing a tensor's
+     * sparsity bytes to a device no longer allocates a fresh pinned buffer
+     * (contending on TTG's single global pinned-allocator mutex) on every
+     * single task invocation. Sized in units of SparsityState (1 byte per
+     * function); BatchPool grows slots on demand and reuses a slot once its
+     * previous copy has completed (non-blocking event query), exactly like
+     * it already does for ConvolutionBatchArg in mra/tasks/convolution.h.
+     */
+    inline BatchPoolRegistry<SparsityState>& sparsity_pool_registry() {
+      static BatchPoolRegistry<SparsityState> registry(ttg::device::num_devices(), /* max_batch_size unused here */ 1);
+      return registry;
+    }
+  } // namespace detail
+#endif // !MRA_ENABLE_HOST
 
   /**
    * Manager for sparsity information of a tensor.
@@ -39,6 +65,17 @@ namespace mra {
       MockTensor& operator=(const MockTensor&) = delete;
       MockTensor& operator=(MockTensor&&) = default;
 
+#ifndef MRA_ENABLE_HOST
+      MockTensor(TensorType& tensor)
+      : sparsity_type()
+      , m_tensor(tensor)
+      , m_pool(&detail::sparsity_pool_registry().get(ttg::device::current_device()))
+      , m_slot(&m_pool->acquire(byte_size()))
+      {
+        m_slot->host_args.resize(byte_size());
+        this->apply_sparsity(m_tensor.sparsity());
+      }
+#else
       MockTensor(TensorType& tensor)
       : sparsity_type()
       , m_tensor(tensor)
@@ -46,12 +83,13 @@ namespace mra {
       {
         this->apply_sparsity(m_tensor.sparsity());
       }
+#endif // !MRA_ENABLE_HOST
 
       void populate_device_sparsity(ttg::device::Device device = ttg::device::current_device()) {
         if (device.is_host()) {
           std::memcpy(m_tensor.buffer().host_ptr(),
-                      m_buffer.host_ptr(),
-                      sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type));
+                      storage(),
+                      byte_size());
         } else {
           // sanity checks
           assert(m_tensor.buffer().is_current_on(device));
@@ -61,10 +99,13 @@ namespace mra {
           parsec_device_gpu_module_t *device_module = ttg_parsec::detail::parsec_ttg_caller->dev_ptr->device;
           int ret = device_module->memcpy_async(device_module, ttg_parsec::detail::parsec_ttg_caller->dev_ptr->stream,
                                                 const_cast<value_type*>(m_tensor.buffer().device_ptr_on(device)),
-                                                m_buffer.host_ptr(),
-                                                sparsity_traits::required_space(m_tensor.dims()) * sizeof(typename sparsity_traits::value_type),
+                                                storage(),
+                                                byte_size(),
                                                 parsec_device_gpu_transfer_direction_h2d);
           if (ret != PARSEC_SUCCESS) throw std::runtime_error("Failed to copy sparsity data from host to device!");
+#ifndef MRA_ENABLE_HOST
+          m_pool->mark_submitted(*m_slot, ttg::device::current_stream());
+#endif // !MRA_ENABLE_HOST
         }
       }
 
@@ -76,13 +117,29 @@ namespace mra {
         return m_tensor.dim(d);
       }
 
+#ifndef MRA_ENABLE_HOST
+      value_type* storage() {
+        return reinterpret_cast<value_type*>(m_slot->host_args.data());
+      }
+#else
       value_type* storage() {
         return m_buffer.host_ptr();
       }
+#endif // !MRA_ENABLE_HOST
 
     private:
+      /* number of bytes needed to store this tensor's sparsity bitfield */
+      std::size_t byte_size() const {
+        return sparsity_traits::required_space(m_tensor.dims()) * sizeof(value_type);
+      }
+
       TensorType& m_tensor;
+#ifndef MRA_ENABLE_HOST
+      detail::BatchPool<detail::SparsityState>* m_pool = nullptr;
+      typename detail::BatchPool<detail::SparsityState>::slot_t* m_slot = nullptr;
+#else
       ttg::Buffer<value_type, DeviceAllocator<value_type>> m_buffer;
+#endif // !MRA_ENABLE_HOST
     };
 
     template<std::size_t... Is>

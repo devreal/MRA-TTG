@@ -222,8 +222,6 @@ namespace mra
                                         in4.coeffs().current_view(), in5.coeffs().current_view(), in6.coeffs().current_view(), in7.coeffs().current_view()};
 
           auto in_view = in.coeffs().current_view();
-          auto sparseman = make_sparsity_manager(d, p);
-          sparseman.populate_device_sparsity();
 
           auto coeffs_view = p.coeffs().current_view();
           auto rcoeffs_view = d.current_view();
@@ -235,13 +233,21 @@ namespace mra
             // key.level() -- see the batching-support comment in
             // kernels/compress.h. in_view/coeffs_view/rcoeffs_view/input_views
             // keep the exact roles submit_compress_kernel uses below.
+            // p.coeffs()/d (the real tensors, not just their views) travel
+            // through too, so the batch leader can read their sparsity and
+            // aggregate every member's bytes into one pinned buffer + one
+            // H2D copy instead of each member pushing its own via
+            // SparsityManager here.
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
-                                                                    tmp_scratch, d_sumsq, input_views);
+                                                                    tmp_scratch, d_sumsq, input_views,
+                                                                    p.coeffs(), d);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
             detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view);
           } else
 #endif // MRA_ENABLE_HOST
           {
+            auto sparseman = make_sparsity_manager(d, p);
+            sparseman.populate_device_sparsity();
             submit_compress_kernel(key, N, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
                                   tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
                                   ttg::device::current_stream());

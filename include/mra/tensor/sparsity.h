@@ -43,6 +43,23 @@ namespace mra {
       return static_cast<SparsityState>(~static_cast<std::uint8_t>(a));
     }
 
+    /**
+     * Converts a sparsity object (anything exposing is_nonzero()/is_allocated(),
+     * e.g. RangeSparsityBase or SparsityInfo) into the SparseArrayBase inline
+     * bitfield byte encoding, written directly into an arbitrary destination.
+     * Used to avoid detouring through a MockTensor when the destination buffer
+     * is already known (the tensor's own host buffer, or a pooled staging
+     * buffer aggregating a whole device-kernel-launch batch).
+     */
+    template<typename SparsityT>
+    void sparsity_to_bytes(const SparsityT& s, SparsityState* dest, size_type n) {
+      for (size_type i = 0; i < n; ++i) {
+        dest[i] = s.is_nonzero(i) ? SparsityState::NONZERO_ALLOCATED
+                : s.is_allocated(i) ? SparsityState::ALLOCATED
+                : SparsityState::SPARSE;
+      }
+    }
+
   } // namespace detail
 
   /**
@@ -273,6 +290,16 @@ namespace mra {
     SCOPE void set_deallocated(std::size_t i) {
       unit_type& byte = sparsity_data()[i];
       byte &= ~static_cast<unit_type>(detail::SparsityState::ALLOCATED);
+    }
+
+    /**
+     * Directly writes the raw sparsity state at index i. Device-callable
+     * (unlike apply_sparsity()/remove(), which are host-only); used to
+     * scatter pre-aggregated sparsity bytes into this tensor's own inline
+     * bitfield (e.g. from a batch-wide staging buffer).
+     */
+    SCOPE void set_state(std::size_t i, detail::SparsityState s) {
+      sparsity_data()[i] = s;
     }
 
     SCOPE void set_deallocated_all() {

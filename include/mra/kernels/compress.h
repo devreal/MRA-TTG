@@ -8,6 +8,7 @@
 #include "mra/kernels/transform.h"
 #include "mra/ops/functions.h"
 #include "mra/misc/device_batch_pool.h"
+#include "mra/tensor/sparsitymanager.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
 #include "mra/misc/types.h"
@@ -198,20 +199,22 @@ namespace mra {
       T*,                                                                 // tmp: this member's own scratch base
       T*,                                                                 // d_sumsq: this member's own scratch base
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // in_views (the 8 children)
-      size_type                                                          // n: number of functions this member contributes
+      size_type,                                                          // n: number of functions this member contributes
+      size_type                                                          // sparsity_offset: base of this member's [p_in bytes][result_in bytes] span in the aggregated sparsity staging buffer (see compress_scatter_sparsity_kernel)
     >;
 
     /* Named indices into CompressBatchArg, so callers don't sprinkle magic
      * std::get<N> numbers across the kernel, submit function, and marshaling loop. */
     struct CompressBatchArgIdx {
-      static constexpr std::size_t key       = 0;
-      static constexpr std::size_t node_in   = 1;
-      static constexpr std::size_t p_in      = 2;
-      static constexpr std::size_t result_in = 3;
-      static constexpr std::size_t tmp       = 4;
-      static constexpr std::size_t d_sumsq   = 5;
-      static constexpr std::size_t in_views  = 6;
-      static constexpr std::size_t n         = 7;
+      static constexpr std::size_t key             = 0;
+      static constexpr std::size_t node_in         = 1;
+      static constexpr std::size_t p_in            = 2;
+      static constexpr std::size_t result_in       = 3;
+      static constexpr std::size_t tmp             = 4;
+      static constexpr std::size_t d_sumsq         = 5;
+      static constexpr std::size_t in_views        = 6;
+      static constexpr std::size_t n               = 7;
+      static constexpr std::size_t sparsity_offset = 8;
     };
 
     /**
@@ -249,6 +252,38 @@ namespace mra {
       }
     }
 
+    /**
+     * Scatters pre-aggregated per-member sparsity bytes into each member's own
+     * p_in/result_in tensors' inline bitfields. The bytes were computed
+     * host-side (from each member's real p/result Tensors, via
+     * detail::sparsity_to_bytes in submit_compress_batch_leader below),
+     * assembled into one contiguous pinned buffer -- p_in's n bytes followed
+     * by result_in's n bytes, per member -- and copied to `sparsity` with a
+     * single H2D transfer, replacing what would otherwise be one
+     * SparsityManager/MockTensor allocation + copy per member per tensor.
+     * Launched on the same stream immediately before compress_kernel_batched,
+     * so stream ordering alone guarantees the bytes are in place first.
+     */
+    template <typename T, Dimension NDIM>
+    GLOBALSCOPE void compress_scatter_sparsity_kernel(
+      CompressBatchArg<T, NDIM>* args,        // device ptr, size == gridDim.x
+      const SparsityState* sparsity)          // device ptr, aggregated batch-wide staging buffer
+    {
+      using idx = CompressBatchArgIdx;
+
+      const size_type member = blockIdx.x;
+      auto& arg = args[member];
+      auto& p_in = std::get<idx::p_in>(arg);
+      auto& result_in = std::get<idx::result_in>(arg);
+      const size_type n = std::get<idx::n>(arg);
+      const size_type base = std::get<idx::sparsity_offset>(arg);
+
+      for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
+        p_in.set_state(i, sparsity[base + i]);
+        result_in.set_state(i, sparsity[base + n + i]);
+      }
+    }
+
   } // namespace detail
 
   /**
@@ -256,12 +291,16 @@ namespace mra {
    * behalf of every member already marshaled into slot.host_args (by the
    * caller, via detail::submit_compress_batch_leader below), sharing only
    * (K, is_ns, hgT) across the whole batch. Grid is (max_n, num_members, 1)
-   * -- see compress_kernel_batched's comment for why.
+   * -- see compress_kernel_batched's comment for why. `sparsity_pool`/
+   * `sparsity_slot` carry the batch-wide aggregated sparsity bytes assembled
+   * by submit_compress_batch_leader; see compress_scatter_sparsity_kernel.
    */
   template<typename T, Dimension NDIM>
   void submit_compress_kernel_batched(
     detail::BatchPool<detail::CompressBatchArg<T, NDIM>>& pool,
     typename detail::BatchPool<detail::CompressBatchArg<T, NDIM>>::slot_t& slot,
+    detail::BatchPool<detail::SparsityState>& sparsity_pool,
+    typename detail::BatchPool<detail::SparsityState>::slot_t& sparsity_slot,
     size_type K,
     bool is_ns,
     const concepts::TensorView<2> auto& hgT,
@@ -278,10 +317,23 @@ namespace mra {
 #if defined(MRA_ENABLE_CUDA)
     detail::check_cuda_rt(cudaMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
                                           cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
+    detail::check_cuda_rt(cudaMemcpyAsync(sparsity_slot.dev_args, sparsity_slot.host_args.data(),
+                                          sparsity_slot.host_args.size()*sizeof(detail::SparsityState),
+                                          cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
 #elif defined(MRA_ENABLE_HIP)
     detail::check_hip_rt(hipMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
                                         hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
+    detail::check_hip_rt(hipMemcpyAsync(sparsity_slot.dev_args, sparsity_slot.host_args.data(),
+                                        sparsity_slot.host_args.size()*sizeof(detail::SparsityState),
+                                        hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
 #endif
+
+    // Scatter each member's aggregated sparsity bytes into its own p_in/
+    // result_in tensors' inline bitfields; same stream as the main kernel
+    // below, so stream ordering guarantees it completes first.
+    CALL_KERNEL((detail::compress_scatter_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
+                (slot.dev_args, sparsity_slot.dev_args));
+    checkSubmit();
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
@@ -292,6 +344,7 @@ namespace mra {
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
+    sparsity_pool.mark_submitted(sparsity_slot, stream);
   }
 
   namespace detail {
@@ -303,6 +356,16 @@ namespace mra {
      * code below is worth sharing), marshal every member into the current
      * device's pool and submit one combined kernel launch if this task is the
      * batch's leader.
+     *
+     * Sparsity: each member also passes its own real p/result Tensors
+     * (get<7>()/get<8>(), not just their views) through coop(), so this
+     * leader can read their RangeSparsityBase-backed sparsity directly (no
+     * per-member SparsityManager/MockTensor allocation) and assemble every
+     * member's [p bytes][result bytes] span into one pinned staging buffer
+     * (from the same process-wide sparsity pool used by SparsityManager, see
+     * sparsitymanager.h), copied to the device in a single transfer by
+     * submit_compress_kernel_batched instead of one small H2D copy per
+     * member per tensor.
      */
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_compress_batch_leader(
@@ -318,6 +381,19 @@ namespace mra {
       auto& pool = registry.get(ttg::device::current_device());
       auto& slot = pool.acquire(registry.get_max_batch_size()); // allocate space for full batch
       slot.host_args.clear();
+
+      // First pass: total sparsity bytes needed across the whole batch (2*n
+      // per member: p's bytes then result's bytes), so the pinned staging
+      // buffer below is acquired/resized exactly once.
+      size_type total_sparsity_bytes = 0;
+      for (std::size_t m = 0; m < nb; ++m) {
+        total_sparsity_bytes += 2 * static_cast<size_type>(batch[m].template get<3>().dim(0));
+      }
+      auto& sparsity_pool = sparsity_pool_registry().get(ttg::device::current_device());
+      auto& sparsity_slot = sparsity_pool.acquire(total_sparsity_bytes);
+      sparsity_slot.host_args.resize(total_sparsity_bytes);
+
+      size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_key       = batch[m].template get<0>();
         auto& m_node_in   = batch[m].template get<1>();
@@ -326,11 +402,20 @@ namespace mra {
         auto& m_tmp       = batch[m].template get<4>();
         auto& m_d_sumsq   = batch[m].template get<5>();
         auto& m_in_views  = batch[m].template get<6>();
+        auto& m_p_tensor      = batch[m].template get<7>(); // real p tensor, for its RangeSparsityBase sparsity
+        auto& m_result_tensor = batch[m].template get<8>(); // real result (d) tensor
+        const size_type n = static_cast<size_type>(m_result_in.dim(0));
+
+        sparsity_to_bytes(m_p_tensor.sparsity(), &sparsity_slot.host_args[sparsity_offset], n);
+        sparsity_to_bytes(m_result_tensor.sparsity(), &sparsity_slot.host_args[sparsity_offset + n], n);
+
         slot.host_args.emplace_back(m_key, m_node_in, m_p_in, m_result_in,
                                     m_tmp.current_device_ptr(), m_d_sumsq.current_device_ptr(),
-                                    m_in_views, static_cast<size_type>(m_result_in.dim(0)));
+                                    m_in_views, n, sparsity_offset);
+        sparsity_offset += 2 * n;
       }
-      submit_compress_kernel_batched<T, NDIM>(pool, slot, K, is_ns, hgT, ttg::device::current_stream());
+      submit_compress_kernel_batched<T, NDIM>(pool, slot, sparsity_pool, sparsity_slot,
+                                              K, is_ns, hgT, ttg::device::current_stream());
     }
 
   } // namespace detail

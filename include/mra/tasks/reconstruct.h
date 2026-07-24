@@ -226,9 +226,6 @@ namespace mra{
 #endif
 
 
-      auto sparseman = make_sparsity_manager(r_arr, result);
-      sparseman.populate_device_sparsity();
-
       // pick apart the std::array
       auto r_ptrs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
                         return std::array{(r_arr[Is].coeffs().current_view())...};
@@ -243,13 +240,20 @@ namespace mra{
         // key.level() -- see the batching-support comment in
         // kernels/reconstruct.h. node_view/from_parent_view/r_ptrs/result_view
         // keep the exact roles submit_reconstruct_kernel uses below.
+        // r_arr/result (the real tensors, not just their views) travel
+        // through too, so the batch leader can read their sparsity and
+        // aggregate every member's bytes into one pinned buffer + one H2D
+        // copy instead of each member pushing its own via SparsityManager here.
         auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view, tmp_scratch,
-                                                                from_parent_view, r_ptrs, result_view);
+                                                                from_parent_view, r_ptrs, result_view,
+                                                                r_arr, result);
         // followers: the leader's batched launch already wrote our slice of r_arr/result.
         detail::submit_reconstruct_batch_leader<T, NDIM>(batch, *reconstruct_pool, K, accumulate_NS, hg_view);
       } else
 #endif // MRA_ENABLE_HOST
       {
+        auto sparseman = make_sparsity_manager(r_arr, result);
+        sparseman.populate_device_sparsity();
         submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
                                   r_ptrs, result_view, tmp_scratch.current_device_ptr(),
                                   ttg::device::current_stream());
