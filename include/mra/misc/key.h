@@ -56,6 +56,16 @@ namespace mra {
         : b(b), n(n), l({0})
         { }
 
+        // Construct from batch and MADNESS key
+        Key(Batch b, const madness::Key<NDIM>& mad_key)
+        : b(b)
+        , n(mad_key.level())
+        {
+            for (Dimension d = 0; d < NDIM; ++d) {
+                l[d] = mad_key.translation()[d];
+            }
+        }
+
         /// Assignment default is OK
         Key& operator=(const Key<NDIM>& other) = default;
 

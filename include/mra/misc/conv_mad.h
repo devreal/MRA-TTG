@@ -439,6 +439,25 @@ namespace mra {
     }
 
     /**
+     * Returns the number of operators
+     */
+    size_type count() const {
+      return m_mad_conv_sep_vec.size();
+    }
+
+    /**
+     * Returns the vector of displacements for a given operator and level.
+     * NOTE: Returns the displacements as MADNESS keys, not MRA keys.
+     */
+    const auto& get_mad_displacements(int c, Level n) const {
+      return m_mad_conv_sep_vec[c]->get_disp(n);
+    }
+
+    const auto& get_mad_op(int c) const {
+      return m_mad_conv_sep_vec[c];
+    }
+
+    /**
      * Assembles ConvolutionData for the level and displacement.
      */
     std::shared_ptr<const ConvolutionData<T, NDIM>> get_op(Level n, Key<NDIM> disp) const {

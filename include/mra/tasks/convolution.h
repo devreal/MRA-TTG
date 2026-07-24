@@ -2,6 +2,7 @@
 #define MRA_TASKS_CONVOLUTION_H
 
 #include <iostream>
+#include <optional>
 #include <ttg.h>
 #include "mra/kernels.h"
 #include "mra/misc/batch_size.h"
@@ -478,46 +479,74 @@ namespace mra {
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
-          /**
-           * TODO: take the displacements from the MADNESS SeparatedConvolution operator.
-           */
-          auto for_each = [&](auto&& fn){
-            for (int d0 = -4; d0 <= 4; ++d0) {
-              for (int d1 = -4; d1 <= 4; ++d1) {
-                for (int d2 = -4; d2 <= 4; ++d2) {
-                  if (d0 == 0 && d1 == 0 && d2 == 0) {
-                    continue; // skip self contribution since it is handled separately in level0
-                  }
-                  auto disp_key = mra::Key<NDIM>(key.batch(), 0, {d0, d1, d2});
-                  mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
-                  if (!neighbor_key.is_valid() || neighbor_key == key) {
-                    continue;
-                  }
-                  fn(disp_key, neighbor_key);
-                }
-              }
-            }
-          };
 
-          /**
-           * Assemble our list of contributions.
-           */
-          for_each([&](const auto& disp_key, const auto& neighbor_key){
-            auto op_data = op.get_op(key.level(), disp_key);
-            auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
-            for (int i = 0; i < N; ++i) {
-              // we may have either one operator for all functions or one operator per function
-              auto opnorm = (opnorm_view.dim(0) == 1) ? opnorm_view(0, 0, 0, (int)NormId::Opnorm)
-                                                      : opnorm_view(i, 0, 0, (int)NormId::Opnorm);
+          const auto real_distance_squared = [&](const auto& mad_op, const auto &displacement)
+              -> double {
+            return displacement.real_distsq_bc(mad_op->lattice_summed(), madness::FunctionDefaults<NDIM>::get_cell_width());
+          };
+          const auto lattice_distance_squared = [&](const auto& mad_op, const auto &displacement)
+              -> std::uint64_t {
+            return displacement.distsq_bc(mad_op->lattice_summed());
+          };
+          for (int i = 0; i < N; ++i) {
+            // we may have either one operator for all functions or one operator per function
+            int opnorm_index = (op.count() == 1) ? 0 : i;
+            // safe because get_disp returns a reference that remains valid
+            const auto& mad_disps = op.get_mad_displacements(opnorm_index, key.level());
+            const auto& mad_op = op.get_mad_op(opnorm_index);
+            int nused = 1, nvalid = 1;
+            std::optional<double> real_last_distsq;
+            std::optional<std::uint64_t> lattice_last_distsq;
+            for (auto& mad_disp : mad_disps) {
+
+              // Screen out shells. We assume shells are grouped into shells so that the operator decays with shell index.
+              // Shells are indexed by least distance from box to the central box.
+              // Cells touching so much as a corner of the central box are further grouped by their lattice distance.
+              // N.B. lattice-summed decaying kernel is periodic (i.e. does decay w.r.t. r), so loop over shells of displacements sorted by distances modulated by periodicity (Key::distsq_bc)
+              const auto real_distsq = real_distance_squared(mad_op, mad_disp);
+              const std::uint64_t lattice_distsq = real_distsq ? 0 : lattice_distance_squared(mad_op, mad_disp);
+              if (!real_last_distsq.has_value() ||
+                  !madness::nearlyEqual(real_distsq, *real_last_distsq) ||
+                  (madness::nearlyEqual(*real_last_distsq, 0) && lattice_distsq != *lattice_last_distsq)) { // Moved to next shell of neighbors
+                if (nvalid > 0 && nused == 0 && (real_distsq > 0 || lattice_distsq > 1)) {
+                  // Have at least done the input box and all first
+                  // nearest neighbors, and none of the last set
+                  // of neighbors made significant contributions.  Thus,
+                  // assuming monotonic decrease, we are done.
+                  break;
+                }
+                nused = 0;
+                nvalid = 0;
+                real_last_distsq = real_distsq;
+                // After real_last_distsq > 0, we stop caring about keeping lattice_last_distsq up-to-date.
+                lattice_last_distsq = real_distsq ? std::optional<std::uint64_t>{} : lattice_distsq;
+              }
+              // Convert MADNESS key to MRA key
+              auto disp_key = mra::Key<NDIM>(0, mad_disp);
+              mra::Key<NDIM> neighbor_key = key.neighbor(disp_key);
+              if (!neighbor_key.is_valid()) {
+                continue; // neighbor is outside the domain
+              }
+              nvalid++;
+              if (key == neighbor_key){ // shell 0 is handled by the shell0 task, so we don't need to add it to the contributions
+                nused++;
+                continue;
+              }
+              //if (std::find(contributions.begin(), contributions.end(), detail::KeyPair<NDIM>{key, neighbor_key}) != contributions.end()) {
+              //  continue; // we have already added this contribution
+              //}
+              auto op_data = op.get_op(key.level(), disp_key);
+              auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
+              auto opnorm = opnorm_view(opnorm_index, 0, 0, (int)NormId::Opnorm);
               //std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
               //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
               if (opnorm * cnorm_view(i) > tol / fac) {
+                assert(neighbor_key.level() == key.level() && "neighbor key should be at the same level as the current key");
                 contributions.push_back({key, neighbor_key});
-                break; // if any of the coefficients pass the threshold we add the contribution
+                nused++;
               }
             }
-          });
-
+          }
           //std::cout << "SCREEN " << key << " computed contributions " << contributions.size() << std::endl;
         }
 
