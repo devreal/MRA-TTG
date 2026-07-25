@@ -40,9 +40,17 @@ namespace mra {
 
       auto operator<=>(const KeyPair&) const = default;
       auto hash() const {
-        HashValue hashvalue = source.level() ^ (static_cast<HashValue>(source.batch())<<48);
-        for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | source.translation()[d];
-        for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | dest.translation()[d];
+        // Combine every distinguishing field via mulhash (rotate + multiply-XOR)
+        // instead of shift-OR: translations can need up to MAX_LEVEL (31) bits,
+        // so packing them 7 bits at a time silently overlaps/truncates data,
+        // and batch (originally placed at bit 48) gets shifted out entirely
+        // by the two translation loops (6 * 7 = 42 bit total shift).
+        HashValue hashvalue = mulhash(HashValue(0), source.batch());
+        hashvalue = mulhash(hashvalue, source.level());
+        for (Dimension d=0; d<NDIM; d++) hashvalue = mulhash(hashvalue, source.translation()[d]);
+        hashvalue = mulhash(hashvalue, dest.batch());
+        hashvalue = mulhash(hashvalue, dest.level());
+        for (Dimension d=0; d<NDIM; d++) hashvalue = mulhash(hashvalue, dest.translation()[d]);
         return hashvalue;
       }
     };

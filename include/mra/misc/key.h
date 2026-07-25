@@ -28,9 +28,13 @@ namespace mra {
 
         /// Refreshes the hash value.  Note that the default std::hash does not mix enough
         SCOPE HashValue rehash() const {
-            HashValue hashvalue = n ^ (static_cast<HashValue>(b)<<48);
-            //for (Dimension d=0; d<NDIM; d++) mulhash(hashvalue,l[d]);
-            for (Dimension d=0; d<NDIM; d++) hashvalue = (hashvalue<<7) | l[d];
+            // mulhash (rotate + multiply-XOR) avoids the truncation/overlap the old
+            // shift-OR packing suffered from once translations need >7 bits (levels
+            // beyond ~7, well within MAX_LEVEL=31) and the loss of b's bits (parked
+            // at bit 48) once NDIM shifts of 7 accumulate.
+            HashValue hashvalue = mulhash(HashValue(0), b);
+            hashvalue = mulhash(hashvalue, n);
+            for (Dimension d=0; d<NDIM; d++) hashvalue = mulhash(hashvalue, l[d]);
             return hashvalue;
         }
 
