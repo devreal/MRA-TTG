@@ -101,6 +101,24 @@ namespace mra {
     size_type m_num_functions = 0;
   };
 
+  /**
+   * Counts, over [0,N), how many indices have at least one of the given
+   * tensors/nodes non-zero. Used to size a sparsity-aware kernel launch
+   * (grid size and scratch buffer size) without materializing an index list --
+   * the mapping from a compact launch position back to the real function
+   * index is instead done device-side (see find_nth_nonzero in tensorview.h),
+   * scanning the same per-function sparsity bytes already resident on the
+   * tensor.
+   */
+  template<typename... Nodes>
+  size_type count_nonzero_any(size_type N, const Nodes&... nodes) {
+    size_type count = 0;
+    for (size_type i = 0; i < N; ++i) {
+      if ((nodes.sparsity().is_nonzero(i) || ...)) ++count;
+    }
+    return count;
+  }
+
   inline std::ostream& operator<<(std::ostream& os, const SparsityInfo& si) {
     os << "SparsityInfo(" << static_cast<const RangeSparsityBase<SparsityInfo, void>&>(si) << ")";
     return os;

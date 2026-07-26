@@ -94,7 +94,10 @@ namespace mra {
         const auto& phiT = functiondata.get_phiT();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*N;
+        /* only functions where out is non-zero get a thread-block launched,
+         * so tmp only needs scratch space for those. */
+        const size_type n_nonzero = count_nonzero_any(N, out.coeffs());
+        const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*n_nonzero;
         ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
         auto norms = FunctionNorms(name, t1, t2, out);
 
@@ -126,7 +129,7 @@ namespace mra {
         sparseman.populate_device_sparsity();
 
         submit_multiply_kernel(D, keyA, keyB, t1_view, t2_view, out_view, hgT_view, phi_view,
-          phiT_view, phibar_view, quad_x_view, N, K, tmp_device, ttg::device::current_stream());
+          phiT_view, phibar_view, quad_x_view, N, n_nonzero, K, tmp_device, ttg::device::current_stream());
 
         norms.compute();
 #ifndef MRA_ENABLE_HOST

@@ -637,12 +637,20 @@ namespace mra {
         out.set_ns();
         mra::apply_leaf_info(out, in_node);
 
-        DenseTensor<T, 1> resnorms(N, TempScope);
+        /* only functions where out is non-zero get a thread-block launched, so
+         * pre-fill resnorms with 0 -- the entries that stay skipped need a
+         * defined value (matching the norm the kernel used to write for them
+         * directly) since the "empty" decision below reads all N of them, and
+         * scope::SyncIn (rather than TempScope/Allocate) ensures this host-side
+         * fill actually reaches the device copy the kernel reads/writes. */
+        DenseTensor<T, 1> resnorms(N, ttg::scope::SyncIn);
+        std::fill(resnorms.buffer().host_ptr(), resnorms.buffer().host_ptr() + N, T(0));
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N, TempScope);
+        const size_type n_nonzero = count_nonzero_any(N, out.coeffs());
+        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -690,7 +698,7 @@ namespace mra {
         {
           auto sparseman = make_sparsity_manager(out);
           sparseman.populate_device_sparsity();
-          submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
+          submit_convolution_kernel<T, NDIM>(key, key-key, K, N, n_nonzero, fac, tol, /*in_node_view*/ empty_node_view,
                                               in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
         }
@@ -845,12 +853,20 @@ namespace mra {
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
 
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N, TempScope);
+      /* only functions where out is non-zero get a thread-block launched, so
+       * tmp only needs scratch space for those. */
+      const size_type n_nonzero = count_nonzero_any(N, out.coeffs());
+      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
       if (last_key) {
-        resnorms =  DenseTensor<T, 1>(N, TempScope);
+        /* pre-fill with 0: the "empty" decision below reads all N entries, but
+         * only n_nonzero of them get a thread-block (see shell0_tt's resnorms
+         * for the full rationale); scope::SyncIn ensures this host fill reaches
+         * the device copy the kernel reads/writes. */
+        resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncIn);
+        std::fill(resnorms.buffer().host_ptr(), resnorms.buffer().host_ptr() + N, T(0));
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
@@ -894,7 +910,7 @@ namespace mra {
       {
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
-        submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
+        submit_convolution_kernel<T, NDIM>(key, displacement, K, N, n_nonzero, fac, tol, in_node_view,
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,
                                             tmp.current_device_ptr(), ttg::device::current_stream());

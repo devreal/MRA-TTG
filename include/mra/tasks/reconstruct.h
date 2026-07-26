@@ -85,7 +85,10 @@ namespace mra{
                                             const mra::FunctionsCompressedNode<T, NDIM>& node,
                                             const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       size_type N = fns->num_functions(key);
-      const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*N;
+      /* only functions where node or from_parent is non-zero get a thread-block
+       * launched, so tmp only needs scratch space for those. */
+      const size_type n_nonzero = count_nonzero_any(N, node.coeffs(), from_parent.coeffs());
+      const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*n_nonzero;
       ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
       const auto& hg = functiondata.get_hg();
       mra::KeyChildren<NDIM> children(key);
@@ -254,7 +257,7 @@ namespace mra{
       {
         auto sparseman = make_sparsity_manager(r_arr, result);
         sparseman.populate_device_sparsity();
-        submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
+        submit_reconstruct_kernel(key, N, n_nonzero, K, accumulate_NS, node_view, hg_view, from_parent_view,
                                   r_ptrs, result_view, tmp_scratch.current_device_ptr(),
                                   ttg::device::current_stream());
       }

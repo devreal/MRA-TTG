@@ -8,6 +8,7 @@ namespace mra {
   void submit_reconstruct_kernel<double, 3>(
     const Key<3>& key,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     bool accumulate_NS,
     const SparseTensorView<double, 3+1>& node,

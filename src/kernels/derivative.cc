@@ -22,6 +22,7 @@ namespace mra {
     const DenseTensorView<double, 1>& quad_x,
     double* tmp,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     const double g1,
     const double g2,

@@ -102,6 +102,7 @@ namespace mra {
       const concepts::TensorView<2> auto phibar,
       const concepts::TensorView<1> auto quad_x,
       size_type N,
+      size_type n_nonzero,
       size_type K)
     {
       SHARED DenseTensorView<const T, NDIM> nodeA, nodeB;
@@ -122,11 +123,8 @@ namespace mra {
         workspace = &block_tmp[32*K2NDIM + 2*TWOK2NDIM];
       }
 
-      for (size_type fnid = blockId; fnid < N; fnid += gridDim.x){
-        if (nodeR_view.is_zero(fnid)) {
-          /* no work to do */
-          continue;
-        }
+      for (size_type pos = blockId; pos < n_nonzero; pos += gridDim.x){
+        size_type fnid = find_nth_nonzero(N, pos, nodeR_view);
         if (is_team_lead()) {
           nodeA = nodeA_view(fnid);
           nodeB = nodeB_view(fnid);
@@ -153,6 +151,7 @@ namespace mra {
     const concepts::TensorView<2> auto& phibar,
     const concepts::TensorView<1> auto& quad_x,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     T* tmp,
     ttg::device::Stream stream)
@@ -160,9 +159,9 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     //CONFIGURE_KERNEL((detail::multiply_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::multiply_kernel, N, thread_dims, smem_size, stream,
+    CALL_KERNEL(detail::multiply_kernel, n_nonzero, thread_dims, smem_size, stream,
       (D, keyA, keyB, funcA, funcB, funcR, tmp, hgT, phi, phiT, phibar,
-        quad_x, N, K));
+        quad_x, N, n_nonzero, K));
     checkSubmit();
   }
 
@@ -182,6 +181,7 @@ namespace mra {
     const SparseTensorView<double, 2>& phibar,
     const SparseTensorView<double, 1>& quad_x,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     double* tmp,
     ttg::device::Stream stream);

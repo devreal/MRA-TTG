@@ -306,6 +306,7 @@ namespace mra {
       const concepts::TensorView<1> auto quad_x,
       T* tmp,
       size_type N,
+      size_type n_nonzero,
       size_type K,
       const T g1,
       const T g2,
@@ -320,11 +321,8 @@ namespace mra {
 
       SHARED DenseTensorView<T, NDIM> deriv_view;
       SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
-      for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
-        if (deriv.is_zero(blockid)) {
-          /* nothing to do */
-          continue;
-        }
+      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
+        size_type blockid = find_nth_nonzero(N, pos, deriv);
         if (is_team_lead()) {
           node_left_view = node_left(blockid);
           node_center_view = node_center(blockid);
@@ -356,6 +354,7 @@ namespace mra {
     const concepts::TensorView<1> auto quad_x,
     T* tmp,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     const T g1,
     const T g2,
@@ -371,9 +370,9 @@ namespace mra {
                               mTxmq_shmem_size<T>(2*K));
 
     //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::derivative_kernel, N, thread_dims, smem_size, stream,
+    CALL_KERNEL(detail::derivative_kernel, n_nonzero, thread_dims, smem_size, stream,
       (D, key, left, center, right, node_left, node_center, node_right, operators,
-        deriv, phi, phibar, quad_x, tmp, N, K, g1, g2, axis, bc_left, bc_right));
+        deriv, phi, phibar, quad_x, tmp, N, n_nonzero, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
 
@@ -396,6 +395,7 @@ namespace mra {
     const DenseTensorView<double, 1>& quad_x,
     double* tmp,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     const double g1,
     const double g2,
