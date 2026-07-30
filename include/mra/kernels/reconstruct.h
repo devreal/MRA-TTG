@@ -440,8 +440,6 @@ namespace mra {
         auto& m_r_arr_tensor    = batch[m].template get<6>(); // real array of 8 r Tensors, for their sparsity
         auto& m_result_tensor   = batch[m].template get<7>(); // real result Tensor
         const size_type n = static_cast<size_type>(m_node_view.dim(0));
-
-        const size_type n = static_cast<size_type>(m_result_tensor.dim(0));
         const size_type n_nonzero = batch[m].template get<8>();
 
         for (size_type c = 0; c < num_children; ++c) {
