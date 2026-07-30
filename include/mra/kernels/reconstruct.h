@@ -440,13 +440,9 @@ namespace mra {
         auto& m_r_arr_tensor    = batch[m].template get<6>(); // real array of 8 r Tensors, for their sparsity
         auto& m_result_tensor   = batch[m].template get<7>(); // real result Tensor
         const size_type n = static_cast<size_type>(m_node_view.dim(0));
-        // m_node_view/m_from_parent_view are TensorViews (is_zero() is inherited
-        // directly, unlike Tensor which only exposes .sparsity()), so count
-        // inline rather than via count_nonzero_any (which expects .sparsity()).
-        size_type n_nonzero = 0;
-        for (size_type i = 0; i < n; ++i) {
-          if (!m_node_view.is_zero(i) || !m_from_parent_view.is_zero(i)) ++n_nonzero;
-        }
+
+        const size_type n = static_cast<size_type>(m_result_tensor.dim(0));
+        const size_type n_nonzero = batch[m].template get<8>();
 
         for (size_type c = 0; c < num_children; ++c) {
           sparsity_to_bytes(m_r_arr_tensor[c].coeffs().sparsity(),

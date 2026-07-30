@@ -249,7 +249,7 @@ namespace mra{
         // copy instead of each member pushing its own via SparsityManager here.
         auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view, tmp_scratch,
                                                                 from_parent_view, r_ptrs, result_view,
-                                                                r_arr, result);
+                                                                r_arr, result, n_nonzero);
         // followers: the leader's batched launch already wrote our slice of r_arr/result.
         detail::submit_reconstruct_batch_leader<T, NDIM>(batch, *reconstruct_pool, K, accumulate_NS, hg_view);
       } else
