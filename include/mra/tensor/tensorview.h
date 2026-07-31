@@ -158,26 +158,6 @@ namespace mra {
     SYNCTHREADS();
   }
 
-  /**
-   * Scans indices [0,N) of the given view(s) and returns the real index of
-   * the `ordinal`-th one (0-based) where at least one view is non-zero.
-   * This lets a kernel map a compacted launch position (e.g. blockIdx.x,
-   * ranging over only the non-zero count) back to the real function index
-   * by reading the per-function sparsity bytes each view already carries --
-   * no separate host-computed index array is needed.
-   */
-  template<typename... Views>
-  SCOPE size_type find_nth_nonzero(size_type N, size_type ordinal, const Views&... views) {
-    size_type seen = 0;
-    for (size_type i = 0; i < N; ++i) {
-      if ((!views.is_zero(i) || ...)) {
-        if (seen == ordinal) return i;
-        ++seen;
-      }
-    }
-    return N; // unreachable: caller guarantees ordinal < n_nonzero
-  }
-
   namespace detail {
 
     template <typename TensorT, Dimension NDIM>

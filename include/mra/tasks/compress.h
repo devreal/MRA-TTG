@@ -184,16 +184,13 @@ namespace mra
 
           FunctionNorms<T, NDIM> norms(name, in, in0, in1, in2, in3, in4, in5, in6, in7, result);
 
-          auto& d = result.coeffs();
-          /* only functions where p or result is non-zero get a thread-block launched,
-           * so tmp only needs scratch space for those -- d_sumsq stays sized for all N
-           * since it's read back below by real function id. */
-          const size_type n_nonzero = count_nonzero_any(N, p.coeffs(), d);
-          const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*n_nonzero;
+          const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
           const auto& hgT = functiondata.get_hgT();
           /* stores sumsq for each child and for result at the end of the kernel */
           auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(N, TempScope);
+
+          auto& d = result.coeffs();
 
 #ifndef MRA_ENABLE_HOST
           auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(),
@@ -251,7 +248,7 @@ namespace mra
           {
             auto sparseman = make_sparsity_manager(d, p);
             sparseman.populate_device_sparsity();
-            submit_compress_kernel(key, N, n_nonzero, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
+            submit_compress_kernel(key, N, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
                                   tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
                                   ttg::device::current_stream());
           }

@@ -304,11 +304,6 @@ namespace mra{
      * both the unbatched convolution_kernel below and the batched
      * convolution_kernel_batched further down -- there is exactly one copy of
      * this logic to maintain instead of two near-identical grid-stride loops.
-     * tmp is sized for only the non-zero functions, so it is indexed by the
-     * compact launch position `pos` (0..n_nonzero-1); resnorms stays sized for
-     * all N (read back by real function id host-side after the kernel
-     * returns, and pre-filled with 0 there for the functions that don't get a
-     * block) and is indexed by the real, remapped `fnid`.
      */
     template <typename T, Dimension NDIM>
     DEVSCOPE void convolution_process_one(
@@ -326,46 +321,50 @@ namespace mra{
       concepts::TensorView<NDIM+1> auto& result_view,
       concepts::TensorView<1> auto& resnorms,
       T* tmp,
-      size_type pos,
-      size_type fnid)
+      size_type i)
     {
       SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, result;
       SHARED DenseTensorView<const T, NDIM> f, in;
 
-      assert(!result_view.is_zero(fnid) &&
-             "fnid must have result non-zero -- caller derives it via find_nth_nonzero");
+      if (result_view.is_zero(i)) {
+        // nothing to do
+        if (is_team_lead() && !resnorms.empty()) {
+          resnorms[i] = 0.0;
+        }
+        return;
+      }
       if (is_team_lead()) {
         const size_type K2NDIM = std::pow(K, NDIM);
         const size_type TWOK2NDIM = std::pow(2*K, NDIM);
-        T* block_tmp_ptr = &tmp[pos*convolution_tmp_size<NDIM>(K)];
+        T* block_tmp_ptr = &tmp[i*convolution_tmp_size<NDIM>(K)];
         // construct temporaries and pass them to conv_transform
         f0        = DenseTensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
         resultc   = DenseTensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
         work1     = DenseTensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
         work2     = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
-        in     = in_view(fnid);
-        f      = f_view(fnid);
-        result = result_view(fnid);
+        in     = in_view(i);
+        f      = f_view(i);
+        result = result_view(i);
       }
       SYNCTHREADS();
-      if (f_view.is_zero(fnid)) {
+      if (f_view.is_zero(i)) {
         /* copy input to output */
         result = in;
         if (!resnorms.empty()) {
           auto resnorm = normf(result);
           if (is_team_lead()) {
-            resnorms[fnid] = resnorm;
+            resnorms[i] = resnorm;
           }
         }
         return;
       }
 
-      int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(fnid) : 0; // TODO: this is a bit hacky, can we do better?
+      int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0; // TODO: this is a bit hacky, can we do better?
 
       convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
                                        transr, transs, opnorms_view, at, in, f, f0,
                                        resultc, result, work1, work2,
-                                       resnorms.empty() ? nullptr : &resnorms[fnid]);
+                                       resnorms.empty() ? nullptr : &resnorms[i]);
     }
 
     template <typename T, Dimension NDIM>
@@ -375,7 +374,6 @@ namespace mra{
       Key<NDIM> displacement,
       size_type K,
       size_type N,
-      size_type n_nonzero,
       const T fac,
       const T tol,
       const concepts::TensorView<NDIM+1> auto in_view,
@@ -388,10 +386,9 @@ namespace mra{
       const std::array<bool, 2> at,
       T* tmp)
     {
-      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        size_type fnid = find_nth_nonzero(N, pos, result_view);
+      for (size_type blockId = blockIdx.x; blockId < N; blockId += gridDim.x) {
         convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
-                                         in_view, f_view, result_view, resnorms, tmp, pos, fnid);
+                                         in_view, f_view, result_view, resnorms, tmp, blockId);
       }
     }
 
@@ -403,7 +400,6 @@ namespace mra{
 	  Key<NDIM> displacement,
     size_type K,
     size_type N,
-    size_type n_nonzero,
     const T fac,
     const T tol,
     const concepts::TensorView<NDIM+1> auto& in_view,
@@ -421,8 +417,8 @@ namespace mra{
     auto smem_size = mTxmq_shmem_size<T>(2*K);
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
-                (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
+    CALL_KERNEL((detail::convolution_kernel<T, NDIM>), N, thread_dims, smem_size, stream,
+                (key, displacement, K, N, fac, tol, in_view, f_view, result_view,
                  resnorms, transr, transs, opnorms, at, tmp));
     checkSubmit();
   }
@@ -471,8 +467,7 @@ namespace mra{
       DenseTensorView<T, 4>,                   // opnorms
       T,                                       // tol: this member's own truncate_tol(...)
       std::array<bool, 2>,                     // at: this member's own apply-terms flags
-      size_type,                               // sparsity_offset: this member's byte range start in the aggregated sparsity staging buffer (see convolution_scatter_sparsity_kernel)
-      size_type                                // n_nonzero: count of functions with result non-zero (tmp is sized for this, not n)
+      size_type                                // sparsity_offset: this member's byte range start in the aggregated sparsity staging buffer (see convolution_scatter_sparsity_kernel)
     >;
 
     /* Named indices into ConvolutionBatchArg, so callers don't sprinkle magic
@@ -490,7 +485,6 @@ namespace mra{
       static constexpr std::size_t tol             = 9;
       static constexpr std::size_t at              = 10;
       static constexpr std::size_t sparsity_offset = 11;
-      static constexpr std::size_t n_nonzero       = 12;
     };
 
     /**
@@ -515,22 +509,19 @@ namespace mra{
       size_type K,
       const T fac)
     {
-      using argidx = ConvolutionBatchArgIdx;
+      using idx = ConvolutionBatchArgIdx;
 
       const size_type member = blockIdx.y;
       auto& arg = args[member];
-      const size_type n = std::get<argidx::n>(arg);
-      const size_type n_nonzero = std::get<argidx::n_nonzero>(arg);
-      auto& result_view = std::get<argidx::result_view>(arg);
+      const size_type n = std::get<idx::n>(arg);
 
-      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        size_type fnid = find_nth_nonzero(n, pos, result_view);
-        convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<argidx::tol>(arg),
-                                         std::get<argidx::transr>(arg), std::get<argidx::transs>(arg),
-                                         std::get<argidx::opnorms>(arg), std::get<argidx::at>(arg),
-                                         std::get<argidx::in_view>(arg), std::get<argidx::f_view>(arg),
-                                         result_view, std::get<argidx::resnorms_view>(arg),
-                                         std::get<argidx::tmp>(arg), pos, fnid);
+      for (size_type i = blockIdx.x; i < n; i += gridDim.x) {
+        convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<idx::tol>(arg),
+                                         std::get<idx::transr>(arg), std::get<idx::transs>(arg),
+                                         std::get<idx::opnorms>(arg), std::get<idx::at>(arg),
+                                         std::get<idx::in_view>(arg), std::get<idx::f_view>(arg),
+                                         std::get<idx::result_view>(arg), std::get<idx::resnorms_view>(arg),
+                                         std::get<idx::tmp>(arg), i);
       }
     }
 
@@ -587,12 +578,12 @@ namespace mra{
     const T fac,
     ttg::device::Stream stream)
   {
-    using argidx = detail::ConvolutionBatchArgIdx;
+    using idx = detail::ConvolutionBatchArgIdx;
     using arg_t = detail::ConvolutionBatchArg<T, NDIM>;
     const size_type num_members = static_cast<size_type>(slot.host_args.size());
-    size_type max_n_nonzero = 0;
+    size_type max_n = 0;
     for (const auto& arg : slot.host_args) {
-      max_n_nonzero = std::max(max_n_nonzero, std::get<argidx::n_nonzero>(arg));
+      max_n = std::max(max_n, std::get<idx::n>(arg));
     }
 
 #if defined(MRA_ENABLE_CUDA)
@@ -618,7 +609,7 @@ namespace mra{
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    Dim3 grid_dims(max_n_nonzero, num_members, 1);
+    Dim3 grid_dims(max_n, num_members, 1);
 
     CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_dims, thread_dims, smem_size, stream,
                 (slot.dev_args, K, fac));
@@ -687,13 +678,12 @@ namespace mra{
         auto& m_at       = batch[m].template get<9>();
         auto& m_out      = batch[m].template get<10>(); // real out tensor, for its RangeSparsityBase sparsity
         const size_type n = static_cast<size_type>(m_result.dim(0));
-        const size_type n_nonzero = count_nonzero_any(n, m_out);
 
         sparsity_to_bytes(m_out.sparsity(), &sparsity_slot.host_args[sparsity_offset], n);
 
         slot.host_args.emplace_back(m_in, m_f, m_result, m_resnorms,
                                     m_tmp.current_device_ptr(), n,
-                                    m_transr, m_transs, m_opnorms, m_tol, m_at, sparsity_offset, n_nonzero);
+                                    m_transr, m_transs, m_opnorms, m_tol, m_at, sparsity_offset);
         sparsity_offset += n;
       }
       submit_convolution_kernel_batched<T, NDIM>(pool, slot, sparsity_pool, sparsity_slot,
@@ -711,7 +701,6 @@ namespace mra{
     Key<3> displacement,
     size_type K,
     size_type N,
-    size_type n_nonzero,
     const double fac,
     const double tol,
     const SparseTensorView<double, 3+1>& in,

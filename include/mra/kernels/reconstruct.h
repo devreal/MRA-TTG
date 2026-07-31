@@ -88,10 +88,8 @@ namespace mra {
      * further down -- there is exactly one copy of this logic to maintain
      * instead of two near-identical grid-stride loops. tmp_ptr is this
      * member's own base pointer (i.e. already offset to this node, not
-     * indexed by a global block id). It is sized for only the non-zero
-     * functions, so it is indexed by the compact launch position `pos`
-     * (0..n_nonzero-1); all tensor-view accesses use the real, remapped
-     * `fnid`.
+     * indexed by a global block id) -- the per-fnid offset into it is
+     * computed here, from fnid.
      */
     template<typename T, Dimension NDIM>
     DEVSCOPE void reconstruct_process_one(
@@ -104,7 +102,6 @@ namespace mra {
       const concepts::TensorView<NDIM+1> auto& from_parent_view,
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& r_arr,
       concepts::TensorView<NDIM+1> auto& result_view,
-      size_type pos,
       size_type fnid)
     {
       const bool is_t0 = (0 == thread_id());
@@ -117,10 +114,12 @@ namespace mra {
       SHARED DenseTensorView<const T, NDIM> from_parent;
       SHARED DenseTensorView<T, NDIM> result;
 
-      assert(!(node_view.is_zero(fnid) && from_parent_view.is_zero(fnid)) &&
-             "fnid must have node or from_parent non-zero -- caller derives it via find_nth_nonzero");
+      if (node_view.is_zero(fnid) && from_parent_view.is_zero(fnid)) {
+        /* no work to do */
+        return;
+      }
       if (is_t0) {
-        T* block_tmp_ptr = &tmp_ptr[pos*reconstruct_tmp_size<NDIM>(K)];
+        T* block_tmp_ptr = &tmp_ptr[fnid*reconstruct_tmp_size<NDIM>(K)];
         const size_type TWOK2NDIM = std::pow(2*K,NDIM);
         s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
         tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
@@ -152,7 +151,6 @@ namespace mra {
     reconstruct_kernel(
       Key<NDIM> key,
       size_type N,
-      size_type n_nonzero,
       size_type K,
       bool accumulate_NS,
       const concepts::TensorView<NDIM+1> auto node_view,
@@ -162,10 +160,9 @@ namespace mra {
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
       concepts::TensorView<NDIM+1> auto result_view)
     {
-      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x){
-        size_type fnid = find_nth_nonzero(N, pos, node_view, from_parent_view);
+      for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x){
         reconstruct_process_one<T, NDIM>(key, K, accumulate_NS, node_view, tmp_ptr, hg,
-                                         from_parent_view, r_arr, result_view, pos, fnid);
+                                         from_parent_view, r_arr, result_view, fnid);
       }
     }
   } // namespace detail
@@ -174,7 +171,6 @@ namespace mra {
   void submit_reconstruct_kernel(
     const Key<NDIM>& key,
     size_type N,
-    size_type n_nonzero,
     size_type K,
     bool accumulate_NS,
     const concepts::TensorView<NDIM+1> auto& node,
@@ -188,8 +184,8 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     //CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::reconstruct_kernel, n_nonzero, thread_dims, smem_size, stream,
-      (key, N, n_nonzero, K, accumulate_NS, node, tmp, hg, from_parent, r_arr, result));
+    CALL_KERNEL(detail::reconstruct_kernel, N, thread_dims, smem_size, stream,
+      (key, N, K, accumulate_NS, node, tmp, hg, from_parent, r_arr, result));
     checkSubmit();
   }
 
@@ -222,8 +218,7 @@ namespace mra {
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // r_arr (the 8 children)
       SparseTensorView<T, NDIM+1>,                                        // result_view (leaf output)
       size_type,                                                          // n: number of functions this member contributes
-      size_type,                                                         // sparsity_offset: base of this member's [r_arr[0] bytes]...[r_arr[7] bytes][result bytes] span in the aggregated sparsity staging buffer (see reconstruct_scatter_sparsity_kernel)
-      size_type                                                          // n_nonzero: count of functions with node or from_parent non-zero (tmp is sized for this, not n)
+      size_type                                                          // sparsity_offset: base of this member's [r_arr[0] bytes]...[r_arr[7] bytes][result bytes] span in the aggregated sparsity staging buffer (see reconstruct_scatter_sparsity_kernel)
     >;
 
     /* Named indices into ReconstructBatchArg, so callers don't sprinkle magic
@@ -237,7 +232,6 @@ namespace mra {
       static constexpr std::size_t result_view     = 5;
       static constexpr std::size_t n               = 6;
       static constexpr std::size_t sparsity_offset = 7;
-      static constexpr std::size_t n_nonzero       = 8;
     };
 
     /**
@@ -260,21 +254,17 @@ namespace mra {
       bool accumulate_NS,
       const concepts::TensorView<2> auto hg)
     {
-      using argidx = ReconstructBatchArgIdx;
+      using idx = ReconstructBatchArgIdx;
 
       const size_type member = blockIdx.y;
       auto& arg = args[member];
-      const size_type n = std::get<argidx::n>(arg);
-      const size_type n_nonzero = std::get<argidx::n_nonzero>(arg);
-      auto& node_view = std::get<argidx::node_view>(arg);
-      auto& from_parent_view = std::get<argidx::from_parent_view>(arg);
+      const size_type n = std::get<idx::n>(arg);
 
-      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        size_type fnid = find_nth_nonzero(n, pos, node_view, from_parent_view);
-        reconstruct_process_one<T, NDIM>(std::get<argidx::key>(arg), K, accumulate_NS,
-                                         node_view, std::get<argidx::tmp>(arg), hg,
-                                         from_parent_view, std::get<argidx::r_arr>(arg),
-                                         std::get<argidx::result_view>(arg), pos, fnid);
+      for (size_type fnid = blockIdx.x; fnid < n; fnid += gridDim.x) {
+        reconstruct_process_one<T, NDIM>(std::get<idx::key>(arg), K, accumulate_NS,
+                                         std::get<idx::node_view>(arg), std::get<idx::tmp>(arg), hg,
+                                         std::get<idx::from_parent_view>(arg), std::get<idx::r_arr>(arg),
+                                         std::get<idx::result_view>(arg), fnid);
       }
     }
 
@@ -339,12 +329,12 @@ namespace mra {
     const concepts::TensorView<2> auto& hg,
     ttg::device::Stream stream)
   {
-    using argidx = detail::ReconstructBatchArgIdx;
+    using idx = detail::ReconstructBatchArgIdx;
     using arg_t = detail::ReconstructBatchArg<T, NDIM>;
     const size_type num_members = static_cast<size_type>(slot.host_args.size());
-    size_type max_n_nonzero = 0;
+    size_type max_n = 0;
     for (const auto& arg : slot.host_args) {
-      max_n_nonzero = std::max(max_n_nonzero, std::get<argidx::n_nonzero>(arg));
+      max_n = std::max(max_n, std::get<idx::n>(arg));
     }
 
 #if defined(MRA_ENABLE_CUDA)
@@ -370,7 +360,7 @@ namespace mra {
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    Dim3 grid_dims(max_n_nonzero, num_members, 1);
+    Dim3 grid_dims(max_n, num_members, 1);
 
     CALL_KERNEL((detail::reconstruct_kernel_batched<T, NDIM>), grid_dims, thread_dims, smem_size, stream,
                 (slot.dev_args, K, accumulate_NS, hg));
@@ -440,13 +430,6 @@ namespace mra {
         auto& m_r_arr_tensor    = batch[m].template get<6>(); // real array of 8 r Tensors, for their sparsity
         auto& m_result_tensor   = batch[m].template get<7>(); // real result Tensor
         const size_type n = static_cast<size_type>(m_node_view.dim(0));
-        // m_node_view/m_from_parent_view are TensorViews (is_zero() is inherited
-        // directly, unlike Tensor which only exposes .sparsity()), so count
-        // inline rather than via count_nonzero_any (which expects .sparsity()).
-        size_type n_nonzero = 0;
-        for (size_type i = 0; i < n; ++i) {
-          if (!m_node_view.is_zero(i) || !m_from_parent_view.is_zero(i)) ++n_nonzero;
-        }
 
         for (size_type c = 0; c < num_children; ++c) {
           sparsity_to_bytes(m_r_arr_tensor[c].coeffs().sparsity(),
@@ -457,7 +440,7 @@ namespace mra {
 
         slot.host_args.emplace_back(m_key, m_node_view, m_tmp.current_device_ptr(),
                                     m_from_parent_view, m_r_arr, m_result_view,
-                                    n, sparsity_offset, n_nonzero);
+                                    n, sparsity_offset);
         sparsity_offset += (num_children + 1) * n;
       }
       submit_reconstruct_kernel_batched<T, NDIM>(pool, slot, sparsity_pool, sparsity_slot,
@@ -473,7 +456,6 @@ namespace mra {
   void submit_reconstruct_kernel<double, 3>(
     const Key<3>& key,
     size_type N,
-    size_type n_nonzero,
     size_type K,
     bool accumulate_NS,
     const SparseTensorView<double, 3+1>& node,

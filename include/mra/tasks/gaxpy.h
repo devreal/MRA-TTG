@@ -104,10 +104,8 @@ namespace mra{
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
 
-        /* only functions where out is non-zero get a thread-block launched. */
-        const size_type n_nonzero = count_nonzero_any(N, out.coeffs());
         submit_gaxpy_kernel(key, t1_view, t2_view, out_view,
-                            scalarA, scalarB, N, n_nonzero, K, ttg::device::current_stream());
+                            scalarA, scalarB, N, K, ttg::device::current_stream());
 
         norms.compute();
 

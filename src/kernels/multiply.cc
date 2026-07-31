@@ -19,7 +19,6 @@ namespace mra {
     const SparseTensorView<double, 2>& phibar,
     const SparseTensorView<double, 1>& quad_x,
     size_type N,
-    size_type n_nonzero,
     size_type K,
     double* tmp,
     ttg::device::Stream stream);

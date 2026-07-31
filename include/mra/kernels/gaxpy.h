@@ -42,13 +42,15 @@ namespace mra {
       concepts::TensorView<NDIM+1> auto nodeR_view,
       const T scalarA,
       const T scalarB,
-      size_type N,
-      size_type n_nonzero)
+      size_type N)
     {
       SHARED DenseTensorView<const T, NDIM> nodeA, nodeB;
       SHARED DenseTensorView<T, NDIM> nodeR;
-      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        size_type blockid = find_nth_nonzero(N, pos, nodeR_view);
+      for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
+        if (nodeR_view.is_zero(blockid)) {
+          /* no work to do */
+          continue;
+        }
         if (is_team_lead()) {
           nodeA = nodeA_view(blockid);
           nodeB = nodeB_view(blockid);
@@ -70,14 +72,13 @@ namespace mra {
     const T scalarA,
     const T scalarB,
     size_type N,
-    size_type n_nonzero,
     size_type K,
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    CALL_KERNEL(detail::gaxpy_kernel, n_nonzero, thread_dims, 0, stream,
-      (key, funcA, funcB, funcR, scalarA, scalarB, N, n_nonzero));
+    CALL_KERNEL(detail::gaxpy_kernel, N, thread_dims, 0, stream,
+      (key, funcA, funcB, funcR, scalarA, scalarB, N));
     checkSubmit();
   }
 

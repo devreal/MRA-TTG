@@ -238,10 +238,7 @@ namespace mra{
 
             mra::FunctionsReconstructedNode<T, NDIM> result(key, sparsity, K, ttg::scope::Allocate);
             result.set_all_leaf(LeafStatus::Leaf);
-            /* only functions where result is non-zero get a thread-block
-             * launched, so tmp only needs scratch space for those. */
-            const size_type n_nonzero = count_nonzero_any(N, result.coeffs());
-            auto tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*n_nonzero, TempScope);
+            auto tmp = ttg::Buffer<T>(derivative_tmp_size<NDIM>(K)*N, TempScope);
             const DenseTensor<T, 2+1>& operators = functiondata.get_operators();
             const DenseTensor<T, 2>& phibar= functiondata.get_phibar();
             const DenseTensor<T, 2>& phi= functiondata.get_phi();
@@ -276,7 +273,7 @@ namespace mra{
             submit_derivative_kernel(D, key, left.key(), center.key(), right.key(), left.coeffs().current_view(),
                                     center.coeffs().current_view(), right.coeffs().current_view(), operators.current_view(),
                                     result_view, phi.current_view(), phibar.current_view(), quad_x.current_view(),
-                                    tmp.current_device_ptr(), N, n_nonzero, K, g1, g2, axis, bc_left, bc_right, ttg::device::current_stream());
+                                    tmp.current_device_ptr(), N, K, g1, g2, axis, bc_left, bc_right, ttg::device::current_stream());
 
             norms.compute();
 
