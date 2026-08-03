@@ -1,10 +1,12 @@
 #ifndef MRA_TENSORVIEW_H
 #define MRA_TENSORVIEW_H
 
+#if !defined(MRA_JIT_COMPILE)
 #include <algorithm>
 #include <numeric>
 #include <array>
 #include <tuple>
+#endif // !MRA_JIT_COMPILE
 
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"

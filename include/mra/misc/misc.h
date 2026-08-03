@@ -1,10 +1,12 @@
 #ifndef MRA_MISC_H
 #define MRA_MISC_H
 
+#if !defined(MRA_JIT_COMPILE)
 #include <iostream>
 #include <utility>
 #include <vector>
 #include <array>
+#endif // !MRA_JIT_COMPILE
 
 #include "mra/misc/platform.h"
 
@@ -45,6 +47,7 @@ namespace mra {
         }
     };
 
+#if !defined(MRA_JIT_COMPILE)
     /// Easy printing of pairs
     template <typename T, typename R>
     std::ostream& operator<<(std::ostream& s, const std::pair<T,R>& a) {
@@ -75,6 +78,7 @@ namespace mra {
         s << "]";
         return s;
     }
+#endif // !MRA_JIT_COMPILE
 
 } // namespace mra
 

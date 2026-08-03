@@ -6,9 +6,11 @@
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
 
+#if !defined(MRA_JIT_COMPILE)
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#endif // !defined(MRA_JIT_COMPILE)
 
 namespace mra {
 

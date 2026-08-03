@@ -12,6 +12,13 @@ target_link_libraries(mra-tensortest PUBLIC mra::host)
 add_executable(mra-matrixtest matrix_test.cc)
 target_link_libraries(mra-matrixtest PUBLIC mra::host)
 
+if (MRA_ENABLE_JIT)
+  add_executable(mra-jit-embed-test jit_embed_test.cc)
+  target_link_libraries(mra-jit-embed-test PUBLIC mra::jit-headers)
+  target_compile_definitions(mra-jit-embed-test PRIVATE
+    MRA_JIT_EMBED_TEST_INCLUDE_DIR="${PROJECT_SOURCE_DIR}/include")
+endif()
+
 # ── MADNESS integration tests ─────────────────────────────────────────────────
 add_executable(mra-mad-deriv-host-parsec mad_derivative_test.cc)
 target_link_libraries(mra-mad-deriv-host-parsec PUBLIC MADworld MADtensor mra::host)

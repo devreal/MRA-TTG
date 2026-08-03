@@ -3,6 +3,7 @@ project(MRA-TTG VERSION 0.1.0 LANGUAGES CXX)
 
 option(MRA_ENABLE_DEBUG "Whether to enable debug mode" OFF)
 option(MRA_ENABLE_EXPLICIT_INSTANTIATION "Whether to explicitly instantiate kernels in src/kernels/*.cc (some CUDA compilers fail on this)" ON)
+option(MRA_ENABLE_JIT "Whether to build the NVRTC/hiprtc JIT-compile support (embedded kernel headers); does not require CUDA/HIP to be enabled" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 
@@ -31,6 +32,16 @@ if(CMAKE_CUDA_COMPILER)
   set(TTG_ENABLE_CUDA ON)
 endif(CMAKE_CUDA_COMPILER)
 set(HAVE_CUDA ${CMAKE_CUDA_COMPILER} CACHE BOOL "True if we can compile .cu files")
+
+# Only needed for the JIT runtime compiler (CUDA::nvrtc/CUDA::cuda_driver
+# linkage, src/jit/compiler.cc) -- the header-embedding half of JIT support
+# (mra-jit-headers) needs neither CUDA nor this. Kept tightly scoped since
+# find_package(CUDAToolkit) is new to this build and could in principle
+# interact with fetched deps (Umpire/BLT) the way plain find_package(CUDA)
+# has caused friction before (see Dockerfile.cuda-test's comments).
+if (MRA_ENABLE_JIT AND HAVE_CUDA)
+  find_package(CUDAToolkit REQUIRED)
+endif()
 
 check_language(HIP)
 if(CMAKE_HIP_COMPILER)
@@ -128,6 +139,14 @@ if(HAVE_HIP)
   )
 endif()
 
+if(MRA_ENABLE_JIT)
+  install(TARGETS mra-jit-headers
+    EXPORT mra-targets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+endif()
+
 # Export for the build tree (FetchContent / add_subdirectory consumers)
 export(EXPORT mra-targets
   NAMESPACE mra::
@@ -160,5 +179,14 @@ install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/mra-config.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/mra-config-version.cmake"
   cmake/modules/MRAGPUWrappers.cmake
+  cmake/modules/MRAJITSources.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mra
+)
+# Installed as a sibling of the mra/ module dir above (not nested under it)
+# so MRAJITSources.cmake's "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../scripts/"
+# lookup resolves the same way here as it does against the source tree's
+# cmake/modules/ + cmake/scripts/ sibling layout.
+install(FILES
+  cmake/scripts/mra_embed_headers.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/scripts
 )

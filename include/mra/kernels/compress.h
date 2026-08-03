@@ -1,12 +1,13 @@
 #ifndef MRA_KERNELS_COMPRESS_H
 #define MRA_KERNELS_COMPRESS_H
 
+#if !defined(MRA_JIT_COMPILE)
 #include <array>
 #include <tuple>
+#endif // !defined(MRA_JIT_COMPILE)
 
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
-#include "mra/ops/functions.h"
 #include "mra/misc/device_batch_pool.h"
 #include "mra/tensor/sparsitymanager.h"
 #include "mra/misc/key.h"
@@ -15,6 +16,13 @@
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/child_slice.h"
+
+#if defined(MRA_ENABLE_JIT) && defined(MRA_ENABLE_CUDA) && !defined(MRA_JIT_COMPILE)
+#include "mra/jit/cache.h"
+#include "mra/jit/embedded_headers.h"
+#include "mra/jit/launch.h"
+#include "mra/jit/type_name.h"
+#endif
 
 /**
  * Compress kernels
@@ -145,6 +153,11 @@ namespace mra {
     }
   } // namespace detail
 
+#if !defined(MRA_JIT_COMPILE)
+  // Host-only AOT launcher (ttg::device::Stream isn't available under
+  // MRA_JIT_COMPILE) -- irrelevant to a JIT compile pass, which only ever
+  // needs the detail:: kernel bodies above. Same treatment as
+  // submit_gaxpy_kernel in gaxpy.h.
   template<typename T, Dimension NDIM>
   void submit_compress_kernel(
     const Key<NDIM>& key,
@@ -168,8 +181,79 @@ namespace mra {
       (key, N, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
     checkSubmit();
   }
+#endif // !defined(MRA_JIT_COMPILE)
 
-#ifndef MRA_ENABLE_HOST
+#if defined(MRA_ENABLE_JIT) && defined(MRA_ENABLE_CUDA) && !defined(MRA_JIT_COMPILE)
+  // JIT-compiled alternative to submit_compress_kernel -- the actual
+  // motivating use case for this whole JIT effort: compress is where the
+  // fast cuBLASDX/rocWMMA GEMM path (mra/ops/mxm_cublasdx.h) needs K baked
+  // in as a compile-time constant, which today only happens via
+  // MRA_ENABLE_EXPLICIT_INSTANTIATION enumerating every K ahead of time.
+  // This establishes the plumbing against the same generic-GEMM path
+  // submit_compress_kernel itself uses (cuBLASDX isn't reachable here
+  // without cublasdx.hpp on the JIT compile's -I path, and injecting a
+  // runtime K as `-DMRA_JIT_K=<value>` into the compile is follow-up work,
+  // per the plan's Phase B) -- but is otherwise a full, working alternative
+  // to submit_compress_kernel, not a stub.
+  template<typename T, Dimension NDIM>
+  void submit_compress_kernel_jit(
+    const Key<NDIM>& key,
+    size_type N,
+    size_type K,
+    bool is_ns,
+    const concepts::TensorView<NDIM+1> auto& in_view,
+    concepts::TensorView<NDIM+1> auto& p_view,
+    concepts::TensorView<NDIM+1> auto& result_view,
+    const concepts::TensorView<2> auto& hgT_view,
+    T* tmp,
+    T* d_sumsq,
+    const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& in_views,
+    ttg::device::Stream stream)
+  {
+    using ViewIn     = std::decay_t<decltype(in_view)>;
+    using ViewP      = std::decay_t<decltype(p_view)>;
+    using ViewResult = std::decay_t<decltype(result_view)>;
+    using ViewHgT    = std::decay_t<decltype(hgT_view)>;
+    using ViewsArray = std::decay_t<decltype(in_views)>;
+
+    // 5 invented params, in the order compress_kernel's abbreviated-auto
+    // parameters appear in its declaration: node_in, p_in, result_in, hgT,
+    // in_views (see spike/nvrtc/compress_spike.cc, which validated this
+    // exact shape against real NVRTC).
+    const std::string name_expr =
+      "mra::detail::compress_kernel<" + jit::type_name_v<T>() + "," + std::to_string(NDIM) + "," +
+      jit::type_name_v<ViewIn>() + "," + jit::type_name_v<ViewP>() + "," +
+      jit::type_name_v<ViewResult>() + "," + jit::type_name_v<ViewHgT>() + "," +
+      jit::type_name_v<ViewsArray>() + ">";
+
+    jit::CompileOptions opts;
+    // TODO: derive compute_major/compute_minor from the actual current
+    // device instead of the struct default; same deferred item as
+    // submit_gaxpy_kernel_jit in gaxpy.h.
+    const std::string cache_key = jit::make_cache_key("compress_kernel", name_expr, opts);
+
+    const jit::CompiledKernel& kernel = jit::Cache::instance().get_or_compile(
+      cache_key, jit::Compiler{}, "compress",
+      "#include \"mra/kernels/compress.h\"\n",
+      jit::embedded_headers(), name_expr, opts);
+
+    Dim3 thread_dims = max_thread_dims(2*K);
+    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    jit::launch(kernel, Dim3(N, 1, 1), thread_dims, smem_size, stream,
+                key, N, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views);
+  }
+#endif // defined(MRA_ENABLE_JIT) && defined(MRA_ENABLE_CUDA) && !defined(MRA_JIT_COMPILE)
+
+// Unlike the host-only submit_*_batched/batch_leader further down, the
+// __global__ kernel bodies (CompressBatchArg, compress_kernel_batched,
+// compress_scatter_sparsity_kernel) ARE reachable from a JIT compile -- they
+// touch only std::tuple/std::array/detail::SparsityState (all already
+// JIT-safe), never BatchPool/SparsityManager/ttg::device::coop. So this
+// block is guarded on !defined(MRA_ENABLE_HOST) alone (matching the
+// __global__ kernels above), not the tighter
+// !defined(MRA_ENABLE_HOST) && !defined(MRA_JIT_COMPILE) the host-only
+// batching orchestration below needs.
+#if !defined(MRA_ENABLE_HOST)
   /**
    * Batching support for the compress kernel, used by ttg::device::coop()/
    * TT::set_batch_matcher() in mra/tasks/compress.h. Batching is unrestricted
@@ -285,7 +369,16 @@ namespace mra {
     }
 
   } // namespace detail
+#endif // !defined(MRA_ENABLE_HOST)
 
+// The host-side batching orchestration below (BatchPool/SparsityManager/
+// cudaMemcpyAsync/ttg::device::coop) genuinely needs the tighter
+// !defined(MRA_ENABLE_HOST) && !defined(MRA_JIT_COMPILE) guard: under
+// MRA_JIT_COMPILE none of MRA_ENABLE_HOST/CUDA/HIP are defined either, so
+// !defined(MRA_ENABLE_HOST) alone would let it through into the JIT compile,
+// which never needs it (only submit_compress_kernel_batched_jit below does,
+// and it reimplements the device-launch portion itself).
+#if !defined(MRA_ENABLE_HOST) && !defined(MRA_JIT_COMPILE)
   /**
    * Batched counterpart of submit_compress_kernel: launches one kernel on
    * behalf of every member already marshaled into slot.host_args (by the
@@ -346,6 +439,84 @@ namespace mra {
     pool.mark_submitted(slot, stream);
     sparsity_pool.mark_submitted(sparsity_slot, stream);
   }
+
+#if defined(MRA_ENABLE_JIT) && defined(MRA_ENABLE_CUDA)
+  // JIT-compiled alternative to submit_compress_kernel_batched. Same host-
+  // side marshaling (BatchPool acquire/memcpy/mark_submitted) as the AOT
+  // version -- only the two device launches (compress_scatter_sparsity_
+  // kernel, compress_kernel_batched) go through the JIT compiler/cache
+  // instead of CALL_KERNEL's compile-time symbol. CUDA-only (no #elif HIP
+  // branch needed): this whole function only exists under MRA_ENABLE_CUDA.
+  template<typename T, Dimension NDIM>
+  void submit_compress_kernel_batched_jit(
+    detail::BatchPool<detail::CompressBatchArg<T, NDIM>>& pool,
+    typename detail::BatchPool<detail::CompressBatchArg<T, NDIM>>::slot_t& slot,
+    detail::BatchPool<detail::SparsityState>& sparsity_pool,
+    typename detail::BatchPool<detail::SparsityState>::slot_t& sparsity_slot,
+    size_type K,
+    bool is_ns,
+    const concepts::TensorView<2> auto& hgT,
+    ttg::device::Stream stream)
+  {
+    using idx = detail::CompressBatchArgIdx;
+    using arg_t = detail::CompressBatchArg<T, NDIM>;
+    using ViewHgT = std::decay_t<decltype(hgT)>;
+
+    const size_type num_members = static_cast<size_type>(slot.host_args.size());
+    size_type max_n = 0;
+    for (const auto& arg : slot.host_args) {
+      max_n = std::max(max_n, std::get<idx::n>(arg));
+    }
+
+    detail::check_cuda_rt(cudaMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
+                                          cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
+    detail::check_cuda_rt(cudaMemcpyAsync(sparsity_slot.dev_args, sparsity_slot.host_args.data(),
+                                          sparsity_slot.host_args.size()*sizeof(detail::SparsityState),
+                                          cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
+
+    jit::CompileOptions opts;
+    // TODO: derive compute_major/compute_minor from the actual current
+    // device instead of the struct default; same deferred item as
+    // submit_gaxpy_kernel_jit/submit_compress_kernel_jit.
+
+    // compress_scatter_sparsity_kernel<T,NDIM> has no invented (abbreviated-
+    // auto) parameters -- both its args are concretely typed by T/NDIM
+    // alone, so no jit::type_name<> lookup beyond T itself is needed.
+    const std::string scatter_name_expr =
+      "mra::detail::compress_scatter_sparsity_kernel<" + jit::type_name_v<T>() + "," + std::to_string(NDIM) + ">";
+    const jit::CompiledKernel& scatter_kernel = jit::Cache::instance().get_or_compile(
+      jit::make_cache_key("compress_scatter_sparsity_kernel", scatter_name_expr, opts),
+      jit::Compiler{}, "compress", "#include \"mra/kernels/compress.h\"\n",
+      jit::embedded_headers(), scatter_name_expr, opts);
+
+    // Scatter each member's aggregated sparsity bytes into its own p_in/
+    // result_in tensors' inline bitfields; same stream as the main kernel
+    // below, so stream ordering guarantees it completes first.
+    jit::launch(scatter_kernel, Dim3(num_members, 1, 1), Dim3(32, 1, 1), 0, stream,
+                slot.dev_args, sparsity_slot.dev_args);
+
+    // compress_kernel_batched<T,NDIM,hgT> has exactly one invented param:
+    // hgT (in contrast to compress_kernel's 5 -- args/K/is_ns are all
+    // concretely typed by T/NDIM already).
+    const std::string batched_name_expr =
+      "mra::detail::compress_kernel_batched<" + jit::type_name_v<T>() + "," + std::to_string(NDIM) + "," +
+      jit::type_name_v<ViewHgT>() + ">";
+    const jit::CompiledKernel& batched_kernel = jit::Cache::instance().get_or_compile(
+      jit::make_cache_key("compress_kernel_batched", batched_name_expr, opts),
+      jit::Compiler{}, "compress", "#include \"mra/kernels/compress.h\"\n",
+      jit::embedded_headers(), batched_name_expr, opts);
+
+    Dim3 thread_dims = max_thread_dims(2*K);
+    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    Dim3 grid_dims(max_n, num_members, 1);
+
+    jit::launch(batched_kernel, grid_dims, thread_dims, smem_size, stream,
+                slot.dev_args, K, is_ns, hgT);
+
+    pool.mark_submitted(slot, stream);
+    sparsity_pool.mark_submitted(sparsity_slot, stream);
+  }
+#endif // defined(MRA_ENABLE_JIT) && defined(MRA_ENABLE_CUDA)
 
   namespace detail {
 
@@ -419,7 +590,7 @@ namespace mra {
     }
 
   } // namespace detail
-#endif // !MRA_ENABLE_HOST
+#endif // !defined(MRA_ENABLE_HOST) && !defined(MRA_JIT_COMPILE)
 
 #if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
 /* explicit instantiation */

@@ -457,12 +457,23 @@ namespace mra {
       return detail::align_to_type<value_type>(dims[0]) / sizeof(value_type);
     }
 
+#if !defined(MRA_JIT_COMPILE)
     static constexpr std::string name() {
       return "SparseArrayBase";
     }
+#endif // !MRA_JIT_COMPILE
   };
 
 
+  // RangeSparsityBase is a host-only sparsity encoding (std::vector-backed
+  // range list, exception-based error handling in Range::append) -- not
+  // used by any device-reachable kernel body. Forward-declared here (never
+  // guarded) so concepts::SparsityBase below can still name it in an
+  // is_same_v comparison, which only needs the type to be nameable, not
+  // complete; the full definition is guarded out under MRA_JIT_COMPILE.
+  template<typename Derived, typename ValueType> struct RangeSparsityBase;
+
+#if !defined(MRA_JIT_COMPILE)
   namespace detail {
 
     struct Range {
@@ -914,6 +925,7 @@ namespace mra {
       return "RangeSparsityBase";
     }
   };
+#endif // !MRA_JIT_COMPILE
 
 
 
@@ -1049,9 +1061,11 @@ namespace mra {
       return 0;
     }
 
+#if !defined(MRA_JIT_COMPILE)
     static constexpr std::string name() {
       return "DenseViewBase";
     }
+#endif // !MRA_JIT_COMPILE
   };
 
   namespace concepts {
@@ -1070,6 +1084,7 @@ namespace mra {
   constexpr bool is_sparsity_view_v = sparsity_traits<std::decay_t<T>>::is_sparse();
 
 
+#if !defined(MRA_JIT_COMPILE)
   inline std::ostream& operator<<(std::ostream& os, const concepts::SparsityBase auto& si) {
     auto count = si.count();
     os << "[" << count << ": ";
@@ -1088,6 +1103,7 @@ namespace mra {
     os << "]";
     return os;
   }
+#endif // !MRA_JIT_COMPILE
 
 
 } // namespace mra

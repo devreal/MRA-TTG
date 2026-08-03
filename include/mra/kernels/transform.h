@@ -1,7 +1,9 @@
 #ifndef MRA_KERNELS_TRANSFORM_H
 #define MRA_KERNELS_TRANSFORM_H
 
+#if !defined(MRA_JIT_COMPILE)
 #include <cstdlib>
+#endif // !defined(MRA_JIT_COMPILE)
 #include "mra/ops/mxm.h"
 #include "mra/ops/inner.h"
 #include "mra/misc/types.h"

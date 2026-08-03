@@ -39,8 +39,10 @@ namespace mra {
       }
     }
 
+#if !defined(MRA_JIT_COMPILE)
     template<typename View>
     friend ::std::ostream& ::std::operator<<(std::ostream& s, const mra::TensorIterator<View>& iter);
+#endif // !defined(MRA_JIT_COMPILE)
 
   public:
     constexpr static ssize_type default_jdim = std::numeric_limits<ssize_type>::max();
@@ -159,6 +161,7 @@ namespace mra {
 
 } // namespace mra
 
+#if !defined(MRA_JIT_COMPILE)
 namespace std {
 
   template<typename View>
@@ -188,5 +191,6 @@ namespace std {
     return s;
   }
 } // namespace std
+#endif // !defined(MRA_JIT_COMPILE)
 
 #endif // MRA_TENSORITER_H

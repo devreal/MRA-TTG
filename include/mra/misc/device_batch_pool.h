@@ -12,7 +12,13 @@
  * `Arg` tuple instead of hand-rolling another copy of this machinery.
  */
 
-#ifndef MRA_ENABLE_HOST
+// NOTE: !defined(MRA_ENABLE_HOST) alone is not enough here -- under
+// MRA_JIT_COMPILE none of MRA_ENABLE_HOST/CUDA/HIP are defined either, so
+// this guard would otherwise let this entirely host-only batching pool
+// (std::mutex/vector, ttg.h, cudaMalloc/hipMalloc) through into the JIT
+// compile, which never needs it (only the host-side submit_*_kernel_batched
+// wrappers in e.g. compress.h use it, never the __global__ kernel bodies).
+#if !defined(MRA_ENABLE_HOST) && !defined(MRA_JIT_COMPILE)
 
 #include <memory>
 #include <mutex>

@@ -5,7 +5,9 @@
 #include "mra/misc/hash.h"
 #include "mra/misc/misc.h"
 #include "mra/misc/platform.h"
+#if !defined(MRA_JIT_COMPILE)
 #include "madness/mra/key.h"
+#endif // !MRA_JIT_COMPILE
 
 namespace mra {
 
@@ -60,6 +62,7 @@ namespace mra {
         : b(b), n(n), l({0})
         { }
 
+#if !defined(MRA_JIT_COMPILE)
         // Construct from batch and MADNESS key
         Key(Batch b, const madness::Key<NDIM>& mad_key)
         : b(b)
@@ -69,6 +72,7 @@ namespace mra {
                 l[d] = mad_key.translation()[d];
             }
         }
+#endif // !MRA_JIT_COMPILE
 
         /// Assignment default is OK
         Key& operator=(const Key<NDIM>& other) = default;
@@ -290,11 +294,13 @@ namespace mra {
             return dist;
         }
 
+#if !defined(MRA_JIT_COMPILE)
         madness::Key<NDIM> to_madness_key() const {
             madness::Vector<Translation, NDIM> disp;
             for (Dimension d = 0; d < NDIM; ++d) disp[d] = l[d];
             return madness::Key<NDIM>(n, disp);
         }
+#endif // !MRA_JIT_COMPILE
     };
 
     /// Range object used to iterate over children of a key
@@ -327,11 +333,13 @@ namespace mra {
     template <Dimension NDIM>
     SCOPE KeyChildren<NDIM> children(const Key<NDIM>& key) {return KeyChildren<NDIM>(key);}
 
+#if !defined(MRA_JIT_COMPILE)
     template <Dimension NDIM>
     std::ostream& operator<<(std::ostream& s, const Key<NDIM>& key) {
         s << "Key<" << int(NDIM) << ">[" << key.batch() << "](" << int(key.level()) << "," << key.translation() << ")";
         return s;
     }
+#endif // !MRA_JIT_COMPILE
 }
 
 namespace std {

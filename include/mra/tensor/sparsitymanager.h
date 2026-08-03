@@ -1,6 +1,13 @@
 #ifndef MRA_SPARSITY_MANAGER_H
 #define MRA_SPARSITY_MANAGER_H
 
+// SparsityManager/MockTensor are host-side helpers (ttg::Buffer,
+// ttg/parsec/devicefunc.h, PARSEC internals, exceptions) used only by the
+// host-only batching wrapper code in e.g. compress.h (submit_compress_batch_
+// leader), never by any __global__/DEVSCOPE kernel body -- nothing under
+// MRA_JIT_COMPILE needs to even name these types, so the whole file is
+// guarded out rather than picked apart piecewise.
+#if !defined(MRA_JIT_COMPILE)
 
 #include "mra/misc/allocator.h"
 #include "mra/tensor/sparsity.h"
@@ -284,5 +291,7 @@ namespace mra {
   }
 
 } // namespace mra
+
+#endif // !defined(MRA_JIT_COMPILE)
 
 #endif // MRA_SPARSITY_MANAGER_H

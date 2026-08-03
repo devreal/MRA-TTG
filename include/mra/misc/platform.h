@@ -1,9 +1,16 @@
 #ifndef MRA_DEVICE_PLATFORM_H
 #define MRA_DEVICE_PLATFORM_H
 
+#if !defined(MRA_JIT_COMPILE)
 #include <cstdlib>
 #include <algorithm>
 #include <iostream>
+#else
+// Defensive include: platform.h is sometimes reached before types.h in a
+// translation unit's header order, so don't rely solely on types.h having
+// already pulled this in (its own #include guard makes the repeat cheap).
+#include "mra/jit/std_compat.h"
+#endif // !MRA_JIT_COMPILE
 
 #if defined(MRA_ENABLE_CUDA)
 #include <cuda.h>
@@ -118,7 +125,10 @@ namespace mra::detail {
 #endif // __CUDACC__
 
 #if defined(__CUDA_ARCH__)
-#define THROW(s) do { std::printf(s); __trap(); } while(0)
+// Plain (global) printf, not std::printf: CUDA's device runtime declares
+// printf globally without needing <cstdio>, matching the HIP branch below
+// and (unlike std::printf) available under NVRTC, which has no <cstdio>.
+#define THROW(s) do { printf(s); __trap(); } while(0)
 #elif defined(__HIP__)
 /* TODO: how to error out on HIP? */
 #define THROW(s) do { printf(s); } while(0)
@@ -213,12 +223,14 @@ namespace mra {
 
 } // namespace mra
 
+#if !defined(MRA_JIT_COMPILE)
 namespace std {
   inline std::ostream& operator<<(std::ostream& os, Dim3& d) {
     os << "{" << d.x << ", " << d.y << ", " << d.z << "}";
     return os;
   }
 } // namespace std
+#endif // !MRA_JIT_COMPILE
 
 
 #endif // MRA_DEVICE_PLATFORM_H

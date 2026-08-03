@@ -1,16 +1,27 @@
 #ifndef MRA_TYPES_H
 #define MRA_TYPES_H
 
-#include <complex>
-#include <iostream>
+#if !defined(MRA_JIT_COMPILE)
 #include <cstdint>
 #include <cassert>
 #include <array>
+#include <complex>
+#include <iostream>
 #include <ttg.h>
+#else
+#include "mra/jit/std_compat.h"
+// NVRTC has no filesystem access to the real <complex> (nor does it bundle
+// one); a forward declaration is enough for the norm_type/coord_type partial
+// specializations below, which only need the template-id shape, not
+// std::complex's members. Complex-valued kernels are out of scope for JIT
+// until a real need arises.
+namespace std { template <typename T> class complex; }
+#endif // !MRA_JIT_COMPILE
 
 #include "mra/misc/platform.h"
 #include "mra/misc/misc.h"
 
+#if !defined(MRA_JIT_COMPILE)
 #ifdef MRA_ENABLE_HOST
 #ifndef TASKTYPE
 #define TASKTYPE void
@@ -29,6 +40,7 @@ constexpr const ttg::ExecutionSpace Space = ttg::ExecutionSpace::HIP;
 #else
 #error One of MRA_ENABLE_HOST, MRA_ENABLE_CUDA, or MRA_ENABLE_HIP must be defined.
 #endif
+#endif // !MRA_JIT_COMPILE
 
 namespace mra {
 
@@ -71,11 +83,13 @@ namespace mra {
         SCOPE const auto& data() const {return r;} // mostly for easy printing
     };
 
+#if !defined(MRA_JIT_COMPILE)
     template <typename T, Dimension NDIM>
     std::ostream& operator<<(std::ostream& s, const Coordinate<T,NDIM>& r) {
         s << "Coordinate" << r.data();
         return s;
     }
+#endif // !MRA_JIT_COMPILE
 
     namespace detail {
         template <typename T> struct norm_type {using type = T;};
