@@ -416,7 +416,17 @@ namespace mra {
     /// Defined below once we know TensorView
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorSlice& operator=(const concepts::DenseTensorView<TV::ndim()> auto& view);
+    ///
+    /// Written with an explicit template parameter + requires clause rather
+    /// than an abbreviated `concepts::DenseTensorView<...> auto` parameter:
+    /// that form, combined with being defined out-of-line below (required
+    /// since concepts::DenseTensorView needs the full TensorView, defined
+    /// after TensorSlice), reliably crashed NVRTC during JIT compilation
+    /// (see spike/nvrtc/tensorslice_repro.cc) even though it compiles fine
+    /// under nvcc/hipcc/host compilers.
+    template<typename U>
+    requires concepts::DenseTensorView<U, TV::ndim()>
+    SCOPE TensorSlice& operator=(const U& view);
   };
 
 
@@ -836,15 +846,10 @@ namespace mra {
     T *m_ptr; // may be const or non-const
   };
 
-#if 0
-    template<concepts::TensorView U>
-    requires(U::ndim() == ndim())
-    SCOPE TensorSlice& operator=(const U& view);
-#endif // 0
-
   template<concepts::TensorView TV>
-  SCOPE TensorSlice<TV>& TensorSlice<TV>::operator=(
-    const concepts::DenseTensorView<TV::ndim()> auto& view)
+  template<typename U>
+  requires concepts::DenseTensorView<U, TV::ndim()>
+  SCOPE TensorSlice<TV>& TensorSlice<TV>::operator=(const U& view)
   {
     foreach_idx(*this, [&](size_type i){ this->operator[](i) = view[i]; });
     return *this;
