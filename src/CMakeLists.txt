@@ -19,10 +19,12 @@ include(MRAGPUWrappers)
 
 # ── Host (CPU) implementation ─────────────────────────────────────────────────
 set(MRA_SOURCES gl.cc init.cc twoscale.cc)
-set(MRA_KERNEL_SOURCES
-  kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc
-  kernels/derivative.cc kernels/convolution.cc
-)
+set(MRA_KERNEL_SOURCES "")
+if (NOT MRA_ENABLE_EXPLICIT_INSTANTIATION)
+  set(MRA_KERNEL_SOURCES
+    kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc
+    kernels/derivative.cc kernels/convolution.cc)
+endif()
 
 add_library(mra-host STATIC ${MRA_SOURCES} ${MRA_KERNEL_SOURCES})
 add_library(mra::host ALIAS mra-host)
@@ -45,11 +47,17 @@ if (HAVE_CUDA)
     mra-base
     $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
   )
+  if (MRA_ENABLE_JIT)
+    target_compile_definitions(mra-cuda-base INTERFACE MRA_ENABLE_JIT=1)
+    target_link_libraries(mra-cuda-base INTERFACE mra::jit-headers mra::jit-runtime)
+  endif (MRA_ENABLE_JIT)
 
-  mra_generate_gpu_wrappers(
-    SOURCES ${MRA_KERNEL_SOURCES}
-    CUDA_OUTPUT_VAR MRA_CUDA_KERNEL_SOURCES
-  )
+  if (MRA_KERNEL_SOURCES)
+    mra_generate_gpu_wrappers(
+      SOURCES ${MRA_KERNEL_SOURCES}
+      CUDA_OUTPUT_VAR MRA_CUDA_KERNEL_SOURCES
+    )
+  endif()
 
   add_library(mra-cuda STATIC ${MRA_SOURCES} ${MRA_CUDA_KERNEL_SOURCES})
   add_library(mra::cuda ALIAS mra-cuda)
@@ -62,10 +70,12 @@ endif (HAVE_CUDA)
 # ── HIP implementation ────────────────────────────────────────────────────────
 if (HAVE_HIP)
 
-  mra_generate_gpu_wrappers(
-    SOURCES ${MRA_KERNEL_SOURCES}
-    HIP_OUTPUT_VAR MRA_HIP_KERNEL_SOURCES
-  )
+  if (MRA_KERNEL_SOURCES)
+    mra_generate_gpu_wrappers(
+      SOURCES ${MRA_KERNEL_SOURCES}
+      HIP_OUTPUT_VAR MRA_HIP_KERNEL_SOURCES
+    )
+  endif()
 
   add_library(mra-hip STATIC ${MRA_SOURCES} ${MRA_HIP_KERNEL_SOURCES})
   add_library(mra::hip ALIAS mra-hip)
