@@ -125,15 +125,8 @@ namespace mra{
        */
       for (auto child : children(key)) {
         const auto childidx = child.childindex();
-        bool t1_all_child_leaf = true, t2_all_child_leaf = true;
-        for (size_type i = 0; i < N && (t1_all_child_leaf | t2_all_child_leaf); ++i) {
-          if (!t1.is_child_leaf(i, childidx)) {
-            t1_all_child_leaf = false;
-          }
-          if (!t2.is_child_leaf(i, childidx)) {
-            t2_all_child_leaf = false;
-          }
-        }
+        bool t1_all_child_leaf = t1.is_all_child_leaf(child);
+        bool t2_all_child_leaf = t2.is_all_child_leaf(child);
         if (t1_all_child_leaf && !t2_all_child_leaf) {
           //std::cout << name << " " << key << " balancing tree to left " << child << std::endl;
           child_keys_left.push_back(child);
