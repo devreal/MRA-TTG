@@ -158,11 +158,16 @@ int main(int argc, char **argv) {
   double domain_size = opt.parse("-d", 6.0); // size of the domain cube [-d,d]
   bool print_dot = opt.exists("-dot");
   bool trace = opt.exists("-trace");
+  int kernel_batch_size = opt.parse("-kb", -1); // kernel batch size, default is 0 (select automatically)
 
   mra::initialize(argc, argv, cores);
 
   if (trace) {
     ttg::trace_on();
+  }
+
+  if (kernel_batch_size >= 0) {
+    mra::set_batch_size(kernel_batch_size);
   }
 
   /**
