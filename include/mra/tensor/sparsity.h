@@ -600,8 +600,12 @@ namespace mra {
         return *this;
       }
 
+      bool operator==(const sparsity_iterator& other) const {
+        return m_iter == other.m_iter && (m_iter == m_end || m_id == other.m_id);
+      }
+
       bool operator!=(const sparsity_iterator& other) const {
-        return m_iter != other.m_iter || m_id != other.m_id;
+        return !(*this == other);
       }
 
       size_type operator*() const {
