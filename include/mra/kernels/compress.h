@@ -68,7 +68,11 @@ namespace mra {
      * down -- there is exactly one copy of this logic to maintain instead of
      * two near-identical grid-stride loops. tmp/d_sumsq are this member's own
      * base pointers (i.e. already offset to this node, not indexed by a global
-     * block id) -- the per-fnid offset into tmp is computed here, from fnid.
+     * block id) -- the per-tmp_pos offset into tmp is computed here. `fnid`
+     * (the real, sparse function index) is found by the team lead alone, via
+     * an on-device scan of p_in's own sparsity (already device-resident, no
+     * separate host-built index list/transfer needed), and shared with the
+     * rest of the block via a SHARED variable.
      */
     template<typename T, Dimension NDIM>
     DEVSCOPE void compress_process_one(
@@ -82,20 +86,21 @@ namespace mra {
       T* tmp,
       T* d_sumsq,
       const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& in_views,
-      size_type fnid)
+      size_type N,
+      size_type tmp_pos)
     {
       const size_type TWOK2NDIM = std::pow(2*K,NDIM);
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
       SHARED T* workspace;
       SHARED DenseTensorView<const T, NDIM> node;
       SHARED DenseTensorView<T, NDIM> s, p, d;
+      SHARED size_type fnid;
 
-      if (result_in.is_zero(fnid) && p_in.is_zero(fnid)) {
-        //std::cout << "COMPRESS " << key << " skipping fnid " << fnid << " because result and p are zero" << std::endl;
-        return; // output is zero so skip computation and leave it zero
-      }
       if (is_team_lead()) {
-        T* block_tmp = &tmp[fnid*compress_tmp_size<NDIM>(K)];
+        // p_in has exactly n_nonzero non-zero entries (that's how tmp_pos's
+        // range was sized), so this always finds a valid function id.
+        fnid = find_nth_nonzero(N, tmp_pos, p_in);
+        T* block_tmp = &tmp[tmp_pos*compress_tmp_size<NDIM>(K)];
         s = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
         workspace = &block_tmp[TWOK2NDIM];
         for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
@@ -114,13 +119,13 @@ namespace mra {
       SYNCTHREADS();
       if (result_in.is_zero(fnid) && !p_in.is_zero(fnid)) {
         p = node; // pass through the input to the output
-        d_sumsq[fnid] = 0.0;
+        d_sumsq[tmp_pos] = 0.0;
         // std::cout << "COMPRESS " << key << " pass through fnid " << fnid << " because result is zero but p is not zero" << std::endl;
         return; // output is zero so skip computation and leave it zero
       }
       assert(!result_in.is_zero(fnid) && !p_in.is_zero(fnid) && "expected result_in and p_in to be non-zero!");
       compress_kernel_impl(key, K, is_ns, p, d, hgT, s, workspace,
-                           &d_sumsq[fnid], block_in_views);
+                           &d_sumsq[tmp_pos], block_in_views);
     }
 
     template<typename T, Dimension NDIM>
@@ -128,6 +133,7 @@ namespace mra {
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
       size_type N,
+      size_type n_nonzero,
       size_type K,
       bool is_ns,
       const concepts::TensorView<NDIM+1> auto node_in,
@@ -138,9 +144,9 @@ namespace mra {
       T* d_sumsq,
       const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto in_views)
     {
-      for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x) {
+      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         compress_process_one<T, NDIM>(key, K, is_ns, node_in, p_in, result_in, hgT,
-                                      tmp, d_sumsq, in_views, fnid);
+                                      tmp, d_sumsq, in_views, N, pos);
       }
     }
   } // namespace detail
@@ -149,6 +155,7 @@ namespace mra {
   void submit_compress_kernel(
     const Key<NDIM>& key,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     bool is_ns,
     const concepts::TensorView<NDIM+1> auto& in_view,
@@ -164,8 +171,8 @@ namespace mra {
 
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     //CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::compress_kernel, N, thread_dims, smem_size, stream,
-      (key, N, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
+    CALL_KERNEL(detail::compress_kernel, n_nonzero, thread_dims, smem_size, stream,
+      (key, N, n_nonzero, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views));
     checkSubmit();
   }
 
@@ -196,10 +203,10 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,                                        // node_in ("in": this node's own coeffs)
       SparseTensorView<T, NDIM+1>,                                        // p_in (parent-injection output)
       SparseTensorView<T, NDIM+1>,                                        // result_in (wavelet/d output)
-      T*,                                                                 // tmp: this member's own scratch base
-      T*,                                                                 // d_sumsq: this member's own scratch base
+      T*,                                                                 // tmp: this member's own scratch base, sized to this member's own n_nonzero, indexed by local_pos
+      T*,                                                                 // d_sumsq: this member's own scratch base, same sizing/indexing as tmp
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // in_views (the 8 children)
-      size_type,                                                          // n: number of functions this member contributes
+      size_type,                                                          // n: this member's structural function count N -- used both to size the sparsity-byte span below AND as the scan bound for find_nth_nonzero
       size_type                                                          // sparsity_offset: base of this member's [p_in bytes][result_in bytes] span in the aggregated sparsity staging buffer (see compress_scatter_sparsity_kernel)
     >;
 
@@ -218,37 +225,51 @@ namespace mra {
     };
 
     /**
-     * One combined launch covering `num_members` independent nodes sharing
-     * only (K, is_ns, hgT). Grid is 3D: blockIdx.y selects the batch member
-     * (gridDim.y == num_members), blockIdx.x the function index within that
-     * member (gridDim.x == the largest N_m across the whole batch); members
-     * with fewer than gridDim.x functions simply have their higher-x blocks
-     * do nothing (the grid-stride loop exits immediately once fnid >= n).
-     * This makes compress_kernel_batched a thin wrapper: unpack one member's
-     * args and hand off to the exact same per-(node, function) body
-     * compress_kernel itself uses (compress_process_one, defined above with
-     * compress_kernel_impl).
+     * One combined launch covering every non-zero function across all
+     * members of the batch, flattened into a single 1D grid of size
+     * total_nonzero (the sum, across members, of each member's own
+     * n_nonzero) -- no padding blocks for members with fewer functions than
+     * others, no blocks wasted on functions already known to be zero.
+     * member_offsets (size num_members+1) names, for a given global grid
+     * position, which member a block belongs to and that member's own
+     * compact local position (find_member_for_pos, an O(num_members) scan --
+     * cheap since num_members is small); compress_process_one's team lead
+     * then turns that local position into a real function id via an
+     * on-device scan of that member's own p_in sparsity (find_nth_nonzero).
+     * So no per-function index list needs to travel with the batch at all --
+     * only the tiny per-member offsets array. This makes
+     * compress_kernel_batched a thin wrapper: look up one work item and hand
+     * off to the exact same per-(node, function) body compress_kernel itself
+     * uses (compress_process_one, defined above with compress_kernel_impl).
      */
     template<typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel_batched(
-      CompressBatchArg<T, NDIM>* args,   // device ptr, size == gridDim.y
+      CompressBatchArg<T, NDIM>* args,        // device ptr, size == num_members
+      const size_type* member_offsets,        // device ptr, size == num_members+1
+      size_type num_members,
+      size_type total_nonzero,
       size_type K,
       bool is_ns,
       const concepts::TensorView<2> auto hgT)
     {
       using idx = CompressBatchArgIdx;
+      SHARED size_type member;
+      SHARED size_type local_pos;
 
-      const size_type member = blockIdx.y;
-      auto& arg = args[member];
-      const size_type n = std::get<idx::n>(arg);
+      for (size_type pos = blockIdx.x; pos < total_nonzero; pos += gridDim.x) {
+        if (is_team_lead()) {
+          member = find_member_for_pos(member_offsets, num_members, pos, &local_pos);
+        }
+        SYNCTHREADS();
+        auto& arg = args[member];
+        const size_type member_N = std::get<idx::n>(arg);
 
-      for (size_type fnid = blockIdx.x; fnid < n; fnid += gridDim.x) {
         compress_process_one<T, NDIM>(std::get<idx::key>(arg), K, is_ns,
                                       std::get<idx::node_in>(arg), std::get<idx::p_in>(arg),
                                       std::get<idx::result_in>(arg), hgT,
                                       std::get<idx::tmp>(arg), std::get<idx::d_sumsq>(arg),
-                                      std::get<idx::in_views>(arg), fnid);
+                                      std::get<idx::in_views>(arg), member_N, local_pos);
       }
     }
 
@@ -290,10 +311,12 @@ namespace mra {
    * Batched counterpart of submit_compress_kernel: launches one kernel on
    * behalf of every member already marshaled into slot.host_args (by the
    * caller, via detail::submit_compress_batch_leader below), sharing only
-   * (K, is_ns, hgT) across the whole batch. Grid is (max_n, num_members, 1)
+   * (K, is_ns, hgT) across the whole batch. Grid is 1D over total_nonzero
    * -- see compress_kernel_batched's comment for why. `sparsity_pool`/
    * `sparsity_slot` carry the batch-wide aggregated sparsity bytes assembled
    * by submit_compress_batch_leader; see compress_scatter_sparsity_kernel.
+   * `offset_pool`/`offset_slot` carry the small per-member offsets array
+   * (size num_members+1), also assembled by submit_compress_batch_leader.
    */
   template<typename T, Dimension NDIM>
   void submit_compress_kernel_batched(
@@ -301,6 +324,9 @@ namespace mra {
     typename detail::BatchPool<detail::CompressBatchArg<T, NDIM>>::slot_t& slot,
     detail::BatchPool<detail::SparsityState>& sparsity_pool,
     typename detail::BatchPool<detail::SparsityState>::slot_t& sparsity_slot,
+    detail::BatchPool<size_type>& offset_pool,
+    typename detail::BatchPool<size_type>::slot_t& offset_slot,
+    size_type total_nonzero,
     size_type K,
     bool is_ns,
     const concepts::TensorView<2> auto& hgT,
@@ -309,10 +335,6 @@ namespace mra {
     using idx = detail::CompressBatchArgIdx;
     using arg_t = detail::CompressBatchArg<T, NDIM>;
     const size_type num_members = static_cast<size_type>(slot.host_args.size());
-    size_type max_n = 0;
-    for (const auto& arg : slot.host_args) {
-      max_n = std::max(max_n, std::get<idx::n>(arg));
-    }
 
 #if defined(MRA_ENABLE_CUDA)
     detail::check_cuda_rt(cudaMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
@@ -320,11 +342,17 @@ namespace mra {
     detail::check_cuda_rt(cudaMemcpyAsync(sparsity_slot.dev_args, sparsity_slot.host_args.data(),
                                           sparsity_slot.host_args.size()*sizeof(detail::SparsityState),
                                           cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
+    detail::check_cuda_rt(cudaMemcpyAsync(offset_slot.dev_args, offset_slot.host_args.data(),
+                                          offset_slot.host_args.size()*sizeof(size_type),
+                                          cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
 #elif defined(MRA_ENABLE_HIP)
     detail::check_hip_rt(hipMemcpyAsync(slot.dev_args, slot.host_args.data(), num_members*sizeof(arg_t),
                                         hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
     detail::check_hip_rt(hipMemcpyAsync(sparsity_slot.dev_args, sparsity_slot.host_args.data(),
                                         sparsity_slot.host_args.size()*sizeof(detail::SparsityState),
+                                        hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
+    detail::check_hip_rt(hipMemcpyAsync(offset_slot.dev_args, offset_slot.host_args.data(),
+                                        offset_slot.host_args.size()*sizeof(size_type),
                                         hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
 #endif
 
@@ -337,14 +365,14 @@ namespace mra {
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
-    Dim3 grid_dims(max_n, num_members, 1);
 
-    CALL_KERNEL((detail::compress_kernel_batched<T, NDIM>), grid_dims, thread_dims, smem_size, stream,
-                (slot.dev_args, K, is_ns, hgT));
+    CALL_KERNEL((detail::compress_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
+                (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, is_ns, hgT));
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
     sparsity_pool.mark_submitted(sparsity_slot, stream);
+    offset_pool.mark_submitted(offset_slot, stream);
   }
 
   namespace detail {
@@ -365,7 +393,26 @@ namespace mra {
      * (from the same process-wide sparsity pool used by SparsityManager, see
      * sparsitymanager.h), copied to the device in a single transfer by
      * submit_compress_kernel_batched instead of one small H2D copy per
-     * member per tensor.
+     * member per tensor. This is independent of the flattening below: it
+     * scatters bytes across the tensor's own full structural N range (needed
+     * so is_zero()/is_nonzero() reads on p_in/result_in stay correct for
+     * every real function id), not just the compacted non-zero subset.
+     *
+     * Flattening: each member also passes its own n_nonzero (get<9>())
+     * through coop() -- already computed independently of batching,
+     * per-member, in mra/tasks/compress.h. The leader turns those into a
+     * tiny (num_members+1)-entry offsets array (a running sum of
+     * n_nonzero), so the combined kernel can launch exactly total_nonzero
+     * blocks and each one can find its member with an O(num_members) scan
+     * (find_member_for_pos) instead of indexing a per-function list --
+     * see compress_kernel_batched.
+     *
+     * `total_functions` is the whole FunctionSet's total function count
+     * (fixed for this operation's entire run, unlike any single member's own
+     * structural N, which varies with key.batch()) -- used only to size the
+     * sparsity-byte staging pool's first allocation to a fixed upper bound
+     * (max_batch_size * 2 * total_functions), so, like the *BatchArg and
+     * offsets pools above, it never needs to grow after that.
      */
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_compress_batch_leader(
@@ -373,7 +420,8 @@ namespace mra {
       BatchPoolRegistry<CompressBatchArg<T, NDIM>>& registry,
       size_type K,
       bool is_ns,
-      const concepts::TensorView<2> auto& hgT)
+      const concepts::TensorView<2> auto& hgT,
+      size_type total_functions)
     {
       if (!batch.is_leader()) return;
 
@@ -382,15 +430,31 @@ namespace mra {
       auto& slot = pool.acquire(registry.get_max_batch_size()); // allocate space for full batch
       slot.host_args.clear();
 
-      // First pass: total sparsity bytes needed across the whole batch (2*n
-      // per member: p's bytes then result's bytes), so the pinned staging
-      // buffer below is acquired/resized exactly once.
+      // Offsets slot: always acquired at max_batch_size+1 capacity (not
+      // nb+1), so its device buffer is allocated once, on first use, and
+      // never resized after that -- num_members is always <= max_batch_size,
+      // which is kept small (O(100)) precisely so this is cheap.
+      auto& offset_pool = member_offset_pool_registry().get(ttg::device::current_device());
+      auto& offset_slot = offset_pool.acquire(registry.get_max_batch_size() + 1);
+      offset_slot.host_args.resize(nb + 1);
+      offset_slot.host_args[0] = 0;
+
+      // Sparsity-byte slot: acquired at a fixed upper bound (every member
+      // contributes at most 2*total_functions bytes, and there are at most
+      // max_batch_size members), not the exact total_sparsity_bytes needed
+      // this launch -- so, like the pools above, its device buffer is
+      // allocated once and never resized, even though the exact byte count
+      // varies launch to launch (different nodes can have different
+      // structural N). The logical (used) size is still set to the exact
+      // total_sparsity_bytes below, so only the bytes actually needed get
+      // memcpy'd/scattered.
+      const size_type max_sparsity_bytes = 2 * static_cast<size_type>(registry.get_max_batch_size()) * total_functions;
       size_type total_sparsity_bytes = 0;
       for (std::size_t m = 0; m < nb; ++m) {
         total_sparsity_bytes += 2 * static_cast<size_type>(batch[m].template get<3>().dim(0));
       }
       auto& sparsity_pool = sparsity_pool_registry().get(ttg::device::current_device());
-      auto& sparsity_slot = sparsity_pool.acquire(total_sparsity_bytes);
+      auto& sparsity_slot = sparsity_pool.acquire(max_sparsity_bytes);
       sparsity_slot.host_args.resize(total_sparsity_bytes);
 
       size_type sparsity_offset = 0;
@@ -404,7 +468,8 @@ namespace mra {
         auto& m_in_views  = batch[m].template get<6>();
         auto& m_p_tensor      = batch[m].template get<7>(); // real p tensor, for its RangeSparsityBase sparsity
         auto& m_result_tensor = batch[m].template get<8>(); // real result (d) tensor
-        const size_type n = static_cast<size_type>(m_result_in.dim(0));
+        const size_type m_n_nonzero = batch[m].template get<9>();
+        const size_type n = static_cast<size_type>(m_result_in.dim(0)); // structural N
 
         sparsity_to_bytes(m_p_tensor.sparsity(), &sparsity_slot.host_args[sparsity_offset], n);
         sparsity_to_bytes(m_result_tensor.sparsity(), &sparsity_slot.host_args[sparsity_offset + n], n);
@@ -413,8 +478,12 @@ namespace mra {
                                     m_tmp.current_device_ptr(), m_d_sumsq.current_device_ptr(),
                                     m_in_views, n, sparsity_offset);
         sparsity_offset += 2 * n;
+
+        offset_slot.host_args[m + 1] = offset_slot.host_args[m] + m_n_nonzero;
       }
+      const size_type total_nonzero = offset_slot.host_args[nb];
       submit_compress_kernel_batched<T, NDIM>(pool, slot, sparsity_pool, sparsity_slot,
+                                              offset_pool, offset_slot, total_nonzero,
                                               K, is_ns, hgT, ttg::device::current_stream());
     }
 
@@ -427,6 +496,7 @@ extern template
 void submit_compress_kernel<double, 3>(
     const Key<3>& key,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     bool is_ns,
     const SparseTensorView<const double, 3+1>& in_view,

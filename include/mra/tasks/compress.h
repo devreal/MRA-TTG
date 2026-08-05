@@ -46,6 +46,12 @@ namespace mra
     // calling set_batch_size() again after this graph exists has no effect on it.
     const std::size_t max_batch_size = mra::get_batch_size();
     const bool enable_compress_batching = mra::batching_enabled();
+    // Total function count across the whole FunctionSet -- fixed for this
+    // operation's entire run (unlike a single node's N, which varies with
+    // key.batch()). Used to size the batch leader's sparsity-byte staging
+    // buffer to a fixed upper bound (max_batch_size * 2 * total_functions)
+    // so it never needs to grow after its first allocation.
+    const size_type total_functions = fns->num_functions();
 
 #ifndef MRA_ENABLE_HOST
     // compress's only "operator data" is hgT, a single two-scale filter matrix
@@ -184,11 +190,20 @@ namespace mra
 
           FunctionNorms<T, NDIM> norms(name, in, in0, in1, in2, in3, in4, in5, in6, in7, result);
 
-          const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*N;
+          // p's sparsity is nonzero_if_any(result, in) (set a few lines
+          // above), i.e. a superset of result's own nonzero set: p_in
+          // being zero at some fnid implies result_in is zero there too. So
+          // p's own non-zero count is exactly the number of function ids
+          // compress_process_one does any work for; the actual ids
+          // themselves are found on-device (find_nth_nonzero, scanning
+          // p_in's own sparsity), not built into a host-side list here.
+          const size_type n_nonzero = sparsity.count_nonzero();
+
+          const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*n_nonzero;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
           const auto& hgT = functiondata.get_hgT();
-          /* stores sumsq for each child and for result at the end of the kernel */
-          auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(N, TempScope);
+          /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
+          auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(n_nonzero, TempScope);
 
           auto& d = result.coeffs();
 
@@ -237,18 +252,24 @@ namespace mra
             // through too, so the batch leader can read their sparsity and
             // aggregate every member's bytes into one pinned buffer + one
             // H2D copy instead of each member pushing its own via
-            // SparsityManager here.
+            // SparsityManager here. n_nonzero (this member's own, computed
+            // above independent of batching) travels through as well, so the
+            // leader can flatten every member's own non-zero work items into
+            // one combined 1D launch (see submit_compress_batch_leader); no
+            // per-function index list needs to travel with it, since each
+            // member's real function ids are found on-device.
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
                                                                     tmp_scratch, d_sumsq, input_views,
-                                                                    p.coeffs(), d);
+                                                                    p.coeffs(), d, n_nonzero);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
-            detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view);
+            detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view, total_functions);
           } else
 #endif // MRA_ENABLE_HOST
           {
             auto sparseman = make_sparsity_manager(d, p);
             sparseman.populate_device_sparsity();
-            submit_compress_kernel(key, N, K, is_ns, in_view, coeffs_view, rcoeffs_view, hgT_view,
+            submit_compress_kernel(key, N, n_nonzero, K, is_ns,
+                                  in_view, coeffs_view, rcoeffs_view, hgT_view,
                                   tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
                                   ttg::device::current_stream());
           }
@@ -259,13 +280,27 @@ namespace mra
 #endif
           norms.verify();
 
+          // Explicitly zero every function's sum first, rather than relying
+          // on FunctionsReconstructedNode's default-constructed 0.0 --
+          // mirrors the prior kernel's explicit d_sumsq[fnid] = 0.0 for zero
+          // functions. The loop below then overwrites the non-zero ones.
+          for (size_type i = 0; i < N; ++i) {
+            p.sum(i) = T(0);
+          }
+
+          // d_sumsq is compacted (indexed by compact position, not fnid) --
+          // walk it by re-enumerating `sparsity`'s own non-zero ids (host-side,
+          // O(#ranges + n_nonzero), same set find_nth_nonzero scanned
+          // on-device).
           auto* d_sumsq_arr = d_sumsq.host_ptr();
-          for (std::size_t i = 0; i < N; ++i) {
+          size_type pos = 0;
+          for (auto it = sparsity.begin_nonzero(); it != sparsity.end_nonzero(); ++it, ++pos) {
+            const size_type i = *it;
             auto sumsqs = std::array{in0.sum(i), in1.sum(i), in2.sum(i), in3.sum(i),
                                     in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
             auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
-            p.sum(i) = d_sumsq_arr[i] + child_sumsq; // result sumsq is last element in sumsqs
-            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[i]
+            p.sum(i) = d_sumsq_arr[pos] + child_sumsq; // result sumsq is last element in sumsqs
+            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[pos]
             //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
           }
         }

@@ -60,6 +60,34 @@ namespace mra {
       }
     }
 
+    /**
+     * Finds the function id of the `pos`-th non-zero entry in `view`'s
+     * sparsity (0-indexed among non-zero entries), by a linear scan over
+     * [0, N) of the view's own (already device-resident) inline sparsity
+     * bitfield -- no separate host-built index list/transfer needed.
+     * Device-callable; intended to be called ONCE per thread-block (e.g. by
+     * the team lead during per-block setup, with the result shared via a
+     * SHARED variable) rather than redundantly by every thread.
+     * TODO: this is an O(N) scan per call; if it becomes a bottleneck, speed
+     * it up by caching a running non-zero count (or a richer skip-ahead
+     * structure) in the sparsity bitfield itself so this doesn't need a full
+     * linear scan from 0 every time.
+     */
+    template<typename ViewT>
+    SCOPE size_type find_nth_nonzero(size_type N, size_type pos, const ViewT& view) {
+      size_type count = 0;
+      for (size_type i = 0; i < N; ++i) {
+        if (view.is_nonzero(i)) {
+          if (count == pos) {
+            return i;
+          }
+          ++count;
+        }
+      }
+      assert(false && "find_nth_nonzero: pos out of range for the number of non-zero entries in view");
+      return N;
+    }
+
   } // namespace detail
 
   /**

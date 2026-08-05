@@ -198,6 +198,52 @@ namespace mra::detail {
     int max_batch_size;
   };
 
+  /**
+   * Process-wide, per-device pool of pinned staging buffers for the small
+   * per-batch "member offsets" array a batch leader assembles once per
+   * batched launch (see mra/tasks/compress.h's submit_compress_batch_leader
+   * and its reconstruct/convolution counterparts): offsets[m] is the
+   * starting position, in the flattened 1D launch, of member m's non-zero
+   * functions, and offsets[num_members] == total_nonzero. A block at global
+   * position `pos` finds which member it belongs to by scanning this array
+   * (see find_member_for_pos below) instead of indexing a per-function list
+   * -- the array is O(num_members), not O(total_nonzero). Identical across
+   * compress/reconstruct/convolution's batched kernels, so it gets one
+   * shared pool/registry here instead of one per kernel.
+   *
+   * Always acquired at max_batch_size+1 capacity (see call sites), not the
+   * current batch's actual num_members+1 -- so the underlying device buffer
+   * is allocated once, on first use, and never resized after that.
+   * num_members is always <= max_batch_size, which the codebase keeps small
+   * (O(100)) precisely so every slot can stay fully allocated at all times.
+   */
+  inline BatchPoolRegistry<size_type>& member_offset_pool_registry() {
+    static BatchPoolRegistry<size_type> registry(ttg::device::num_devices(), /* max_batch_size unused here */ 1);
+    return registry;
+  }
+
+  /**
+   * Finds which member owns global position `pos` in a flattened batch
+   * launch, given that batch's ascending member-offsets array (size
+   * num_members+1, offsets[0] == 0, offsets[num_members] == total_nonzero),
+   * and writes that member's local position (pos - offsets[member]) to
+   * `local_pos_out`. O(num_members) linear scan -- fine since num_members is
+   * small (bounded by max_batch_size, O(100)); call once per block (e.g. by
+   * the team lead, sharing the result via a SHARED variable) rather than
+   * once per thread.
+   */
+  SCOPE size_type find_member_for_pos(const size_type* offsets, size_type num_members,
+                                       size_type pos, size_type* local_pos_out) {
+    for (size_type m = 0; m < num_members; ++m) {
+      if (pos < offsets[m + 1]) {
+        *local_pos_out = pos - offsets[m];
+        return m;
+      }
+    }
+    assert(false && "find_member_for_pos: pos out of range of the batch's member offsets");
+    return num_members;
+  }
+
 } // namespace mra::detail
 
 #endif // !MRA_ENABLE_HOST

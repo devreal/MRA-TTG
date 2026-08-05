@@ -106,6 +106,18 @@ namespace mra {
     return os;
   }
 
+  /**
+   * Number of non-zero function slots in `tensor`'s own sparsity (dimension 0
+   * must be N, the node's total function count). Thin wrapper so callers can
+   * get a node's non-zero count directly from a coeffs tensor without going
+   * through sparsity() themselves.
+   */
+  template<typename TensorT>
+  size_type count_nonzero_any(size_type N, const TensorT& tensor) {
+    assert(static_cast<size_type>(tensor.dim(0)) == N);
+    return tensor.sparsity().count_nonzero();
+  }
+
 } // namespace mra
 
 #endif // MRA_TENSOR_SPARSITYINFO_H
