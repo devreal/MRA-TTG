@@ -20,7 +20,7 @@ include(MRAGPUWrappers)
 # ── Host (CPU) implementation ─────────────────────────────────────────────────
 set(MRA_SOURCES gl.cc init.cc twoscale.cc)
 set(MRA_KERNEL_SOURCES "")
-if (NOT MRA_ENABLE_EXPLICIT_INSTANTIATION)
+if (MRA_ENABLE_EXPLICIT_INSTANTIATION)
   set(MRA_KERNEL_SOURCES
     kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc
     kernels/derivative.cc kernels/convolution.cc)

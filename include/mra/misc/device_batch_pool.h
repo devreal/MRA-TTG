@@ -27,6 +27,8 @@
                   // header used to be included before whatever transitively provided it).
 #include "mra/misc/allocator.h"
 #include "mra/misc/platform.h"
+#include "mra/misc/types.h"  // for size_type -- see the ttg.h note above; do not
+                             // rely on an includer having pulled this in already
 
 namespace mra::detail {
 

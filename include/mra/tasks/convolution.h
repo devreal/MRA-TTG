@@ -115,6 +115,12 @@ namespace mra {
     // it (deliberate -- see batch_size.h for why).
     const std::size_t max_batch_size = mra::get_batch_size();
     const bool enable_conv_batching = mra::batching_enabled();
+    // Total function count across the whole FunctionSet -- fixed for this
+    // operation's entire run (unlike a single node's N, which varies with
+    // key.batch()). Used to size each batch leader's sparsity-byte staging
+    // buffer to a fixed upper bound so it never needs to grow after its
+    // first allocation.
+    const size_type total_functions = fns->num_functions();
 
 #ifndef MRA_ENABLE_HOST
     // Shared by shell0_tt and accumulate_tt: they never contend for the same
@@ -428,12 +434,19 @@ namespace mra {
         DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          cnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
+          // Zero-fill host-side first, since the kernel below only launches
+          // blocks for in_node's non-zero functions -- covers exactly what
+          // simple_norm_kernel used to write 0.0 for explicitly. Needs
+          // SyncIn (rather than Allocate) so this host fill actually reaches
+          // the device copy the kernel reads/writes.
+          const size_type n_nonzero = in_node.coeffs().sparsity().count_nonzero();
+          cnorms = DenseTensor<T, 1>(N, ttg::scope::SyncIn);
+          std::fill(cnorms.buffer().host_ptr(), cnorms.buffer().host_ptr() + N, T(0));
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
 
-          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, cnorms.current_view());
+          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, n_nonzero, cnorms.current_view());
 
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::wait(cnorms.buffer());
@@ -599,7 +612,7 @@ namespace mra {
      * The result is sent to the task that applies the contributions that have been identified and communicated up and down the tree.
      */
     auto shell0_tt = ttg::make_tt<Space>(
-      [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool, total_functions](
           const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node) -> TASKTYPE {
 
@@ -633,16 +646,27 @@ namespace mra {
          */
         SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
         sparsity.nonzero_if_any(in_node);
+        // out's own sparsity (built below) is exactly this OR, so a single
+        // on-device scan of out's sparsity (find_nth_nonzero) suffices to
+        // recover each real function id -- no union scan needed here.
+        const size_type n_nonzero = sparsity.count_nonzero();
         out.allocate(sparsity, K, ttg::scope::Allocate);
         out.set_ns();
         mra::apply_leaf_info(out, in_node);
 
-        DenseTensor<T, 1> resnorms(N, TempScope);
+        // Zero-fill host-side first (rather than relying on default-
+        // constructed 0), since the kernel below only launches blocks for
+        // in_node's non-zero functions -- covers exactly what
+        // convolution_process_one used to write 0.0 for explicitly. Needs
+        // SyncIn (rather than TempScope/Allocate) so this host fill reaches
+        // the device copy the kernel reads/writes.
+        DenseTensor<T, 1> resnorms(N, ttg::scope::SyncIn);
+        std::fill(resnorms.buffer().host_ptr(), resnorms.buffer().host_ptr() + N, T(0));
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N, TempScope);
+        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -680,17 +704,22 @@ namespace mra {
           // out.coeffs() (the real tensor, not just its view) travels through
           // too, so the batch leader can read its sparsity and aggregate every
           // member's bytes into one pinned buffer + one H2D copy instead of
-          // each member pushing its own via SparsityManager here.
+          // each member pushing its own via SparsityManager here. n_nonzero
+          // (this member's own, computed above independent of batching)
+          // travels through as well, so the leader can flatten every
+          // member's own non-zero work items into one combined 1D launch
+          // (see submit_convolution_batch_leader).
           auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
-                                                                  transr, transs, opnorms_view, tol, at, out.coeffs());
+                                                                  transr, transs, opnorms_view, tol, at, out.coeffs(),
+                                                                  n_nonzero);
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
-          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac);
+          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, total_functions);
         } else
 #endif // MRA_ENABLE_HOST
         {
           auto sparseman = make_sparsity_manager(out);
           sparseman.populate_device_sparsity();
-          submit_convolution_kernel<T, NDIM>(key, key-key, K, N, fac, tol, /*in_node_view*/ empty_node_view,
+          submit_convolution_kernel<T, NDIM>(key, key-key, K, N, n_nonzero, fac, tol, /*in_node_view*/ empty_node_view,
                                               in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
         }
@@ -793,7 +822,7 @@ namespace mra {
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
-      [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool](
+      [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool, total_functions](
           const detail::KeyPair<NDIM>& keypair,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
@@ -831,6 +860,10 @@ namespace mra {
       bool last_key = contribution_keys.empty();
       SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
       sparsity.nonzero_if_any(in_node, contribution);
+      // out's own sparsity (built below) is exactly this OR, so a single
+      // on-device scan of out's sparsity (find_nth_nonzero) suffices to
+      // recover each real function id -- no union scan needed here.
+      const size_type n_nonzero = sparsity.count_nonzero();
 
       mra::FunctionsCompressedNode<T, NDIM> out(key, N);
 
@@ -845,12 +878,19 @@ namespace mra {
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
 
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * N, TempScope);
+      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
       if (last_key) {
-        resnorms =  DenseTensor<T, 1>(N, TempScope);
+        // Zero-fill host-side first (rather than relying on default-
+        // constructed 0), since the kernel below only launches blocks for
+        // out's non-zero functions -- covers exactly what
+        // convolution_process_one used to write 0.0 for explicitly. Needs
+        // SyncIn (rather than TempScope/Allocate) so this host fill reaches
+        // the device copy the kernel reads/writes.
+        resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncIn);
+        std::fill(resnorms.buffer().host_ptr(), resnorms.buffer().host_ptr() + N, T(0));
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
@@ -884,17 +924,22 @@ namespace mra {
         // out.coeffs() (the real tensor, not just its view) travels through
         // too, so the batch leader can read its sparsity and aggregate every
         // member's bytes into one pinned buffer + one H2D copy instead of
-        // each member pushing its own via SparsityManager here.
+        // each member pushing its own via SparsityManager here. n_nonzero
+        // (this member's own, computed above independent of batching)
+        // travels through as well, so the leader can flatten every
+        // member's own non-zero work items into one combined 1D launch
+        // (see submit_convolution_batch_leader).
         auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
-                                                                       transr, transs, opnorms_view, tol, at, out.coeffs());
+                                                                       transr, transs, opnorms_view, tol, at, out.coeffs(),
+                                                                       n_nonzero);
         // followers: the leader's batched launch already wrote our slice of out/resnorms.
-        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac);
+        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, total_functions);
       } else
 #endif // MRA_ENABLE_HOST
       {
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
-        submit_convolution_kernel<T, NDIM>(key, displacement, K, N, fac, tol, in_node_view,
+        submit_convolution_kernel<T, NDIM>(key, displacement, K, N, n_nonzero, fac, tol, in_node_view,
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
