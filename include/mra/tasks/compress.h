@@ -101,7 +101,9 @@ namespace mra
     /* append out edge to set of edges */
     auto compress_out_edges = std::tuple_cat(send_leaves_up_edges, std::make_tuple(out));
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
-    auto do_compress = [&, fns, K, is_ns, name, enable_compress_batching, compress_pool](const mra::Key<NDIM>& key,
+    auto do_compress =
+      [&, fns, K, is_ns, name, enable_compress_batching, compress_pool, total_functions](
+                          const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in1,
