@@ -39,6 +39,12 @@ namespace mra{
     // calling set_batch_size() again after this graph exists has no effect on it.
     const std::size_t max_batch_size = mra::get_batch_size();
     const bool enable_reconstruct_batching = mra::batching_enabled();
+    // Total function count across the whole FunctionSet -- fixed for this
+    // operation's entire run (unlike a single node's N, which varies with
+    // key.batch()). Used to size the batch leader's sparsity-byte staging
+    // buffer to a fixed upper bound so it never needs to grow after its
+    // first allocation.
+    const size_type total_functions = fns->num_functions();
 
 #ifndef MRA_ENABLE_HOST
     // reconstruct's only "operator data" is hg, a single two-scale filter
@@ -81,11 +87,18 @@ namespace mra{
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) p->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) p->set_devicemap(devicemap);
 
-    auto do_reconstruct = [&, fns, K, accumulate_NS, name, enable_reconstruct_batching, reconstruct_pool](const mra::Key<NDIM>& key,
+    auto do_reconstruct = [&, fns, K, accumulate_NS, name, enable_reconstruct_batching, reconstruct_pool, total_functions](const mra::Key<NDIM>& key,
                                             const mra::FunctionsCompressedNode<T, NDIM>& node,
                                             const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       size_type N = fns->num_functions(key);
-      const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*N;
+      // Work sparsity for this node: the kernel's skip condition ORs node
+      // and from_parent's own sparsity independently (neither subsumes the
+      // other), so this is a genuine union -- not reusable from result's own
+      // sparsity (built below from a different condition, from_parent.is_leaf).
+      SparsityInfo work_sparsity(N, SparsityInfo::InitType::AllZero);
+      work_sparsity.nonzero_if_any(node, from_parent);
+      const size_type n_nonzero = work_sparsity.count_nonzero();
+      const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*n_nonzero;
       ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
       const auto& hg = functiondata.get_hg();
       mra::KeyChildren<NDIM> children(key);
@@ -244,17 +257,21 @@ namespace mra{
         // through too, so the batch leader can read their sparsity and
         // aggregate every member's bytes into one pinned buffer + one H2D
         // copy instead of each member pushing its own via SparsityManager here.
+        // n_nonzero (this member's own, computed above independent of
+        // batching) travels through as well, so the leader can flatten
+        // every member's own non-zero work items into one combined 1D
+        // launch (see submit_reconstruct_batch_leader).
         auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view, tmp_scratch,
                                                                 from_parent_view, r_ptrs, result_view,
-                                                                r_arr, result);
+                                                                r_arr, result, n_nonzero);
         // followers: the leader's batched launch already wrote our slice of r_arr/result.
-        detail::submit_reconstruct_batch_leader<T, NDIM>(batch, *reconstruct_pool, K, accumulate_NS, hg_view);
+        detail::submit_reconstruct_batch_leader<T, NDIM>(batch, *reconstruct_pool, K, accumulate_NS, hg_view, total_functions);
       } else
 #endif // MRA_ENABLE_HOST
       {
         auto sparseman = make_sparsity_manager(r_arr, result);
         sparseman.populate_device_sparsity();
-        submit_reconstruct_kernel(key, N, K, accumulate_NS, node_view, hg_view, from_parent_view,
+        submit_reconstruct_kernel(key, N, n_nonzero, K, accumulate_NS, node_view, hg_view, from_parent_view,
                                   r_ptrs, result_view, tmp_scratch.current_device_ptr(),
                                   ttg::device::current_stream());
       }

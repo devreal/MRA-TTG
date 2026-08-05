@@ -88,6 +88,30 @@ namespace mra {
       return N;
     }
 
+    /**
+     * Same as find_nth_nonzero, but for kernels whose skip condition ORs two
+     * (or more) genuinely independent views' sparsity -- e.g. reconstruct's
+     * node/from_parent, where neither view's own sparsity provably subsumes
+     * the other's (unlike compress's p/result, where a single-view scan
+     * suffices). Finds the function id of the `pos`-th entry that is
+     * non-zero in ANY of `view`/`more...`, by a linear scan over [0, N).
+     * Device-callable; call ONCE per thread-block, same as find_nth_nonzero.
+     */
+    template<typename ViewT, typename... MoreViews>
+    SCOPE size_type find_nth_nonzero_any(size_type N, size_type pos, const ViewT& view, const MoreViews&... more) {
+      size_type count = 0;
+      for (size_type i = 0; i < N; ++i) {
+        if (view.is_nonzero(i) || (more.is_nonzero(i) || ...)) {
+          if (count == pos) {
+            return i;
+          }
+          ++count;
+        }
+      }
+      assert(false && "find_nth_nonzero_any: pos out of range for the number of non-zero entries in the union");
+      return N;
+    }
+
   } // namespace detail
 
   /**

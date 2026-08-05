@@ -11,6 +11,7 @@ namespace mra {
     Key<3> displacement,
     size_type K,
     size_type N,
+    size_type n_nonzero,
     const double fac,
     const double tol,
     const SparseTensorView<double, 3+1>& in,

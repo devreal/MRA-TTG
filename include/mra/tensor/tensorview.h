@@ -405,8 +405,18 @@ namespace mra {
     /// Accumulate into patch
     /// Device: assumes this operation is called by all threads in a block
     /// Host: assumes this operation is called by a single CPU thread
+    ///
+    /// Written with an explicit template parameter + requires clause rather
+    /// than an abbreviated `concepts::TensorView<...> auto` parameter: same
+    /// reason as operator=(const U&) below -- the abbreviated form here
+    /// reliably crashed nvcc's cicc (a stack overflow inside the EDG front
+    /// end, the AOT counterpart of the NVRTC crash documented below). Unlike
+    /// operator=, this one doesn't need concepts::DenseTensorView (which
+    /// requires a fully-defined TensorView), so it stays defined in-class.
+    template<typename U>
+    requires concepts::TensorView<U, TV::ndim()>
     typename std::enable_if<!std::is_const_v<TV>,TensorSlice&>::type
-    SCOPE operator+=(const concepts::TensorView<TV::ndim()> auto& other) {
+    SCOPE operator+=(const U& other) {
       foreach_idx(*this, [&](size_type i){ this->operator[](i) += other[i]; });
       return *this;
     }
