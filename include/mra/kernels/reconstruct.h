@@ -176,6 +176,25 @@ namespace mra {
           THROWF("reconstruct_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
                  (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
         }
+        // Separate concern from the count check above: result_view/r_arr's
+        // own sparsity is built from a *different* criterion than
+        // node/from_parent's value sparsity (see mra/tasks/reconstruct.h's
+        // comment on `sparsity`/`work_sparsity`) -- verify it doesn't reach
+        // outside the positions this grid actually visits.
+        const size_type bad_result = find_nonzero_not_in_union(N, result_view, node_view, from_parent_view);
+        if (bad_result != N) {
+          THROWF("reconstruct_kernel: result_view non-zero at fnid=%llu (level %d) outside "
+                 "node/from_parent union -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_result, (int)key.level());
+        }
+        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
+          const size_type bad_child = find_nonzero_not_in_union(N, r_arr[c], node_view, from_parent_view);
+          if (bad_child != N) {
+            THROWF("reconstruct_kernel: r_arr[%llu] non-zero at fnid=%llu (level %d) outside "
+                   "node/from_parent union -- that position is never visited by this launch\n",
+                   (unsigned long long)c, (unsigned long long)bad_child, (int)key.level());
+          }
+        }
       }
 #endif // MRA_CHECK_NORMS
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x){
@@ -371,6 +390,27 @@ namespace mra {
                  "host=%llu device=%llu (N=%llu)\n",
                  (unsigned long long)member, (unsigned long long)expected,
                  (unsigned long long)actual, (unsigned long long)member_N);
+        }
+        // Same subset check as reconstruct_kernel's non-batched counterpart:
+        // result_view/r_arr's own sparsity (from_parent.is_leaf-derived) must
+        // not reach outside this member's node/from_parent union.
+        auto& node_view = std::get<idx::node_view>(arg);
+        auto& from_parent_view = std::get<idx::from_parent_view>(arg);
+        auto& r_arr = std::get<idx::r_arr>(arg);
+        auto& result_view = std::get<idx::result_view>(arg);
+        const size_type bad_result = find_nonzero_not_in_union(member_N, result_view, node_view, from_parent_view);
+        if (bad_result != member_N) {
+          THROWF("reconstruct_kernel_batched: result_view non-zero at fnid=%llu for batch member %llu "
+                 "outside node/from_parent union -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_result, (unsigned long long)member);
+        }
+        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
+          const size_type bad_child = find_nonzero_not_in_union(member_N, r_arr[c], node_view, from_parent_view);
+          if (bad_child != member_N) {
+            THROWF("reconstruct_kernel_batched: r_arr[%llu] non-zero at fnid=%llu for batch member %llu "
+                   "outside node/from_parent union -- that position is never visited by this launch\n",
+                   (unsigned long long)c, (unsigned long long)bad_child, (unsigned long long)member);
+          }
         }
       }
     }

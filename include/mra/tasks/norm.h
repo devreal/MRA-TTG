@@ -51,6 +51,13 @@ namespace mra{
       // TODO: reuse of one of the input norms?
       size_type N = fns->num_functions(key);
       auto norms_result = norm_tensor_type(N);
+      // Zero-fill host-side first (rather than relying on default-constructed
+      // 0), since the kernel below only launches blocks for `in`'s non-zero
+      // functions -- covers exactly what norm_kernel used to write 0.0 for
+      // explicitly. norms_result's default scope is SyncIn, so this fill
+      // reaches the device copy via the select() below.
+      std::fill(norms_result.buffer().host_ptr(), norms_result.buffer().host_ptr() + N, T(0));
+      const size_type n_nonzero = in.coeffs().sparsity().count_nonzero();
       auto fnnorms = FunctionNorms(name, norm0, norm1, norm2, norm3, norm4, norm5, norm6, norm7);
       //std::cout << name << " " << key << std::endl;
 #ifndef MRA_ENABLE_HOST
@@ -65,7 +72,7 @@ namespace mra{
           norm2.buffer().current_device_ptr(), norm3.buffer().current_device_ptr(),
           norm4.buffer().current_device_ptr(), norm5.buffer().current_device_ptr(),
           norm6.buffer().current_device_ptr(), norm7.buffer().current_device_ptr()};
-      submit_norm_kernel(key, N, K, node_view, norm_result_view, child_norms, ttg::device::current_stream());
+      submit_norm_kernel(key, N, n_nonzero, K, node_view, norm_result_view, child_norms, ttg::device::current_stream());
 
       fnnorms.compute();
 #ifndef MRA_ENABLE_HOST

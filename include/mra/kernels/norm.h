@@ -34,19 +34,21 @@ namespace mra {
       T* result_norms,
       std::array<const T*, Key<NDIM>::num_children()> child_norms,
       size_type N,
+      size_type n_nonzero,
       size_type K,
       const Key<NDIM>& key)
     {
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
       SHARED DenseTensorView<const T, NDIM> n;
       SHARED std::array<T, Key<NDIM>::num_children()> block_child_norms;
-      for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
-        if (node.is_zero(blockid)) {
-          /* no work to do */
-          if (is_team_lead()) result_norms[blockid] = T(0.0);
-          continue;
-        }
+      SHARED size_type blockid;
+      // Zero-function entries of result_norms are pre-filled with 0.0
+      // host-side (see mra/tasks/norm.h) since no block touches them here.
+      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         if (is_team_lead()) {
+          // node has exactly n_nonzero non-zero entries, so this always
+          // finds a valid function id -- see submit_norm_kernel.
+          blockid = find_nth_nonzero(N, pos, node);
           n = node(blockid);
           for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
             block_child_norms[i] = (child_norms[i] != nullptr) ? child_norms[i][blockid] : T(0.0);
@@ -63,6 +65,7 @@ namespace mra {
   void submit_norm_kernel(
     const Key<NDIM>& key,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     const concepts::TensorView<NDIM+1> auto& in,
     concepts::TensorView<1> auto& result_norms,
@@ -71,8 +74,8 @@ namespace mra {
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    CALL_KERNEL(detail::norm_kernel, N, thread_dims, 0, stream,
-        (in, result_norms.data(), child_norms, N, K, key));
+    CALL_KERNEL(detail::norm_kernel, n_nonzero, thread_dims, 0, stream,
+        (in, result_norms.data(), child_norms, N, n_nonzero, K, key));
     checkSubmit();
   }
 
