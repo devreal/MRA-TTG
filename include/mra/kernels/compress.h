@@ -144,6 +144,31 @@ namespace mra {
       T* d_sumsq,
       const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto in_views)
     {
+#if defined(MRA_CHECK_NORMS)
+      // n_nonzero was computed host-side (mra/tasks/compress.h's `sparsity`,
+      // = nonzero_if_any(result, in)) and sizes this launch's grid/tmp
+      // buffer; the non-batched path scatters that same sparsity into
+      // p_in's device bitfield via SparsityManager::populate_device_sparsity
+      // (mra/tensor/sparsitymanager.h) rather than the from-scratch scatter
+      // kernel the batched path uses -- cross-check the two still agree.
+      if (blockIdx.x == 0 && is_team_lead()) {
+        const size_type actual = count_union_nonzero(N, p_in);
+        if (actual != n_nonzero) {
+          THROWF("compress_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
+                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
+        }
+        // p's sparsity is documented as a superset of result's (see
+        // mra/tasks/compress.h's comment on `sparsity`/n_nonzero) -- verify
+        // result_in doesn't need data at a position p_in (hence this grid)
+        // doesn't cover.
+        const size_type bad_result = find_nonzero_not_in_union(N, result_in, p_in);
+        if (bad_result != N) {
+          THROWF("compress_kernel: result_in non-zero at fnid=%llu (level %d) outside p_in's "
+                 "coverage -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_result, (int)key.level());
+        }
+      }
+#endif // MRA_CHECK_NORMS
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         compress_process_one<T, NDIM>(key, K, is_ns, node_in, p_in, result_in, hgT,
                                       tmp, d_sumsq, in_views, N, pos);

@@ -144,11 +144,13 @@ namespace mra {
 
     /**
      * Debug-only: verifies that `subset`'s non-zero set is fully contained
-     * in the union of `unionA`/`unionB`'s non-zero sets -- i.e. that every
-     * position `subset` needs data at is a position the launch grid (sized
-     * by the unionA/unionB coverage) actually visits. Returns the first
-     * index where this is violated (subset non-zero but neither unionA nor
-     * unionB non-zero), or N if no violation is found.
+     * in the union of `unionView`/`more...`'s non-zero sets -- i.e. that
+     * every position `subset` needs data at is a position the launch grid
+     * (sized by that union's coverage) actually visits. Returns the first
+     * index where this is violated (subset non-zero but none of
+     * unionView/more... non-zero), or N if no violation is found. `more`
+     * may be empty, for the single-view-superset case (e.g. compress's
+     * result vs. p).
      *
      * Motivating case: reconstruct's `result`/`r_arr[c]` sparsity is built
      * from a *different* criterion (from_parent.is_leaf) than the grid's own
@@ -159,11 +161,11 @@ namespace mra {
      * agree on their total count; it says nothing about whether a third,
      * differently-sourced sparsity like `result`'s stays inside that set.
      */
-    template<typename SubsetViewT, typename ViewA, typename ViewB>
+    template<typename SubsetViewT, typename ViewT, typename... MoreViews>
     SCOPE size_type find_nonzero_not_in_union(size_type N, const SubsetViewT& subset,
-                                               const ViewA& unionA, const ViewB& unionB) {
+                                               const ViewT& unionView, const MoreViews&... more) {
       for (size_type i = 0; i < N; ++i) {
-        if (subset.is_nonzero(i) && !(unionA.is_nonzero(i) || unionB.is_nonzero(i))) {
+        if (subset.is_nonzero(i) && !(unionView.is_nonzero(i) || (more.is_nonzero(i) || ...))) {
           return i;
         }
       }
