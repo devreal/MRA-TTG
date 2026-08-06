@@ -147,6 +147,63 @@ namespace mra {
       reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr, result);
     }
 
+#if defined(MRA_CHECK_NORMS)
+    /**
+     * Debug-only, launched as its OWN kernel (grid of 1 block) immediately
+     * before reconstruct_kernel below, on the same stream -- NOT inlined
+     * into reconstruct_kernel itself. See
+     * compress_verify_sparsity_kernel's comment (mra/kernels/compress.h)
+     * for why: a check in block 0 of reconstruct_kernel would race against
+     * every other block's call into find_nth_nonzero_any in that SAME
+     * launch, and CUDA gives no ordering guarantee between concurrently
+     * running blocks -- if another block hits that assert first, the whole
+     * context aborts immediately and this check's own THROWF (even if it
+     * also would have fired) never gets to print. A separate, prior kernel
+     * on the same stream sidesteps this entirely.
+     *
+     * n_nonzero was computed host-side (mra/tasks/reconstruct.h's
+     * work_sparsity, a union over node/from_parent's *host* sparsity) and
+     * sizes reconstruct_kernel's grid/tmp buffer; nothing scatters that
+     * result into node_view/from_parent_view's own device bitfields, so the
+     * two are only consistent if whatever populated those bitfields agrees
+     * with work_sparsity. Also verifies result_view/r_arr's own sparsity
+     * (built from a *different* criterion, from_parent.is_leaf) doesn't
+     * reach outside the positions this grid actually visits.
+     */
+    template<typename T, Dimension NDIM>
+    GLOBALSCOPE void reconstruct_verify_sparsity_kernel_single(
+      Key<NDIM> key,
+      size_type N,
+      size_type n_nonzero,
+      const concepts::TensorView<NDIM+1> auto node_view,
+      const concepts::TensorView<NDIM+1> auto from_parent_view,
+      concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
+      concepts::TensorView<NDIM+1> auto result_view)
+    {
+      if (is_team_lead()) {
+        const size_type actual = count_union_nonzero(N, node_view, from_parent_view);
+        if (actual != n_nonzero) {
+          THROWF("reconstruct_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
+                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
+        }
+        const size_type bad_result = find_nonzero_not_in_union(N, result_view, node_view, from_parent_view);
+        if (bad_result != N) {
+          THROWF("reconstruct_kernel: result_view non-zero at fnid=%llu (level %d) outside "
+                 "node/from_parent union -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_result, (int)key.level());
+        }
+        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
+          const size_type bad_child = find_nonzero_not_in_union(N, r_arr[c], node_view, from_parent_view);
+          if (bad_child != N) {
+            THROWF("reconstruct_kernel: r_arr[%llu] non-zero at fnid=%llu (level %d) outside "
+                   "node/from_parent union -- that position is never visited by this launch\n",
+                   (unsigned long long)c, (unsigned long long)bad_child, (int)key.level());
+          }
+        }
+      }
+    }
+#endif // MRA_CHECK_NORMS
+
     template<typename T, Dimension NDIM>
     GLOBALSCOPE void
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
@@ -163,40 +220,6 @@ namespace mra {
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
       concepts::TensorView<NDIM+1> auto result_view)
     {
-#if defined(MRA_CHECK_NORMS)
-      // n_nonzero was computed host-side (mra/tasks/reconstruct.h's
-      // work_sparsity, a union over node/from_parent's *host* sparsity) and
-      // sizes this launch's grid/tmp buffer; nothing scatters that result
-      // into node_view/from_parent_view's own device bitfields, so the two
-      // are only consistent if whatever populated those bitfields agrees
-      // with work_sparsity. Cross-check once, cheaply (single block).
-      if (blockIdx.x == 0 && is_team_lead()) {
-        const size_type actual = count_union_nonzero(N, node_view, from_parent_view);
-        if (actual != n_nonzero) {
-          THROWF("reconstruct_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
-                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
-        }
-        // Separate concern from the count check above: result_view/r_arr's
-        // own sparsity is built from a *different* criterion than
-        // node/from_parent's value sparsity (see mra/tasks/reconstruct.h's
-        // comment on `sparsity`/`work_sparsity`) -- verify it doesn't reach
-        // outside the positions this grid actually visits.
-        const size_type bad_result = find_nonzero_not_in_union(N, result_view, node_view, from_parent_view);
-        if (bad_result != N) {
-          THROWF("reconstruct_kernel: result_view non-zero at fnid=%llu (level %d) outside "
-                 "node/from_parent union -- that position is never visited by this launch\n",
-                 (unsigned long long)bad_result, (int)key.level());
-        }
-        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
-          const size_type bad_child = find_nonzero_not_in_union(N, r_arr[c], node_view, from_parent_view);
-          if (bad_child != N) {
-            THROWF("reconstruct_kernel: r_arr[%llu] non-zero at fnid=%llu (level %d) outside "
-                   "node/from_parent union -- that position is never visited by this launch\n",
-                   (unsigned long long)c, (unsigned long long)bad_child, (int)key.level());
-          }
-        }
-      }
-#endif // MRA_CHECK_NORMS
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x){
         reconstruct_process_one<T, NDIM>(key, K, accumulate_NS, node_view, tmp_ptr, hg,
                                          from_parent_view, r_arr, result_view, N, pos);
@@ -219,6 +242,17 @@ namespace mra {
     T* tmp,
     ttg::device::Stream stream)
   {
+#if defined(MRA_CHECK_NORMS)
+    // Separate, prior kernel on the same stream -- see
+    // reconstruct_verify_sparsity_kernel_single's comment for why this must
+    // not be inlined into reconstruct_kernel itself (a same-launch race
+    // against find_nth_nonzero_any's assert in other blocks would let this
+    // check's own diagnostic go unprinted).
+    CALL_KERNEL((detail::reconstruct_verify_sparsity_kernel_single<T, NDIM>), 1, 32, 0, stream,
+                (key, N, n_nonzero, node, from_parent, r_arr, result));
+    checkSubmit();
+#endif // MRA_CHECK_NORMS
+
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     //CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);

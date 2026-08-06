@@ -128,6 +128,54 @@ namespace mra {
                            &d_sumsq[tmp_pos], block_in_views);
     }
 
+#if defined(MRA_CHECK_NORMS)
+    /**
+     * Debug-only, launched as its OWN kernel (grid of 1 block) immediately
+     * before compress_kernel below, on the same stream -- NOT inlined into
+     * compress_kernel itself. Putting this check in block 0 of
+     * compress_kernel would race against every other block's call into
+     * compress_process_one/find_nth_nonzero in that SAME launch: CUDA gives
+     * no ordering guarantee between concurrently-running blocks, so if some
+     * other block hits find_nth_nonzero's assert first, the whole context
+     * aborts immediately and this check's THROWF (even if it also would have
+     * fired) never gets to print -- device printf buffers are not flushed on
+     * an abort. A separate, prior kernel on the same stream sidesteps this
+     * entirely: stream ordering guarantees it runs (and, if it traps,
+     * finishes aborting) to completion before compress_kernel ever starts.
+     *
+     * n_nonzero was computed host-side (mra/tasks/compress.h's `sparsity`,
+     * = nonzero_if_any(result, in)) and sizes compress_kernel's grid/tmp
+     * buffer; the non-batched path scatters that same sparsity into p_in's
+     * device bitfield via SparsityManager::populate_device_sparsity
+     * (mra/tensor/sparsitymanager.h) rather than the from-scratch scatter
+     * kernel the batched path uses -- cross-check the two still agree, and
+     * that result_in (documented as a subset of p_in's coverage) doesn't
+     * need data outside it.
+     */
+    template<typename T, Dimension NDIM>
+    GLOBALSCOPE void compress_verify_sparsity_kernel(
+      Key<NDIM> key,
+      size_type N,
+      size_type n_nonzero,
+      concepts::TensorView<NDIM+1> auto p_in,
+      concepts::TensorView<NDIM+1> auto result_in)
+    {
+      if (is_team_lead()) {
+        const size_type actual = count_union_nonzero(N, p_in);
+        if (actual != n_nonzero) {
+          THROWF("compress_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
+                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
+        }
+        const size_type bad_result = find_nonzero_not_in_union(N, result_in, p_in);
+        if (bad_result != N) {
+          THROWF("compress_kernel: result_in non-zero at fnid=%llu (level %d) outside p_in's "
+                 "coverage -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_result, (int)key.level());
+        }
+      }
+    }
+#endif // MRA_CHECK_NORMS
+
     template<typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel(
@@ -144,31 +192,6 @@ namespace mra {
       T* d_sumsq,
       const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto in_views)
     {
-#if defined(MRA_CHECK_NORMS)
-      // n_nonzero was computed host-side (mra/tasks/compress.h's `sparsity`,
-      // = nonzero_if_any(result, in)) and sizes this launch's grid/tmp
-      // buffer; the non-batched path scatters that same sparsity into
-      // p_in's device bitfield via SparsityManager::populate_device_sparsity
-      // (mra/tensor/sparsitymanager.h) rather than the from-scratch scatter
-      // kernel the batched path uses -- cross-check the two still agree.
-      if (blockIdx.x == 0 && is_team_lead()) {
-        const size_type actual = count_union_nonzero(N, p_in);
-        if (actual != n_nonzero) {
-          THROWF("compress_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
-                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
-        }
-        // p's sparsity is documented as a superset of result's (see
-        // mra/tasks/compress.h's comment on `sparsity`/n_nonzero) -- verify
-        // result_in doesn't need data at a position p_in (hence this grid)
-        // doesn't cover.
-        const size_type bad_result = find_nonzero_not_in_union(N, result_in, p_in);
-        if (bad_result != N) {
-          THROWF("compress_kernel: result_in non-zero at fnid=%llu (level %d) outside p_in's "
-                 "coverage -- that position is never visited by this launch\n",
-                 (unsigned long long)bad_result, (int)key.level());
-        }
-      }
-#endif // MRA_CHECK_NORMS
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         compress_process_one<T, NDIM>(key, K, is_ns, node_in, p_in, result_in, hgT,
                                       tmp, d_sumsq, in_views, N, pos);
@@ -192,6 +215,17 @@ namespace mra {
     const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& in_views,
     ttg::device::Stream stream)
   {
+#if defined(MRA_CHECK_NORMS)
+    // Separate, prior kernel on the same stream -- see
+    // compress_verify_sparsity_kernel's comment for why this must not be
+    // inlined into compress_kernel itself (a same-launch race against
+    // find_nth_nonzero's assert in other blocks would let this check's own
+    // diagnostic go unprinted).
+    CALL_KERNEL((detail::compress_verify_sparsity_kernel<T, NDIM>), 1, 32, 0, stream,
+                (key, N, n_nonzero, p_view, result_view));
+    checkSubmit();
+#endif // MRA_CHECK_NORMS
+
     Dim3 thread_dims = max_thread_dims(2*K);
 
     auto smem_size = mTxmq_shmem_size<T>(2*K);
