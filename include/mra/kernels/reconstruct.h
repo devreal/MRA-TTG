@@ -163,6 +163,21 @@ namespace mra {
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto r_arr,
       concepts::TensorView<NDIM+1> auto result_view)
     {
+#if defined(MRA_CHECK_NORMS)
+      // n_nonzero was computed host-side (mra/tasks/reconstruct.h's
+      // work_sparsity, a union over node/from_parent's *host* sparsity) and
+      // sizes this launch's grid/tmp buffer; nothing scatters that result
+      // into node_view/from_parent_view's own device bitfields, so the two
+      // are only consistent if whatever populated those bitfields agrees
+      // with work_sparsity. Cross-check once, cheaply (single block).
+      if (blockIdx.x == 0 && is_team_lead()) {
+        const size_type actual = count_union_nonzero(N, node_view, from_parent_view);
+        if (actual != n_nonzero) {
+          THROWF("reconstruct_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
+                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
+        }
+      }
+#endif // MRA_CHECK_NORMS
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x){
         reconstruct_process_one<T, NDIM>(key, K, accumulate_NS, node_view, tmp_ptr, hg,
                                          from_parent_view, r_arr, result_view, N, pos);
@@ -323,6 +338,44 @@ namespace mra {
       }
     }
 
+#if defined(MRA_CHECK_NORMS)
+    /**
+     * Debug-only: cross-checks, for every member, that the flattened launch
+     * grid's slice for that member (member_offsets[m+1] - member_offsets[m],
+     * a running sum of each member's own host-computed n_nonzero -- see
+     * submit_reconstruct_batch_leader) agrees with a fresh on-device union
+     * scan of that same member's node_view/from_parent_view. Same rationale
+     * as the non-batched check in reconstruct_kernel above: nothing scatters
+     * the host union result into these views' own bitfields, so the two can
+     * silently drift apart. One block per member, same style as
+     * reconstruct_scatter_sparsity_kernel above. Launched (gated by
+     * MRA_CHECK_NORMS) immediately before reconstruct_kernel_batched in
+     * submit_reconstruct_kernel_batched.
+     */
+    template <typename T, Dimension NDIM>
+    GLOBALSCOPE void reconstruct_verify_sparsity_kernel(
+      ReconstructBatchArg<T, NDIM>* args,     // device ptr, size == num_members
+      const size_type* member_offsets)        // device ptr, size == num_members+1
+    {
+      using idx = ReconstructBatchArgIdx;
+
+      const size_type member = blockIdx.x;
+      if (is_team_lead()) {
+        auto& arg = args[member];
+        const size_type member_N = std::get<idx::n>(arg);
+        const size_type expected = member_offsets[member + 1] - member_offsets[member];
+        const size_type actual = count_union_nonzero(member_N, std::get<idx::node_view>(arg),
+                                                      std::get<idx::from_parent_view>(arg));
+        if (actual != expected) {
+          THROWF("reconstruct_kernel_batched: n_nonzero mismatch for batch member %llu: "
+                 "host=%llu device=%llu (N=%llu)\n",
+                 (unsigned long long)member, (unsigned long long)expected,
+                 (unsigned long long)actual, (unsigned long long)member_N);
+        }
+      }
+    }
+#endif // MRA_CHECK_NORMS
+
   } // namespace detail
 
   /**
@@ -374,6 +427,16 @@ namespace mra {
                                         offset_slot.host_args.size()*sizeof(size_type),
                                         hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
 #endif
+
+#if defined(MRA_CHECK_NORMS)
+    // Debug-only: verify the flattened grid's per-member slice (derived from
+    // each member's host-computed n_nonzero) still matches a fresh on-device
+    // union scan of that member's node_view/from_parent_view -- see
+    // reconstruct_verify_sparsity_kernel's comment for why these can drift.
+    CALL_KERNEL((detail::reconstruct_verify_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
+                (slot.dev_args, offset_slot.dev_args));
+    checkSubmit();
+#endif // MRA_CHECK_NORMS
 
     // Scatter each member's aggregated sparsity bytes into its own
     // r_arr/result tensors' inline bitfields; same stream as the main kernel

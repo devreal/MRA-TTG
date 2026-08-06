@@ -2,6 +2,7 @@
 #define MRA_DEVICE_PLATFORM_H
 
 #include <cstdlib>
+#include <cstdio>
 #include <algorithm>
 #include <iostream>
 
@@ -124,6 +125,23 @@ namespace mra::detail {
 #define THROW(s) do { printf(s); } while(0)
 #else  // __CUDA_ARCH__
 #define THROW(s) do { throw std::runtime_error(s); } while(0)
+#endif // __CUDA_ARCH__
+
+/* Same as THROW, but with printf-style formatting -- useful for debug checks
+ * that need to report actual values (e.g. an expected-vs-actual mismatch),
+ * where a fixed string wouldn't be informative enough. */
+#if defined(__CUDA_ARCH__)
+#define THROWF(fmt, ...) do { printf(fmt, __VA_ARGS__); __trap(); } while(0)
+#elif defined(__HIP__)
+/* TODO: how to error out on HIP? */
+#define THROWF(fmt, ...) do { printf(fmt, __VA_ARGS__); } while(0)
+#else  // __CUDA_ARCH__
+#define THROWF(fmt, ...)                                                     \
+  do {                                                                       \
+    char mra_throwf_buf[256];                                                \
+    std::snprintf(mra_throwf_buf, sizeof(mra_throwf_buf), fmt, __VA_ARGS__); \
+    throw std::runtime_error(mra_throwf_buf);                                \
+  } while(0)
 #endif // __CUDA_ARCH__
 
 #if defined(__CUDACC__)

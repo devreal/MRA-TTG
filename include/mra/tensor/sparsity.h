@@ -112,6 +112,36 @@ namespace mra {
       return N;
     }
 
+    /**
+     * Debug-only counterpart to find_nth_nonzero_any: counts how many of
+     * [0, N) are non-zero in ANY of `view`/`more...`, by the same linear
+     * scan over the views' own (already device-resident) inline sparsity
+     * bitfields. Used to cross-check a host-computed union non-zero count
+     * (e.g. reconstruct's work_sparsity, built from a separate SparsityInfo
+     * union over the *host*-side RangeSparsityBase sparsity) against what
+     * the device bitfields these views actually carry agree on -- the two
+     * are maintained independently (nothing scatters the host union result
+     * into these views' bitfields), so a mismatch here means the launch
+     * grid was sized wrong: too few blocks silently drops real work, too
+     * many makes find_nth_nonzero_any run past the real count. Not meant
+     * for the hot path -- gate call sites behind MRA_CHECK_NORMS.
+     *
+     * Named distinctly from mra::count_nonzero_any (sparsityinfo.h, a
+     * single-tensor host-side wrapper around Tensor::sparsity().count()) to
+     * avoid any confusion between the two -- different namespace, different
+     * arity, but similar enough names to trip someone up otherwise.
+     */
+    template<typename ViewT, typename... MoreViews>
+    SCOPE size_type count_union_nonzero(size_type N, const ViewT& view, const MoreViews&... more) {
+      size_type count = 0;
+      for (size_type i = 0; i < N; ++i) {
+        if (view.is_nonzero(i) || (more.is_nonzero(i) || ...)) {
+          ++count;
+        }
+      }
+      return count;
+    }
+
   } // namespace detail
 
   /**
