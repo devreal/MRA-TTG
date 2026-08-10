@@ -2,6 +2,10 @@
 #define MRA_TASKS_COMPRESS_H
 
 #include <ttg.h>
+#include <mutex>
+#include <sstream>
+#include <vector>
+#include <iostream>
 #include "mra/kernels.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
@@ -281,6 +285,34 @@ namespace mra
           co_await ttg::device::wait(d_sumsq, norms.buffer());
 #endif
           norms.verify();
+
+#if defined(MRA_CHECK_NORMS)
+          // DEBUG: right after the compress kernel (+ its sparsity scatter,
+          // if batched) has completed, compare result's (d's) host-tracked
+          // sparsity against what's actually on the device -- this is the
+          // earliest point in the pipeline where "node" (as later seen by
+          // reconstruct) gets its sparsity established.
+          if (!result.empty() && rcoeffs_view.storage() != nullptr) {
+            static std::mutex dbg_mtx_compress;
+            std::lock_guard<std::mutex> lg(dbg_mtx_compress);
+            cudaDeviceSynchronize();
+            std::vector<unsigned char> devbytes(N);
+            cudaMemcpy(devbytes.data(), rcoeffs_view.storage(), N, cudaMemcpyDeviceToHost);
+            size_type dev_nz = 0;
+            for (size_type i = 0; i < N; ++i) if (devbytes[i] & 1) ++dev_nz;
+            size_type host_nz = result.coeffs().sparsity().count_nonzero();
+            if (dev_nz != host_nz) {
+              std::ostringstream oss;
+              oss << "COMPRESS-POST-KERNEL MISMATCH key=" << key << " N=" << N
+                  << " rcoeffs_view.storage()=" << (void*)rcoeffs_view.storage()
+                  << " host_nz=" << host_nz << " dev_nz=" << dev_nz
+                  << " dev_bytes=[";
+              for (size_type i = 0; i < N; ++i) oss << (unsigned)devbytes[i] << (i+1<N?",":"");
+              oss << "]\n";
+              std::cout << oss.str() << std::flush;
+            }
+          }
+#endif // MRA_CHECK_NORMS
 
           // Explicitly zero every function's sum first, rather than relying
           // on FunctionsReconstructedNode's default-constructed 0.0 --

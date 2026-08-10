@@ -48,6 +48,7 @@ namespace mra {
     size_type n_nonzero,
     concepts::TensorView<1> auto&& result_norms)
   {
+    if (n_nonzero == 0) return; // nothing to do; a 0-block launch trips "invalid argument" on some CUDA configs
     /* simple norm calculation can use as many threads as are available */
     CALL_KERNEL(detail::simple_norm_kernel, n_nonzero, MAX_THREADS_PER_BLOCK, 0, ttg::device::current_stream(),
         (key, in, result_norms, N, n_nonzero));

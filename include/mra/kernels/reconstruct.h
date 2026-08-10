@@ -2,6 +2,11 @@
 #define MRA_KERNELS_RECONSTRUCT_H
 
 #include <tuple>
+#include <utility>
+#include <mutex>
+#include <sstream>
+#include <vector>
+#include <iostream>
 
 #include "mra/misc/device_batch_pool.h"
 #include "mra/tensor/sparsitymanager.h"
@@ -117,10 +122,15 @@ namespace mra {
       SHARED size_type fnid;
 
       if (is_t0) {
-        // node_view/from_parent_view together have exactly n_nonzero
-        // positions where at least one is non-zero, so this always finds a
-        // valid function id -- see submit_reconstruct_kernel.
-        fnid = find_nth_nonzero_any(N, tmp_pos, node_view, from_parent_view);
+        // node_view/from_parent_view/result_view/r_arr[0..7] together have
+        // exactly n_nonzero positions where at least one is non-zero, so
+        // this always finds a valid function id -- see
+        // submit_reconstruct_kernel. result_view/r_arr must be included: a
+        // leaf/inner position can have an exactly-zero node/from_parent
+        // *value* yet still need its output slot visited (see
+        // mra/tasks/reconstruct.h's work_sparsity comment).
+        fnid = find_nth_nonzero_any_with_result(N, tmp_pos, node_view, from_parent_view, result_view, r_arr,
+                                                std::make_index_sequence<Key<NDIM>::num_children()>{});
 
         T* block_tmp_ptr = &tmp_ptr[tmp_pos*reconstruct_tmp_size<NDIM>(K)];
         const size_type TWOK2NDIM = std::pow(2*K,NDIM);
@@ -162,13 +172,13 @@ namespace mra {
      * on the same stream sidesteps this entirely.
      *
      * n_nonzero was computed host-side (mra/tasks/reconstruct.h's
-     * work_sparsity, a union over node/from_parent's *host* sparsity) and
-     * sizes reconstruct_kernel's grid/tmp buffer; nothing scatters that
-     * result into node_view/from_parent_view's own device bitfields, so the
-     * two are only consistent if whatever populated those bitfields agrees
-     * with work_sparsity. Also verifies result_view/r_arr's own sparsity
-     * (built from a *different* criterion, from_parent.is_leaf) doesn't
-     * reach outside the positions this grid actually visits.
+     * work_sparsity, now a union over node/from_parent *and* result/r_arr's
+     * host sparsity -- result/r_arr's own criteria, from_parent.is_leaf and
+     * "from_parent is Inner" respectively, are independent of node/from_parent's
+     * *value* sparsity, so they must be folded into the same union used here);
+     * nothing scatters that result into node_view/from_parent_view/result_view/
+     * r_arr's own device bitfields, so the two are only consistent if whatever
+     * populated those bitfields agrees with work_sparsity.
      */
     template<typename T, Dimension NDIM>
     GLOBALSCOPE void reconstruct_verify_sparsity_kernel_single(
@@ -181,24 +191,27 @@ namespace mra {
       concepts::TensorView<NDIM+1> auto result_view)
     {
       if (is_team_lead()) {
-        const size_type actual = count_union_nonzero(N, node_view, from_parent_view);
+        const size_type actual = count_union_nonzero_with_result(N, node_view, from_parent_view, result_view, r_arr,
+                                                                  std::make_index_sequence<Key<NDIM>::num_children()>{});
         if (actual != n_nonzero) {
+          // DEBUG: see reconstruct_verify_sparsity_kernel's (batched)
+          // matching breakdown for why this is here.
+          printf("RECONSTRUCT-VERIFY-BREAKDOWN key=(%d,[%lld,%lld,%lld]) n_nonzero=%llu actual=%llu N=%llu\n",
+                 (int)key.level(), (long long)key.translation()[0], (long long)key.translation()[1],
+                 (long long)key.translation()[2], (unsigned long long)n_nonzero, (unsigned long long)actual,
+                 (unsigned long long)N);
+          for (size_type i = 0; i < N; ++i) {
+            printf("  i=%llu node=%d from_parent=%d result=%d r_arr=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+                   (unsigned long long)i,
+                   (int)node_view.is_nonzero(i), (int)from_parent_view.is_nonzero(i),
+                   (int)result_view.is_nonzero(i),
+                   (int)r_arr[0].is_nonzero(i), (int)r_arr[1].is_nonzero(i),
+                   (int)r_arr[2].is_nonzero(i), (int)r_arr[3].is_nonzero(i),
+                   (int)r_arr[4].is_nonzero(i), (int)r_arr[5].is_nonzero(i),
+                   (int)r_arr[6].is_nonzero(i), (int)r_arr[7].is_nonzero(i));
+          }
           THROWF("reconstruct_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
                  (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
-        }
-        const size_type bad_result = find_nonzero_not_in_union(N, result_view, node_view, from_parent_view);
-        if (bad_result != N) {
-          THROWF("reconstruct_kernel: result_view non-zero at fnid=%llu (level %d) outside "
-                 "node/from_parent union -- that position is never visited by this launch\n",
-                 (unsigned long long)bad_result, (int)key.level());
-        }
-        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
-          const size_type bad_child = find_nonzero_not_in_union(N, r_arr[c], node_view, from_parent_view);
-          if (bad_child != N) {
-            THROWF("reconstruct_kernel: r_arr[%llu] non-zero at fnid=%llu (level %d) outside "
-                   "node/from_parent union -- that position is never visited by this launch\n",
-                   (unsigned long long)c, (unsigned long long)bad_child, (int)key.level());
-          }
         }
       }
     }
@@ -397,9 +410,12 @@ namespace mra {
      * grid's slice for that member (member_offsets[m+1] - member_offsets[m],
      * a running sum of each member's own host-computed n_nonzero -- see
      * submit_reconstruct_batch_leader) agrees with a fresh on-device union
-     * scan of that same member's node_view/from_parent_view. Same rationale
-     * as the non-batched check in reconstruct_kernel above: nothing scatters
-     * the host union result into these views' own bitfields, so the two can
+     * scan of that same member's node_view/from_parent_view/result_view/
+     * r_arr[0..7] -- result/r_arr's own criteria (from_parent.is_leaf, and
+     * "from_parent is Inner" per child) are independent of node/from_parent's
+     * *value* sparsity, so they must be part of this union too (see
+     * mra/tasks/reconstruct.h's work_sparsity comment). Nothing scatters the
+     * host union result into these views' own bitfields, so the two can
      * silently drift apart. One block per member, same style as
      * reconstruct_scatter_sparsity_kernel above. Launched (gated by
      * MRA_CHECK_NORMS) immediately before reconstruct_kernel_batched in
@@ -417,34 +433,36 @@ namespace mra {
         auto& arg = args[member];
         const size_type member_N = std::get<idx::n>(arg);
         const size_type expected = member_offsets[member + 1] - member_offsets[member];
-        const size_type actual = count_union_nonzero(member_N, std::get<idx::node_view>(arg),
-                                                      std::get<idx::from_parent_view>(arg));
-        if (actual != expected) {
-          THROWF("reconstruct_kernel_batched: n_nonzero mismatch for batch member %llu: "
-                 "host=%llu device=%llu (N=%llu)\n",
-                 (unsigned long long)member, (unsigned long long)expected,
-                 (unsigned long long)actual, (unsigned long long)member_N);
-        }
-        // Same subset check as reconstruct_kernel's non-batched counterpart:
-        // result_view/r_arr's own sparsity (from_parent.is_leaf-derived) must
-        // not reach outside this member's node/from_parent union.
         auto& node_view = std::get<idx::node_view>(arg);
         auto& from_parent_view = std::get<idx::from_parent_view>(arg);
         auto& r_arr = std::get<idx::r_arr>(arg);
         auto& result_view = std::get<idx::result_view>(arg);
-        const size_type bad_result = find_nonzero_not_in_union(member_N, result_view, node_view, from_parent_view);
-        if (bad_result != member_N) {
-          THROWF("reconstruct_kernel_batched: result_view non-zero at fnid=%llu for batch member %llu "
-                 "outside node/from_parent union -- that position is never visited by this launch\n",
-                 (unsigned long long)bad_result, (unsigned long long)member);
-        }
-        for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
-          const size_type bad_child = find_nonzero_not_in_union(member_N, r_arr[c], node_view, from_parent_view);
-          if (bad_child != member_N) {
-            THROWF("reconstruct_kernel_batched: r_arr[%llu] non-zero at fnid=%llu for batch member %llu "
-                   "outside node/from_parent union -- that position is never visited by this launch\n",
-                   (unsigned long long)c, (unsigned long long)bad_child, (unsigned long long)member);
+        const size_type actual = count_union_nonzero_with_result(member_N, node_view, from_parent_view, result_view, r_arr,
+                                                                  std::make_index_sequence<Key<NDIM>::num_children()>{});
+        if (actual != expected) {
+          // DEBUG: dump every view's per-position bit before trapping, so
+          // the exact source of the discrepancy (which view, which fnid) is
+          // visible instead of just the aggregate counts.
+          auto member_key = std::get<idx::key>(arg);
+          printf("RECONSTRUCT-VERIFY-BREAKDOWN member=%llu key=(%d,[%lld,%lld,%lld]) expected=%llu actual=%llu N=%llu\n",
+                 (unsigned long long)member, (int)member_key.level(),
+                 (long long)member_key.translation()[0], (long long)member_key.translation()[1],
+                 (long long)member_key.translation()[2],
+                 (unsigned long long)expected, (unsigned long long)actual, (unsigned long long)member_N);
+          for (size_type i = 0; i < member_N; ++i) {
+            printf("  i=%llu node=%d from_parent=%d result=%d r_arr=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+                   (unsigned long long)i,
+                   (int)node_view.is_nonzero(i), (int)from_parent_view.is_nonzero(i),
+                   (int)result_view.is_nonzero(i),
+                   (int)r_arr[0].is_nonzero(i), (int)r_arr[1].is_nonzero(i),
+                   (int)r_arr[2].is_nonzero(i), (int)r_arr[3].is_nonzero(i),
+                   (int)r_arr[4].is_nonzero(i), (int)r_arr[5].is_nonzero(i),
+                   (int)r_arr[6].is_nonzero(i), (int)r_arr[7].is_nonzero(i));
           }
+          THROWF("reconstruct_kernel_batched: n_nonzero mismatch for batch member %llu: "
+                 "host=%llu device=%llu (N=%llu)\n",
+                 (unsigned long long)member, (unsigned long long)expected,
+                 (unsigned long long)actual, (unsigned long long)member_N);
         }
       }
     }
@@ -502,22 +520,28 @@ namespace mra {
                                         hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
 #endif
 
-#if defined(MRA_CHECK_NORMS)
-    // Debug-only: verify the flattened grid's per-member slice (derived from
-    // each member's host-computed n_nonzero) still matches a fresh on-device
-    // union scan of that member's node_view/from_parent_view -- see
-    // reconstruct_verify_sparsity_kernel's comment for why these can drift.
-    CALL_KERNEL((detail::reconstruct_verify_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
-                (slot.dev_args, offset_slot.dev_args));
-    checkSubmit();
-#endif // MRA_CHECK_NORMS
-
     // Scatter each member's aggregated sparsity bytes into its own
     // r_arr/result tensors' inline bitfields; same stream as the main kernel
     // below, so stream ordering guarantees it completes first.
     CALL_KERNEL((detail::reconstruct_scatter_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
                 (slot.dev_args, sparsity_slot.dev_args));
     checkSubmit();
+
+#if defined(MRA_CHECK_NORMS)
+    // Debug-only: verify the flattened grid's per-member slice (derived from
+    // each member's host-computed n_nonzero) still matches a fresh on-device
+    // union scan of that member's node_view/from_parent_view/result_view/
+    // r_arr -- see reconstruct_verify_sparsity_kernel's comment for why these
+    // can drift. Must run AFTER the scatter above: result_view/r_arr are
+    // freshly-allocated output tensors whose device-side sparsity bitfield
+    // is only ever populated by that scatter (unlike node_view/
+    // from_parent_view, already correctly set by their producing tasks) --
+    // checking them before the scatter reads whatever stale/uninitialized
+    // bytes happened to occupy that device allocation previously.
+    CALL_KERNEL((detail::reconstruct_verify_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
+                (slot.dev_args, offset_slot.dev_args));
+    checkSubmit();
+#endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
@@ -622,6 +646,36 @@ namespace mra {
         auto& m_result_tensor   = batch[m].template get<7>(); // real result Tensor
         const size_type m_n_nonzero = batch[m].template get<8>();
         const size_type n = static_cast<size_type>(m_node_view.dim(0)); // structural N
+
+        // DEBUG: recompute the true device-side union (node_view OR
+        // from_parent_view, exactly what find_nth_nonzero_any scans) right
+        // here at batch-assembly/kernel-launch time, and compare against
+        // m_n_nonzero (the host-computed union this member's tmp buffer and
+        // grid were sized from). Guarded against null storage (e.g. root's
+        // empty from_parent).
+        if (m_node_view.storage() != nullptr && m_from_parent_view.storage() != nullptr) {
+          static std::mutex dbg_mtx_leader;
+          std::lock_guard<std::mutex> lg(dbg_mtx_leader);
+          cudaDeviceSynchronize();
+          std::vector<unsigned char> node_bytes(n), fp_bytes(n);
+          cudaMemcpy(node_bytes.data(), m_node_view.storage(), n, cudaMemcpyDeviceToHost);
+          cudaMemcpy(fp_bytes.data(), m_from_parent_view.storage(), n, cudaMemcpyDeviceToHost);
+          size_type union_nz = 0;
+          for (size_type i = 0; i < n; ++i) {
+            if ((node_bytes[i] & 1) || (fp_bytes[i] & 1)) ++union_nz;
+          }
+          if (union_nz != m_n_nonzero) {
+            std::ostringstream oss;
+            oss << "RECONSTRUCT-LEADER MISMATCH key=" << m_key << " n=" << n
+                << " m_n_nonzero=" << m_n_nonzero << " union_nz=" << union_nz
+                << " node_bytes=[";
+            for (size_type i = 0; i < n; ++i) oss << (unsigned)node_bytes[i] << (i+1<n?",":"");
+            oss << "] fp_bytes=[";
+            for (size_type i = 0; i < n; ++i) oss << (unsigned)fp_bytes[i] << (i+1<n?",":"");
+            oss << "]\n";
+            std::cout << oss.str() << std::flush;
+          }
+        }
 
         for (size_type c = 0; c < num_children; ++c) {
           sparsity_to_bytes(m_r_arr_tensor[c].coeffs().sparsity(),

@@ -1,6 +1,7 @@
 #ifndef MRA_TENSOR_SPARSITY_H
 #define MRA_TENSOR_SPARSITY_H
 
+#include <utility>
 #include "mra/misc/types.h"
 
 namespace mra {
@@ -113,6 +114,29 @@ namespace mra {
     }
 
     /**
+     * Same as find_nth_nonzero_any(N, pos, node_view, from_parent_view), but
+     * also unions in result_view and every element of r_arr (e.g.
+     * reconstruct's result/r_arr[0..7], whose own sparsity criteria --
+     * from_parent.is_leaf, "from_parent is Inner" per child -- are
+     * independent of node/from_parent's *value* sparsity, so a scan that
+     * only looked at node_view/from_parent_view could miss positions those
+     * outputs still need visited). Takes r_arr's index sequence as an
+     * explicit trailing parameter (rather than unpacking it via a nested
+     * index-sequence lambda at the call site) to avoid an nvcc EDG
+     * front-end bug where a lambda's own template parameter pack loses
+     * track of an enclosing function's compiler-synthesized
+     * abbreviated-auto template parameters -- see e.g. muopxv_fast's
+     * comment in mra/kernels/convolution.h for the same class of issue.
+     */
+    template<typename NodeViewT, typename FPViewT, typename ResultViewT, typename ArrT, std::size_t... Is>
+    SCOPE size_type find_nth_nonzero_any_with_result(size_type N, size_type pos,
+                                                      const NodeViewT& node_view, const FPViewT& from_parent_view,
+                                                      const ResultViewT& result_view, const ArrT& r_arr,
+                                                      std::index_sequence<Is...>) {
+      return find_nth_nonzero_any(N, pos, node_view, from_parent_view, result_view, r_arr[Is]...);
+    }
+
+    /**
      * Debug-only counterpart to find_nth_nonzero_any: counts how many of
      * [0, N) are non-zero in ANY of `view`/`more...`, by the same linear
      * scan over the views' own (already device-resident) inline sparsity
@@ -140,6 +164,21 @@ namespace mra {
         }
       }
       return count;
+    }
+
+    /**
+     * Same as count_union_nonzero(N, node_view, from_parent_view), but also
+     * unions in result_view and every element of r_arr -- see
+     * find_nth_nonzero_any_with_result's comment for why r_arr's index
+     * sequence is a trailing parameter here rather than a nested lambda at
+     * the call site.
+     */
+    template<typename NodeViewT, typename FPViewT, typename ResultViewT, typename ArrT, std::size_t... Is>
+    SCOPE size_type count_union_nonzero_with_result(size_type N,
+                                                     const NodeViewT& node_view, const FPViewT& from_parent_view,
+                                                     const ResultViewT& result_view, const ArrT& r_arr,
+                                                     std::index_sequence<Is...>) {
+      return count_union_nonzero(N, node_view, from_parent_view, result_view, r_arr[Is]...);
     }
 
     /**

@@ -2,6 +2,10 @@
 #define MRA_TASKS_RECONSTRUCT_H
 
 #include <ttg.h>
+#include <mutex>
+#include <sstream>
+#include <vector>
+#include <iostream>
 #include "mra/kernels.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
@@ -91,15 +95,6 @@ namespace mra{
                                             const mra::FunctionsCompressedNode<T, NDIM>& node,
                                             const mra::FunctionsReconstructedNode<T, NDIM>& from_parent) -> TASKTYPE {
       size_type N = fns->num_functions(key);
-      // Work sparsity for this node: the kernel's skip condition ORs node
-      // and from_parent's own sparsity independently (neither subsumes the
-      // other), so this is a genuine union -- not reusable from result's own
-      // sparsity (built below from a different condition, from_parent.is_leaf).
-      SparsityInfo work_sparsity(N, SparsityInfo::InitType::AllZero);
-      work_sparsity.nonzero_if_any(node, from_parent);
-      const size_type n_nonzero = work_sparsity.count_nonzero();
-      const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*n_nonzero;
-      ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
       const auto& hg = functiondata.get_hg();
       mra::KeyChildren<NDIM> children(key);
 
@@ -219,6 +214,58 @@ namespace mra{
         r_arr[i].allocate(child_sparsity_arr[i], K, ttg::scope::Allocate);
       }
 
+      // Work sparsity for this node: the kernel must visit fnid whenever ANY
+      // of node/from_parent (value sparsity: does this function have
+      // non-zero coefficients here) OR result/r_arr[0..7] (status-based
+      // sparsity: result is non-zero iff from_parent.is_leaf(i), each
+      // r_arr[c] is non-zero iff from_parent is Inner for that child) is
+      // non-zero. result/r_arr's criteria are independent of node/from_parent's
+      // *value* sparsity -- a leaf or inner position can have an exactly-zero
+      // coefficient and still need its output slot populated -- so folding
+      // only node/from_parent in here (as this used to) leaves some of
+      // result/r_arr's allocated slots outside the launch's own coverage,
+      // hence never visited/written (see reconstruct_verify_sparsity_kernel's
+      // "outside union" check in mra/kernels/reconstruct.h). Must run after
+      // result/r_arr are allocated (above), since it needs their sparsity.
+      SparsityInfo work_sparsity(N, SparsityInfo::InitType::AllZero);
+      [&]<std::size_t... Is>(std::index_sequence<Is...>){
+        work_sparsity.nonzero_if_any(node, from_parent, result, r_arr[Is]...);
+      }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
+      const size_type n_nonzero = work_sparsity.count_nonzero();
+      const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*n_nonzero;
+      ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+
+#ifdef MRA_CHECK_NORMS
+      // DEBUG: host-side breakdown of the exact same views the device-side
+      // verify kernel checks, keyed the same way (key + translation), so a
+      // device-side mismatch can be cross-referenced against the TRUE host
+      // bits for the same key -- tells us whether a residual discrepancy is
+      // a real host/device coherence gap (host bits differ from what the
+      // device reports for node/from_parent) or a remaining logic gap in
+      // this widened union (host bits agree with what SHOULD be there, but
+      // n_nonzero/the device scan still doesn't match).
+      {
+        static std::mutex dbg_mtx_host_breakdown;
+        std::lock_guard<std::mutex> lg(dbg_mtx_host_breakdown);
+        std::ostringstream oss;
+        oss << "RECONSTRUCT-HOST-BREAKDOWN key=(" << key.level() << ",["
+            << key.translation()[0] << "," << key.translation()[1] << "," << key.translation()[2]
+            << "]) n_nonzero=" << n_nonzero << " N=" << N << "\n";
+        for (size_type i = 0; i < N; ++i) {
+          oss << "  i=" << i
+              << " node=" << (int)node.sparsity().is_nonzero(i)
+              << " from_parent=" << (int)from_parent.sparsity().is_nonzero(i)
+              << " result=" << (int)result.sparsity().is_nonzero(i)
+              << " r_arr=[";
+          for (std::size_t c = 0; c < mra::Key<NDIM>::num_children(); ++c) {
+            oss << (int)r_arr[c].sparsity().is_nonzero(i) << (c+1<mra::Key<NDIM>::num_children() ? "," : "");
+          }
+          oss << "]\n";
+        }
+        std::cout << oss.str() << std::flush;
+      }
+#endif // MRA_CHECK_NORMS
+
       // compute norms
       auto norms = [&]<std::size_t... Is>(std::index_sequence<Is...>){
         return FunctionNorms(name, node, from_parent, r_arr[Is]...);
@@ -247,6 +294,32 @@ namespace mra{
       auto hg_view = hg.current_view();
       auto from_parent_view = from_parent.coeffs().current_view();
       auto result_view = result.coeffs().current_view();
+      // DEBUG: compare node's host-tracked sparsity (RangeSparsityBase,
+      // set at allocation/producer time) against node_view's device-side
+      // inline bitmap, right after select() and before coop() ever runs --
+      // i.e. before batching could have any opportunity to touch it.
+#if defined(MRA_CHECK_NORMS)
+      if (!node.empty() && node_view.storage() != nullptr) {
+        static std::mutex dbg_mtx_pre;
+        std::lock_guard<std::mutex> lg(dbg_mtx_pre);
+        cudaDeviceSynchronize();
+        std::vector<unsigned char> devbytes(N);
+        cudaMemcpy(devbytes.data(), node_view.storage(), N, cudaMemcpyDeviceToHost);
+        size_type dev_nz = 0;
+        for (size_type i = 0; i < N; ++i) if (devbytes[i] & 1) ++dev_nz;
+        size_type host_nz = node.sparsity().count_nonzero();
+        if (dev_nz != host_nz) {
+          std::ostringstream oss;
+          oss << "RECONSTRUCT-PRE-COOP MISMATCH key=" << key << " N=" << N
+              << " node_view.storage()=" << (void*)node_view.storage()
+              << " host_nz=" << host_nz << " dev_nz=" << dev_nz
+              << " dev_bytes=[";
+          for (size_type i = 0; i < N; ++i) oss << (unsigned)devbytes[i] << (i+1<N?",":"");
+          oss << "]\n";
+          std::cout << oss.str() << std::flush;
+        }
+      }
+#endif // MRA_CHECK_NORMS
 #ifndef MRA_ENABLE_HOST
       if (enable_reconstruct_batching) {
         // key travels through coop() since reconstruct_kernel_impl reads

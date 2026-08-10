@@ -398,6 +398,51 @@ namespace mra{
                                        resnorms.empty() ? nullptr : &resnorms[i]);
     }
 
+#if defined(MRA_CHECK_NORMS)
+    /**
+     * Debug-only, launched as its OWN kernel (grid of 1 block) immediately
+     * before convolution_kernel below, on the same stream -- see
+     * compress_verify_sparsity_kernel's comment (mra/kernels/compress.h) for
+     * why this must not be inlined into convolution_kernel itself (a
+     * same-launch race against find_nth_nonzero's assert in other blocks
+     * would let this check's own diagnostic go unprinted).
+     *
+     * n_nonzero was computed host-side (mra/tasks/convolution.h's `sparsity`,
+     * = nonzero_if_any(in_node, contribution) for accumulate_tt, or a
+     * single-view scan of f/contribution for shell0_tt) and used to both
+     * allocate result_view's (out's) own sparsity and size this launch's
+     * grid/tmp buffer -- so a single-view scan of result_view's own device
+     * bitfield (not a fresh union of in_view/f_view) is the right
+     * cross-check here, mirroring compress's p_in pattern (a single view
+     * that's already the union, rather than reconstruct's node/from_parent
+     * pair). Also verifies f_view (the contribution being absorbed this
+     * step) doesn't have non-zero positions outside result_view's coverage
+     * -- those would never be visited by this launch.
+     */
+    template<typename T, Dimension NDIM>
+    GLOBALSCOPE void convolution_verify_sparsity_kernel_single(
+      Key<NDIM> key,
+      size_type N,
+      size_type n_nonzero,
+      const concepts::TensorView<NDIM+1> auto f_view,
+      concepts::TensorView<NDIM+1> auto result_view)
+    {
+      if (is_team_lead()) {
+        const size_type actual = count_union_nonzero(N, result_view);
+        if (actual != n_nonzero) {
+          THROWF("convolution_kernel: n_nonzero mismatch at level %d: host=%llu device=%llu (N=%llu)\n",
+                 (int)key.level(), (unsigned long long)n_nonzero, (unsigned long long)actual, (unsigned long long)N);
+        }
+        const size_type bad_f = find_nonzero_not_in_union(N, f_view, result_view);
+        if (bad_f != N) {
+          THROWF("convolution_kernel: f_view non-zero at fnid=%llu (level %d) outside "
+                 "result_view's coverage -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_f, (int)key.level());
+        }
+      }
+    }
+#endif // MRA_CHECK_NORMS
+
     template <typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void convolution_kernel(
@@ -446,6 +491,15 @@ namespace mra{
     T* tmp,
     ttg::device::Stream stream)
   {
+#if defined(MRA_CHECK_NORMS)
+    // Separate, prior kernel on the same stream -- see
+    // convolution_verify_sparsity_kernel_single's comment for why this must
+    // not be inlined into convolution_kernel itself.
+    CALL_KERNEL((detail::convolution_verify_sparsity_kernel_single<T, NDIM>), 1, 32, 0, stream,
+                (key, N, n_nonzero, f_view, result_view));
+    checkSubmit();
+#endif // MRA_CHECK_NORMS
+
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
 
@@ -598,7 +652,102 @@ namespace mra{
       }
     }
 
+    /**
+     * Prunes out_view's device-side sparsity bitfield for any function whose
+     * *computed* resnorms entry is exactly zero. mra/tasks/convolution.h's
+     * shell0_tt/accumulate_tt call out.set_zero(i) host-side for these same
+     * positions right after resnorms comes back to host -- but
+     * FunctionNodeBase::set_zero() only updates the host RangeSparsityBase
+     * ranges (see mra/tensor/sparsity.h), never the device inline bitfield
+     * that was already populated earlier (via SparsityManager or the batch
+     * scatter kernel, before this node's actual coefficient values were even
+     * computed). Without this device-side counterpart, out_view keeps
+     * reporting non-zero for positions the host has since pruned, so a
+     * downstream consumer's device-side union scan (e.g. reconstruct's,
+     * treating this node as its "node" input) finds MORE non-zero positions
+     * than the host ever expected. Must run while resnorms/out_view are
+     * still device-resident, i.e. before co_await
+     * ttg::device::wait(resnorms.buffer()) brings resnorms back to host.
+     * Single block, N small -- not meant for the hot path beyond this use.
+     */
+    template <Dimension NDIM>
+    GLOBALSCOPE void convolution_prune_zero_norm_kernel(
+      size_type N,
+      const concepts::TensorView<1> auto resnorms,
+      concepts::TensorView<NDIM+1> auto out_view)
+    {
+      for (size_type i = threadIdx.x; i < N; i += blockDim.x) {
+        if (out_view.is_nonzero(i) && resnorms[i] == 0.0) {
+          out_view.set_state(i, SparsityState::ALLOCATED);
+        }
+      }
+    }
+
+#if defined(MRA_CHECK_NORMS)
+    /**
+     * Debug-only: cross-checks, for every member, that the flattened launch
+     * grid's slice for that member (member_offsets[m+1] - member_offsets[m],
+     * a running sum of each member's own host-computed n_nonzero -- see
+     * submit_convolution_batch_leader) agrees with a fresh on-device scan of
+     * that same member's result_view (a single-view scan suffices -- see
+     * convolution_verify_sparsity_kernel_single's comment). One block per
+     * member, same style as convolution_scatter_sparsity_kernel above.
+     * Launched (gated by MRA_CHECK_NORMS) immediately AFTER
+     * convolution_scatter_sparsity_kernel and before
+     * convolution_kernel_batched in submit_convolution_kernel_batched --
+     * unlike reconstruct's batched check, this one must run after the
+     * scatter, since result_view's own device bitfield (what's being
+     * checked here) is exactly what the scatter just wrote.
+     */
+    template <typename T, Dimension NDIM>
+    GLOBALSCOPE void convolution_verify_sparsity_kernel(
+      ConvolutionBatchArg<T, NDIM>* args,     // device ptr, size == num_members
+      const size_type* member_offsets)        // device ptr, size == num_members+1
+    {
+      using idx = ConvolutionBatchArgIdx;
+
+      const size_type member = blockIdx.x;
+      if (is_team_lead()) {
+        auto& arg = args[member];
+        const size_type member_N = std::get<idx::n>(arg);
+        const size_type expected = member_offsets[member + 1] - member_offsets[member];
+        auto& result_view = std::get<idx::result_view>(arg);
+        const size_type actual = count_union_nonzero(member_N, result_view);
+        if (actual != expected) {
+          THROWF("convolution_kernel_batched: n_nonzero mismatch for batch member %llu: "
+                 "host=%llu device=%llu (N=%llu)\n",
+                 (unsigned long long)member, (unsigned long long)expected,
+                 (unsigned long long)actual, (unsigned long long)member_N);
+        }
+        auto& f_view = std::get<idx::f_view>(arg);
+        const size_type bad_f = find_nonzero_not_in_union(member_N, f_view, result_view);
+        if (bad_f != member_N) {
+          THROWF("convolution_kernel_batched: f_view non-zero at fnid=%llu for batch member %llu "
+                 "outside result_view's coverage -- that position is never visited by this launch\n",
+                 (unsigned long long)bad_f, (unsigned long long)member);
+        }
+      }
+    }
+#endif // MRA_CHECK_NORMS
+
   } // namespace detail
+
+  /**
+   * See detail::convolution_prune_zero_norm_kernel's comment. Called by both
+   * shell0_tt and accumulate_tt (mra/tasks/convolution.h), on the same
+   * stream as the kernel that just computed resnorms/out, before that
+   * stream's data is brought back to host.
+   */
+  template <Dimension NDIM>
+  void submit_convolution_prune_zero_norm_kernel(
+    size_type N,
+    const concepts::TensorView<1> auto& resnorms,
+    concepts::TensorView<NDIM+1> auto& out_view,
+    ttg::device::Stream stream)
+  {
+    CALL_KERNEL((detail::convolution_prune_zero_norm_kernel<NDIM>), 1, 32, 0, stream, (N, resnorms, out_view));
+    checkSubmit();
+  }
 
   /**
    * Batched counterpart of submit_convolution_kernel: launches one kernel on
@@ -655,6 +804,17 @@ namespace mra{
     CALL_KERNEL((detail::convolution_scatter_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
                 (slot.dev_args, sparsity_slot.dev_args));
     checkSubmit();
+
+#if defined(MRA_CHECK_NORMS)
+    // Debug-only: verify the flattened grid's per-member slice (derived from
+    // each member's host-computed n_nonzero) still matches a fresh on-device
+    // scan of that member's result_view -- must run AFTER the scatter above,
+    // since result_view's own device bitfield is exactly what that scatter
+    // just wrote. See convolution_verify_sparsity_kernel's comment.
+    CALL_KERNEL((detail::convolution_verify_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
+                (slot.dev_args, offset_slot.dev_args));
+    checkSubmit();
+#endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);

@@ -724,6 +724,12 @@ namespace mra {
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
         }
 
+        // Prune out_view's device sparsity for any function whose computed
+        // norm is exactly zero, on the same stream, before the host-only
+        // out.set_zero(i) loop below narrows the *host* side of the same
+        // sparsity -- see submit_convolution_prune_zero_norm_kernel's comment.
+        submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
+
 #ifndef MRA_ENABLE_HOST
         // wait for the norms to come back
         co_await ttg::device::wait(resnorms.buffer());
@@ -943,6 +949,17 @@ namespace mra {
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
+      }
+
+      // Prune out_view's device sparsity for any function whose computed
+      // norm is exactly zero, on the same stream, before the host-only
+      // out.set_zero(i) loop below (only reached when last_key) narrows the
+      // *host* side of the same sparsity -- see
+      // submit_convolution_prune_zero_norm_kernel's comment. resnorms is
+      // only allocated/meaningful when last_key (see above), so this must
+      // be gated the same way.
+      if (last_key) {
+        submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
       }
 
 #ifndef MRA_ENABLE_HOST

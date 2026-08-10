@@ -69,6 +69,16 @@ namespace mra::detail {
       hipEvent_t event;
 #endif
       bool event_recorded = false; // false until this slot has been submitted at least once
+      // True from the moment acquire() hands this slot to a caller until
+      // that caller's mark_submitted() call. Without this, two concurrent
+      // acquire() calls (e.g. two different batch leaders racing on the
+      // *shared* SparsityState/size_type pools returned by
+      // sparsity_pool_registry()/member_offset_pool_registry() -- shared
+      // across compress/convolution/reconstruct, not per-kernel-type -- can
+      // both pass the "!event_recorded || event_ready(event)" check and be
+      // handed the SAME never-yet-submitted slot, then race on filling/
+      // resizing its host_args from two different threads.
+      bool checked_out = false;
 
       slot_t() {
 #if defined(MRA_ENABLE_CUDA)
@@ -100,29 +110,40 @@ namespace mra::detail {
     BatchPool& operator=(const BatchPool&) = delete;
 
     /* Never blocks: returns a slot with device-side capacity for at least
-     * num_members entries, ready to be filled via slot_t::host_args. */
+     * num_members entries, ready to be filled via slot_t::host_args. The
+     * returned slot is marked checked_out (under this call's lock) so no
+     * other acquire() call -- even one racing in from a different thread
+     * before this caller reaches mark_submitted() -- can be handed the same
+     * slot. Callers must eventually call mark_submitted() on the returned
+     * slot to release it back to the pool. */
     slot_t& acquire(std::size_t num_members) {
       std::lock_guard<std::mutex> lock(mtx);
       for (auto& sp : slots) {
-        if (!sp->event_recorded || event_ready(sp->event)) {
+        if (!sp->checked_out && (!sp->event_recorded || event_ready(sp->event))) {
           ensure_capacity(*sp, num_members);
+          sp->checked_out = true;
           return *sp;
         }
       }
       slots.push_back(std::make_unique<slot_t>());
       auto& s = *slots.back();
       ensure_capacity(s, num_members);
+      s.checked_out = true;
       return s;
     }
 
-    /* Call right after the H2D copy + kernel launch have been issued on `stream`. */
+    /* Call right after the H2D copy + kernel launch have been issued on
+     * `stream`. Releases the slot (clears checked_out) so a future
+     * acquire() may hand it out again once its device event completes. */
     void mark_submitted(slot_t& s, ttg::device::Stream stream) {
+      std::lock_guard<std::mutex> lock(mtx);
 #if defined(MRA_ENABLE_CUDA)
       check_cuda_rt(cudaEventRecord(s.event, stream), "cudaEventRecord");
 #elif defined(MRA_ENABLE_HIP)
       check_hip_rt(hipEventRecord(s.event, stream), "hipEventRecord");
 #endif
       s.event_recorded = true;
+      s.checked_out = false;
     }
 
     int device_id;
