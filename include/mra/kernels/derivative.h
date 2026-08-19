@@ -2,7 +2,6 @@
 #define MRA_KERNELS_DERIVATIVE_H
 
 #include <assert.h>
-#include "mra/misc/dims.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
 #include "mra/misc/types.h"
