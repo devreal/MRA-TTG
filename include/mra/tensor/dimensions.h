@@ -178,7 +178,7 @@ namespace mra {
 
   /* Create a dims array with the provided first sizes and pad to NDIM with the last size */
   template<Dimension NDIM, typename... Sizes>
-  constexpr auto make_dims(Sizes&&... sizes) {
+  SCOPE constexpr auto make_dims(Sizes&&... sizes) {
     static_assert(sizeof...(Sizes) <= NDIM, "Too many sizes provided for the number of dimensions");
     if constexpr ((is_ct_integral_v<Sizes> || ...)) {
       // at least one compile-time size provided, use the last size as the padding value

@@ -881,7 +881,7 @@ namespace mra {
 
   template<typename TensorT>
   requires(concepts::TensorView<TensorT>)
-  inline auto make_ct_tensorview_from(TensorT&& t, auto... dims) {
+  SCOPE auto make_ct_tensorview_from(TensorT&& t, auto... dims) {
     using T = std::remove_reference_t<decltype(t)>;
     using value_type = typename T::value_type;
     using dims_type = decltype(make_dims<T::ndim()>(dims...));
