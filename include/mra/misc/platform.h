@@ -144,6 +144,13 @@ namespace mra::detail {
   } while(0)
 #endif // __CUDA_ARCH__
 
+// HIP does not support assert so we build our own
+#if defined(__CUDA_ARCH__) || defined(MRA_ENABLE_HOST)
+#define MRA_ASSERT(_cond) assert(_cond);
+#else  // __CUDA_ARCH__
+#define MRA_ASSERT(_cond) do { if (!(_cond)) { THROWF("Assertion failed: %s", #_cond); } } while(0)
+#endif // __CUDA_ARCH__
+
 #if defined(__CUDACC__)
 #define GLOBALSCOPE __global__
 #elif defined(__HIPCC__)
@@ -215,8 +222,8 @@ namespace mra {
 #if defined(MRA_HAVE_KOKKOS)
     return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
 #elif !defined(MRA_ENABLE_HOST)
-    int x = 32;
-    int y = MAX_THREADS_PER_BLOCK / x;
+    int x = K;
+    int y = std::min(MAX_THREADS_PER_BLOCK / x, K);
     int z = 1;
     return Dim3(x, y, z);
 #else

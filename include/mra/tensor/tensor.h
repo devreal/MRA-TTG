@@ -10,6 +10,7 @@
 #include <ttg/serialization/std/array.h>
 
 #include "mra/misc/allocator.h"
+#include "mra/tensor/dimensions.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/sparsity.h"
 #include "mra/tensor/sparsityinfo.h"
@@ -31,7 +32,7 @@ namespace mra {
     concept TensorCompatibleSparsity = is_tensor_compatible_sparsity<Sparsity>::value;
 
 
-    template<typename ValueType, mra::Dimension NDIM, template<typename, typename> typename Sparsity>
+    template<typename ValueType, Dimension NDIM, template<typename, typename> typename Sparsity>
     struct make_tensorview {
       using type = TensorView<ValueType, NDIM, Sparsity>;
     };
@@ -39,12 +40,12 @@ namespace mra {
     /**
      * Change range-based sparsity to sparsity array for tensorview.
      */
-    template<typename ValueType, mra::Dimension NDIM>
+    template<typename ValueType, Dimension NDIM>
     struct make_tensorview<ValueType, NDIM, RangeSparsityBase> {
       using type = TensorView<ValueType, NDIM, SparseArrayBase>;
     };
 
-    template<typename ValueType, mra::Dimension NDIM, template<typename, typename> typename Sparsity>
+    template<typename ValueType, Dimension NDIM, template<typename, typename> typename Sparsity>
     using make_tensorview_t = typename make_tensorview<ValueType, NDIM, Sparsity>::type;
 
   } // namespace detail
@@ -71,14 +72,14 @@ namespace mra {
 
     static constexpr Dimension ndim() { return NDIM; }
 
-    using dims_array_t = std::array<size_type, ndim()>;
+    using dims_type = DynamicDimensions<NDIM>;
 
     //template<typename Archive>
     //friend madness::archive::ArchiveSerializeImpl<Archive, Tensor>;
 
   private:
     using ttvalue_type = ttg::TTValue<Tensor>;
-    dims_array_t m_dims = {0};
+    dims_type m_dims;
     buffer_type  m_buffer;
 
     std::size_t buffer_size() const {
@@ -192,14 +193,14 @@ namespace mra {
     Tensor& operator=(const Tensor& other) = delete;
 
     size_type size() const {
-      return std::reduce(&m_dims[0], &m_dims[ndim()], 1, std::multiplies<size_type>{});
+      return m_dims.product();
     }
 
     size_type dim(Dimension dim) const {
       return m_dims[dim];
     }
 
-    dims_array_t dims() const {
+    dims_type dims() const {
       return m_dims;
     }
 

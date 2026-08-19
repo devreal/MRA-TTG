@@ -3,6 +3,7 @@
 
 #include <utility>
 #include "mra/misc/types.h"
+#include "mra/tensor/dimensions.h"
 
 namespace mra {
 
@@ -604,6 +605,12 @@ namespace mra {
      */
     template<std::size_t NDIM>
     static size_type required_space(const std::array<size_type, NDIM>& dims) {
+      // worst case: every entry is its own range
+      return detail::align_to_type<value_type>(dims[0]) / sizeof(value_type);
+    }
+
+    template<size_type NDIM>
+    static size_type required_space(const DynamicDimensions<NDIM>& dims) {
       // worst case: every entry is its own range
       return detail::align_to_type<value_type>(dims[0]) / sizeof(value_type);
     }

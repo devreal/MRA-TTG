@@ -10,19 +10,21 @@
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensoriter.h"
 #include "mra/tensor/sparsity.h"
+#include "mra/misc/integer.h"
+#include "mra/tensor/dimensions.h"
 
 namespace mra {
 
 
   // fwd-decl
-  template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity>
+  template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename Dims = DynamicDimensions<NDIM>>
   class TensorView;
 
-  template<typename T, Dimension NDIM>
-  using DenseTensorView = TensorView<T, NDIM, DenseViewBase>;
+  template<typename T, Dimension NDIM, typename Dims = DynamicDimensions<NDIM>>
+  using DenseTensorView = TensorView<T, NDIM, DenseViewBase, Dims>;
 
-  template<typename T, Dimension NDIM>
-  using SparseTensorView = TensorView<T, NDIM, SparseArrayBase>;
+  template<typename T, Dimension NDIM, typename Dims = DynamicDimensions<NDIM>>
+  using SparseTensorView = TensorView<T, NDIM, SparseArrayBase, Dims>;
 
   namespace detail {
 
@@ -32,8 +34,8 @@ namespace mra {
     template<typename T>
     struct is_tensorview  : std::false_type { };
 
-    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity>
-    struct is_tensorview<TensorView<T, NDIM, Sparsity>> : std::true_type { };
+    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename Dims>
+    struct is_tensorview<TensorView<T, NDIM, Sparsity, Dims>> : std::true_type { };
 
     template<typename T>
     constexpr bool is_tensorview_v = is_tensorview<std::decay_t<T>>::value;
@@ -53,8 +55,8 @@ namespace mra {
     template<typename T>
     struct tensor_view_ndim;
 
-    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity>
-    struct tensor_view_ndim<TensorView<T, NDIM, Sparsity>> : std::integral_constant<Dimension, NDIM> { };
+    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename Dims>
+    struct tensor_view_ndim<TensorView<T, NDIM, Sparsity, Dims>> : std::integral_constant<Dimension, NDIM> { };
 
     template<typename T>
     constexpr Dimension tensor_view_ndim_v = tensor_view_ndim<std::decay_t<T>>::value;
@@ -62,8 +64,8 @@ namespace mra {
     template<typename T, typename Enabler = void>
     struct is_sparse_tensorview : std::false_type { };
 
-    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity>
-    struct is_sparse_tensorview<TensorView<T, NDIM, Sparsity>,
+    template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename Dims>
+    struct is_sparse_tensorview<TensorView<T, NDIM, Sparsity, Dims>,
                                 std::enable_if_t<is_sparsity_view_v<typename TensorView<T, NDIM, Sparsity>::sparsity_type>>>
     : std::true_type { };
 
@@ -74,13 +76,13 @@ namespace mra {
      * Concept for a TensorView with NDIM dimensions.
      * The NDIM argument is optional to enforce a specific number of dimensions.
      */
-    template<typename T, Dimension NDIM = T::ndim()>
+    template<typename T, Dimension NDIM = std::decay_t<T>::ndim()>
     concept TensorView = mra::detail::is_tensorview_v<T> && (detail::tensor_view_ndim_v<T> == NDIM);
 
     /**
      * Concept for a dense TensorView with NDIM dimensions.
      */
-    template<typename T, Dimension NDIM = T::ndim()>
+    template<typename T, Dimension NDIM = std::decay_t<T>::ndim()>
     concept DenseTensorView = mra::detail::is_tensorview_v<T> && (detail::tensor_view_ndim_v<T> == NDIM) && !detail::is_sparse_tensorview<T>::value;
 
     /**
@@ -451,21 +453,29 @@ namespace mra {
 
 
 
-  template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity>
+
+  template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename DimsType>
   class TensorView : public Sparsity<TensorView<T, NDIM, Sparsity>, T> {
+  private:
+    template<Dimension M>
+    using subview_dims_type = decltype(std::declval<DimsType>().subdims(Int<NDIM-M>{}));
+
   public:
     using value_type = T;
     using const_value_type = std::add_const_t<value_type>;
     using sparsity_type = Sparsity<TensorView<T, NDIM, Sparsity>, T>;
+    using dims_type = DimsType;
     template<typename U, Dimension M>
-    using subview_type = TensorView<U, M, DenseViewBase>;
+    using subview_type = TensorView<U, M, DenseViewBase, subview_dims_type<M>>;
     template<typename U, Dimension M>
-    using const_subview_type = TensorView<const U, M, DenseViewBase>;
+    using const_subview_type = TensorView<const U, M, DenseViewBase, subview_dims_type<M>>;
     SCOPE static constexpr Dimension ndim() { return NDIM; }
-    using dims_array_t = std::array<size_type, ndim()>;
     SCOPE static constexpr bool is_tensor() { return true; }
 
     SCOPE static constexpr bool is_sparse() { return is_sparsity_view_v<sparsity_type>; }
+
+    template<typename U, Dimension M, template<typename, typename> typename S, typename D>
+    friend class TensorView;
 
   protected:
 
@@ -484,7 +494,8 @@ namespace mra {
           offset = this->offset_of(idx);
         }
       } else {
-        offset = idx*std::reduce(&m_dims[I+1], &m_dims[ndim()], 1, std::multiplies<size_type>{});
+        auto dims = m_dims.array();
+        offset = idx*std::reduce(&dims[I+1], &dims[ndim()], 1, std::multiplies<size_type>{});
       }
       if constexpr (sizeof...(idxs) == 0) {
         return offset;
@@ -504,12 +515,22 @@ namespace mra {
         offset = offset_impl<0>(std::forward<Dims>(idxs)...);
       }
       constexpr const Dimension noffs = sizeof...(Dims);
-      constexpr const Dimension ndim = NDIM-noffs;
-      std::array<size_type, ndim> dims;
-      for (Dimension i = 0; i < ndim; ++i) {
-        dims[i] = m_dims[noffs+i];
+      return std::make_pair(offset, m_dims.subdims(Int<noffs>{}));
+    }
+
+    template<typename... Dims>
+    auto make_dims(Dims... dims) {
+      static_assert(sizeof...(Dims) == NDIM || sizeof...(Dims) == 1,
+                    "Number of arguments does not match number of Dimensions. "
+                    "A single argument for all dimensions may be provided.");
+      if constexpr (sizeof...(Dims) == NDIM) {
+        return dims_type(dims...);
+      } else {
+        // provided 1 dimension, populate it to all other dimensions
+        return []<std::size_t... Is>(std::index_sequence<Is...>, auto dim0) {
+                  return dims_type(((void)Is, dim0)...);
+                }(std::make_index_sequence<NDIM>{}, dims...);
       }
-      return std::make_pair(offset, dims);
     }
 
   public:
@@ -517,18 +538,11 @@ namespace mra {
 
     template<typename... Dims>
     SCOPE explicit TensorView(T *ptr, Dims... dims)
-    : m_dims({dims...})
+    : m_dims(make_dims(dims...))
     , m_ptr(ptr)
-    {
-      static_assert(sizeof...(Dims) == NDIM || sizeof...(Dims) == 1,
-                    "Number of arguments does not match number of Dimensions. "
-                    "A single argument for all dimensions may be provided.");
-      if constexpr (sizeof...(Dims) != NDIM) {
-        std::fill(m_dims.begin(), m_dims.end(), dims...);
-      }
-    }
+    { }
 
-    SCOPE explicit TensorView(T *ptr, const dims_array_t& dims)
+    SCOPE explicit TensorView(T *ptr, const dims_type& dims)
     : m_dims(dims)
     , m_ptr(ptr)
     { }
@@ -541,7 +555,7 @@ namespace mra {
 
     template<typename S>
     requires(!std::is_const_v<T> && std::is_same_v<S, T>)
-    SCOPE explicit TensorView(const S *ptr, const dims_array_t& dims)
+    SCOPE explicit TensorView(const S *ptr, const dims_type& dims)
     : TensorView(const_cast<T*>(ptr), dims) // remove const, we store a non-const pointer internally
     { }
 
@@ -587,14 +601,14 @@ namespace mra {
      * Returns the number of allocated elements in the tensor.
      */
     SCOPE size_type size() const {
-      return this->count_allocated() * std::reduce(&m_dims[1], &m_dims[ndim()], 1, std::multiplies<size_type>{});
+      return this->count_allocated() * m_dims.subdims(Int<1>{}).product();
     }
 
     SCOPE size_type dim(Dimension d) const {
       return m_dims[d];
     }
 
-    SCOPE const dims_array_t& dims() const {
+    SCOPE const auto dims() const {
       return m_dims;
     }
 
@@ -852,7 +866,7 @@ namespace mra {
     }
 
   private:
-    dims_array_t m_dims;
+    dims_type m_dims;
     T *m_ptr; // may be const or non-const
   };
 
@@ -863,6 +877,20 @@ namespace mra {
   {
     foreach_idx(*this, [&](size_type i){ this->operator[](i) = view[i]; });
     return *this;
+  }
+
+  template<typename TensorT>
+  requires(concepts::TensorView<TensorT>)
+  inline auto make_ct_tensorview_from(TensorT&& t, auto... dims) {
+    using T = std::remove_reference_t<decltype(t)>;
+    using value_type = typename T::value_type;
+    using dims_type = decltype(make_dims<T::ndim()>(dims...));
+    // sanity check that the provided dimensions match the tensor dimensions
+    int i = 0;
+    std::apply([&](auto&&... args) {
+      MRA_ASSERT(((t.dim(i++) == args)&&...) && "make_ct_tensorview_from: provided dimensions do not match tensor dimensions");
+    }, std::make_tuple(dims...));
+    return TensorView<value_type, T::ndim(), DenseViewBase, dims_type>(t.data(), make_dims<T::ndim()>(dims...));
   }
 
 } // namespace mra

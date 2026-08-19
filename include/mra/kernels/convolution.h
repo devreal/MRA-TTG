@@ -149,7 +149,7 @@ namespace mra{
              concepts::TensorView<NDIM> ViewWork2k>
     DEVSCOPE void muopxv_fast(
       int opid,
-      size_type K,
+      auto K,
       const size_type mu,
       const T mufac,
       const T tol,
@@ -193,7 +193,7 @@ namespace mra{
     template<typename T, Dimension NDIM>
     DEVSCOPE void apply_conv(
       int opid,
-      size_type K,
+      auto K,
       const T fac,
       const T tol,
       const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
@@ -207,12 +207,14 @@ namespace mra{
       concepts::TensorView<NDIM> auto& work1,
       concepts::TensorView<NDIM> auto& work2)
     {
-      SHARED DenseTensorView<T, NDIM> work1_k, work2_k;
+      using dims_k_type = decltype(make_dims<NDIM>(K));
+      using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
+      SHARED tensor_view_k_type work1_k, work2_k;
       // cannot be SHARED because ctors won't run
       std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       if (is_team_lead()) {
-        work1_k = DenseTensorView<T, NDIM>(work1.data(), K);
-        work2_k = DenseTensorView<T, NDIM>(work2.data(), K);
+        work1_k = tensor_view_k_type(work1.data(), K);
+        work2_k = tensor_view_k_type(work2.data(), K);
       }
 
       const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
@@ -292,7 +294,7 @@ namespace mra{
       Key<NDIM> key,
       int opid,
       Key<NDIM> displacement,
-      size_type K,
+      auto K,
       const T fac,
       const T tol,
       const ViewTransr& transr,
@@ -338,7 +340,7 @@ namespace mra{
     DEVSCOPE void convolution_process_one(
       Key<NDIM> key,
       Key<NDIM> displacement,
-      size_type K,
+      auto K,
       const T fac,
       const T tol,
       const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
@@ -353,7 +355,12 @@ namespace mra{
       size_type N,
       size_type tmp_pos)
     {
-      SHARED DenseTensorView<T, NDIM> f0, resultc, work1, work2, result;
+      using dims_k_type = decltype(make_dims<NDIM>(K));
+      using dims_2k_type = decltype(make_dims<NDIM>(2*K));
+      using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
+      using tensor_view_2k_type = DenseTensorView<T, NDIM, dims_2k_type>;
+      SHARED tensor_view_k_type f0, resultc;
+      SHARED tensor_view_2k_type work1, work2, result;
       SHARED DenseTensorView<const T, NDIM> f, in;
       SHARED size_type i;
 
@@ -365,17 +372,17 @@ namespace mra{
         // them here.
         i = find_nth_nonzero(N, tmp_pos, result_view);
 
-        const size_type K2NDIM = std::pow(K, NDIM);
-        const size_type TWOK2NDIM = std::pow(2*K, NDIM);
+        const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
+        const size_type TWOK2NDIM = mra::pow(2*K, Int<NDIM>{});
         T* block_tmp_ptr = &tmp[tmp_pos*convolution_tmp_size<NDIM>(K)];
         // construct temporaries and pass them to conv_transform
-        f0        = DenseTensorView<T, NDIM>(&block_tmp_ptr[                     0], K);
-        resultc   = DenseTensorView<T, NDIM>(&block_tmp_ptr[                K2NDIM], K);
-        work1     = DenseTensorView<T, NDIM>(&block_tmp_ptr[              2*K2NDIM], 2*K);
-        work2     = DenseTensorView<T, NDIM>(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
-        in     = in_view(i);
-        f      = f_view(i);
-        result = result_view(i);
+        f0        = tensor_view_k_type(&block_tmp_ptr[                      0],   K);
+        resultc   = tensor_view_k_type(&block_tmp_ptr[                 K2NDIM],   K);
+        work1     = tensor_view_2k_type(&block_tmp_ptr[              2*K2NDIM], 2*K);
+        work2     = tensor_view_2k_type(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
+        in        = make_ct_tensorview_from(in_view(i), 2*K);
+        f         = make_ct_tensorview_from(f_view(i), 2*K);
+        result    = make_ct_tensorview_from(result_view(i), 2*K);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -448,7 +455,7 @@ namespace mra{
     GLOBALSCOPE void convolution_kernel(
       Key<NDIM> key,
       Key<NDIM> displacement,
-      size_type K,
+      auto K,
       size_type N,
       size_type n_nonzero,
       const T fac,
@@ -504,9 +511,67 @@ namespace mra{
     auto smem_size = mTxmq_shmem_size<T>(2*K);
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
-                (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                 resnorms, transr, transs, opnorms, at, tmp));
+    if (K == 8) {
+      auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
+                  (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view_k, f_view, result_view,
+                  resnorms, transr, transs, opnorms, at, tmp));
+    } else {
+      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
+                  (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
+                  resnorms, transr, transs, opnorms, at, tmp));
+    }
+    checkSubmit();
+  }
+
+
+  namespace detail {
+    /**
+     * Prunes out_view's device-side sparsity bitfield for any function whose
+     * *computed* resnorms entry is exactly zero. mra/tasks/convolution.h's
+     * shell0_tt/accumulate_tt call out.set_zero(i) host-side for these same
+     * positions right after resnorms comes back to host -- but
+     * FunctionNodeBase::set_zero() only updates the host RangeSparsityBase
+     * ranges (see mra/tensor/sparsity.h), never the device inline bitfield
+     * that was already populated earlier (via SparsityManager or the batch
+     * scatter kernel, before this node's actual coefficient values were even
+     * computed). Without this device-side counterpart, out_view keeps
+     * reporting non-zero for positions the host has since pruned, so a
+     * downstream consumer's device-side union scan (e.g. reconstruct's,
+     * treating this node as its "node" input) finds MORE non-zero positions
+     * than the host ever expected. Must run while resnorms/out_view are
+     * still device-resident, i.e. before co_await
+     * ttg::device::wait(resnorms.buffer()) brings resnorms back to host.
+     * Single block, N small -- not meant for the hot path beyond this use.
+     */
+    template <Dimension NDIM>
+    GLOBALSCOPE void convolution_prune_zero_norm_kernel(
+      size_type N,
+      const concepts::TensorView<1> auto resnorms,
+      concepts::TensorView<NDIM+1> auto out_view)
+    {
+      for (size_type i = threadIdx.x; i < N; i += blockDim.x) {
+        if (out_view.is_nonzero(i) && resnorms[i] == 0.0) {
+          out_view.set_state(i, SparsityState::ALLOCATED);
+        }
+      }
+    }
+  } // namespace detail
+
+  /**
+   * See detail::convolution_prune_zero_norm_kernel's comment. Called by both
+   * shell0_tt and accumulate_tt (mra/tasks/convolution.h), on the same
+   * stream as the kernel that just computed resnorms/out, before that
+   * stream's data is brought back to host.
+   */
+  template <Dimension NDIM>
+  void submit_convolution_prune_zero_norm_kernel(
+    size_type N,
+    const concepts::TensorView<1> auto& resnorms,
+    concepts::TensorView<NDIM+1> auto& out_view,
+    ttg::device::Stream stream)
+  {
+    CALL_KERNEL((detail::convolution_prune_zero_norm_kernel<NDIM>), 1, 32, 0, stream, (N, resnorms, out_view));
     checkSubmit();
   }
 
@@ -597,7 +662,7 @@ namespace mra{
       const size_type* member_offsets,        // device ptr, size == num_members+1
       size_type num_members,
       size_type total_nonzero,
-      size_type K,
+      auto K,
       const T fac)
     {
       using idx = ConvolutionBatchArgIdx;
@@ -652,37 +717,6 @@ namespace mra{
       }
     }
 
-    /**
-     * Prunes out_view's device-side sparsity bitfield for any function whose
-     * *computed* resnorms entry is exactly zero. mra/tasks/convolution.h's
-     * shell0_tt/accumulate_tt call out.set_zero(i) host-side for these same
-     * positions right after resnorms comes back to host -- but
-     * FunctionNodeBase::set_zero() only updates the host RangeSparsityBase
-     * ranges (see mra/tensor/sparsity.h), never the device inline bitfield
-     * that was already populated earlier (via SparsityManager or the batch
-     * scatter kernel, before this node's actual coefficient values were even
-     * computed). Without this device-side counterpart, out_view keeps
-     * reporting non-zero for positions the host has since pruned, so a
-     * downstream consumer's device-side union scan (e.g. reconstruct's,
-     * treating this node as its "node" input) finds MORE non-zero positions
-     * than the host ever expected. Must run while resnorms/out_view are
-     * still device-resident, i.e. before co_await
-     * ttg::device::wait(resnorms.buffer()) brings resnorms back to host.
-     * Single block, N small -- not meant for the hot path beyond this use.
-     */
-    template <Dimension NDIM>
-    GLOBALSCOPE void convolution_prune_zero_norm_kernel(
-      size_type N,
-      const concepts::TensorView<1> auto resnorms,
-      concepts::TensorView<NDIM+1> auto out_view)
-    {
-      for (size_type i = threadIdx.x; i < N; i += blockDim.x) {
-        if (out_view.is_nonzero(i) && resnorms[i] == 0.0) {
-          out_view.set_state(i, SparsityState::ALLOCATED);
-        }
-      }
-    }
-
 #if defined(MRA_CHECK_NORMS)
     /**
      * Debug-only: cross-checks, for every member, that the flattened launch
@@ -731,23 +765,6 @@ namespace mra{
 #endif // MRA_CHECK_NORMS
 
   } // namespace detail
-
-  /**
-   * See detail::convolution_prune_zero_norm_kernel's comment. Called by both
-   * shell0_tt and accumulate_tt (mra/tasks/convolution.h), on the same
-   * stream as the kernel that just computed resnorms/out, before that
-   * stream's data is brought back to host.
-   */
-  template <Dimension NDIM>
-  void submit_convolution_prune_zero_norm_kernel(
-    size_type N,
-    const concepts::TensorView<1> auto& resnorms,
-    concepts::TensorView<NDIM+1> auto& out_view,
-    ttg::device::Stream stream)
-  {
-    CALL_KERNEL((detail::convolution_prune_zero_norm_kernel<NDIM>), 1, 32, 0, stream, (N, resnorms, out_view));
-    checkSubmit();
-  }
 
   /**
    * Batched counterpart of submit_convolution_kernel: launches one kernel on
@@ -819,8 +836,13 @@ namespace mra{
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
 
-    CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, fac));
+    if (K == 8) {
+      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
+                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, Int<8>{}, fac));
+    } else {
+      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
+                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, fac));
+    }
     checkSubmit();
 
     pool.mark_submitted(slot, stream);

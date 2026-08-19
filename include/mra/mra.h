@@ -10,7 +10,6 @@
 
 #include "mra/misc/batching.h"
 #include "mra/misc/conv_mad.h"
-#include "mra/misc/dims.h"
 #include "mra/misc/gl.h"
 #include "mra/misc/hash.h"
 #include "mra/misc/init.h"
@@ -35,6 +34,7 @@
 
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/cycledim.h"
+#include "mra/tensor/dimensions.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/tensor/tensoriter.h"
 #include "mra/tensor/child_slice.h"
