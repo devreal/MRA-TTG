@@ -78,56 +78,6 @@ namespace mra{
 
     }
 
-
-
-#if 0
-    /// too lazy for extended calling lists
-    struct Transformation {
-      long r;             // Effective rank of transformation
-      const Q* U;         // Ptr to matrix
-      const Q* VT;
-    };
-
-    template<typename T, Dimension NDIM>
-    DEVSCOPE void make_transformation(T Rnorm, size_type mu, const TensorView<T, 4>& ops,
-                                      std::array<Transformation, (size_t)NDIM>& trans) {
-
-      const auto tol_Rs = tol/(Rnorm*NDIM);  // Errors are relative within here
-
-      // Determine rank of SVD to use or if to use the full matrix
-      long twok = 2*k;
-      // TODO: do we care about modified() operators?
-      //if (modified()) twok=k;
-
-      long break_even;
-      if (NDIM==1) break_even = long(0.5*twok);
-      else if (NDIM==2) break_even = long(0.6*twok);
-      else if (NDIM==3) break_even=long(0.65*twok);
-      else break_even=long(0.7*twok);
-      bool rank_is_zero = false;
-      for (std::size_t d=0; d<NDIM; ++d) {
-        long r;
-        for (r=0; r<twok; ++r) {
-          if (ops_1d[d]->Rs[r] < tol_Rs) break;
-        }
-        if (r >= break_even) {
-          trans[d].r = twok;
-          trans[d].U = ops(mu, 0).ptr();
-          trans[d].VT = nullptr;
-        }
-        else {
-          if (r == 0) {
-            rank_is_zero = true;
-            break;
-          }
-          trans[d].r = r;
-          trans[d].U = ops(mu, 1).ptr();
-          trans[d].VT = ops(mu, 2).ptr();
-        }
-      }
-    }
-#endif // 0
-
     /**
      * See the comment on multiply_kernel_impl in mra/kernels/multiply.h for
      * why this uses explicitly-named template parameters instead of the
