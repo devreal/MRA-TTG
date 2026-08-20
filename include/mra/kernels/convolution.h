@@ -168,25 +168,17 @@ namespace mra{
     {
       // R term
       double Rnorm = 1.0;
-      for (std::size_t d=0; d<NDIM; ++d) Rnorm *= opnorms(opid, mu, d, (size_type)NormId::Rnorm);
+      for (Dimension d=0; d<NDIM; ++d) Rnorm *= opnorms(opid, mu, d, (size_type)NormId::Rnorm);
       if (at[0] && Rnorm > 1.e-20) {
-
         conv_transform<T, NDIM>(opid, 2*K, mu, mufac, transr, f, result, work1, work2);
       }
 
       // S term
       double Snorm = 1.0;
-      for (std::size_t d=0; d<NDIM; ++d) Snorm *= opnorms(opid, mu, d, (size_type)NormId::Snorm);
+      for (Dimension d=0; d<NDIM; ++d) Snorm *= opnorms(opid, mu, d, (size_type)NormId::Snorm);
       if (at[1] && Snorm > 0.0) {
         conv_transform<T, NDIM>(opid, K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
       }
-
-      //auto rnorm = normf(result);
-      //auto rcnorm = normf(resultc);
-      //if (is_team_lead())
-      //  printf("MRA APPLY CONV: opid %d mu %d result %e resultc %e\n",
-      //       opid, mu, rnorm, rcnorm);
-
     }
 
 
@@ -373,16 +365,17 @@ namespace mra{
         i = find_nth_nonzero(N, tmp_pos, result_view);
 
         const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
-        const size_type TWOK2NDIM = mra::pow(2*K, Int<NDIM>{});
+        auto TWOK = Int<2>{}*K;
+        const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
         T* block_tmp_ptr = &tmp[tmp_pos*convolution_tmp_size<NDIM>(K)];
         // construct temporaries and pass them to conv_transform
         f0        = tensor_view_k_type(&block_tmp_ptr[                      0],   K);
         resultc   = tensor_view_k_type(&block_tmp_ptr[                 K2NDIM],   K);
-        work1     = tensor_view_2k_type(&block_tmp_ptr[              2*K2NDIM], 2*K);
-        work2     = tensor_view_2k_type(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], 2*K);
-        in        = make_ct_tensorview_from(in_view(i), 2*K);
-        f         = make_ct_tensorview_from(f_view(i), 2*K);
-        result    = make_ct_tensorview_from(result_view(i), 2*K);
+        work1     = tensor_view_2k_type(&block_tmp_ptr[              2*K2NDIM], TWOK);
+        work2     = tensor_view_2k_type(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], TWOK);
+        in        = make_ct_tensorview_from(in_view(i), TWOK);
+        f         = make_ct_tensorview_from(f_view(i), TWOK);
+        result    = make_ct_tensorview_from(result_view(i), TWOK);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -512,9 +505,9 @@ namespace mra{
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     if (K == 8) {
-      auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+      //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
-                  (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view_k, f_view, result_view,
+                  (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
     } else {
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
