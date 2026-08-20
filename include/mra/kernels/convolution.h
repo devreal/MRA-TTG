@@ -297,13 +297,15 @@ namespace mra{
       size_type N,
       size_type tmp_pos)
     {
+      auto TWOK = Int<2>{}*K;
       using dims_k_type = decltype(make_dims<NDIM>(K));
-      using dims_2k_type = decltype(make_dims<NDIM>(2*K));
+      using dims_2k_type = decltype(make_dims<NDIM>(TWOK));
       using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
       using tensor_view_2k_type = DenseTensorView<T, NDIM, dims_2k_type>;
+      using const_tensor_view_2k_type = DenseTensorView<const T, NDIM, dims_2k_type>;
       SHARED tensor_view_k_type f0, resultc;
       SHARED tensor_view_2k_type work1, work2, result;
-      SHARED DenseTensorView<const T, NDIM> f, in;
+      SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
 
       if (is_team_lead()) {
@@ -315,7 +317,6 @@ namespace mra{
         i = find_nth_nonzero(N, tmp_pos, result_view);
 
         const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
-        auto TWOK = Int<2>{}*K;
         const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
         T* block_tmp_ptr = &tmp[tmp_pos*convolution_tmp_size<NDIM>(K)];
         // construct temporaries and pass them to conv_transform
