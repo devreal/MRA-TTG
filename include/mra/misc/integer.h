@@ -256,7 +256,7 @@ namespace mra {
     } else if constexpr (Exponent == 1) {
       return Int<Base>{};
     } else {
-      return Int<Base>{} * pow(Int<Base * Base>{}, Int<(Exponent - 1)>{});
+      return Int<Base>{} * pow(Int<Base>{}, Int<(Exponent - 1)>{});
     }
   }
 
@@ -270,7 +270,7 @@ namespace mra {
     } else if (exponent == 1) {
       return base;
     } else {
-      return base * pow(base * base, exponent - 1);
+      return base * pow(base, exponent - 1);
     }
   }
 
