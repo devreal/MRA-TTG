@@ -455,7 +455,7 @@ namespace mra {
 
 
   template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename DimsType>
-  class TensorView : public Sparsity<TensorView<T, NDIM, Sparsity>, T> {
+  class TensorView : public Sparsity<TensorView<T, NDIM, Sparsity, DimsType>, T> {
   private:
     template<Dimension M>
     using subview_dims_type = decltype(std::declval<DimsType>().subdims(Int<NDIM-M>{}));
@@ -463,7 +463,7 @@ namespace mra {
   public:
     using value_type = T;
     using const_value_type = std::add_const_t<value_type>;
-    using sparsity_type = Sparsity<TensorView<T, NDIM, Sparsity>, T>;
+    using sparsity_type = Sparsity<TensorView<T, NDIM, Sparsity, DimsType>, T>;
     using dims_type = DimsType;
     template<typename U, Dimension M>
     using subview_type = TensorView<U, M, DenseViewBase, subview_dims_type<M>>;
@@ -509,6 +509,7 @@ namespace mra {
       size_type offset = 0;
       if (this->data() != nullptr) {
         std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
+        // sanity check that indices are within bounds
         for (size_type i = 0; i < indices.size(); ++i) {
           assert(indices[i] < dim(i));
         }
@@ -886,10 +887,12 @@ namespace mra {
     using value_type = typename T::value_type;
     using dims_type = decltype(make_dims<T::ndim()>(dims...));
     // sanity check that the provided dimensions match the tensor dimensions
-    int i = 0;
-    std::apply([&](auto&&... args) {
-      MRA_ASSERT(((t.dim(i++) == args)&&...) && "make_ct_tensorview_from: provided dimensions do not match tensor dimensions");
-    }, std::make_tuple(dims...));
+    if (!t.empty()) {
+      int i = 0;
+      std::apply([&](auto&&... args) {
+        MRA_ASSERT(((t.dim(i++) == args)&&...) && "make_ct_tensorview_from: provided dimensions do not match tensor dimensions");
+      }, std::make_tuple(dims...));
+    }
     return TensorView<value_type, T::ndim(), DenseViewBase, dims_type>(t.data(), make_dims<T::ndim()>(dims...));
   }
 
