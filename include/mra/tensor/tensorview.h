@@ -193,7 +193,7 @@ namespace mra {
       {}
 
       void inc() {
-        assert(count < t.size());
+        MRA_ASSERT(count < t.size());
         count++;
         for (int d=int(NDIM)-1; d>=0; --d) { // must be signed loop variable!
           indx[d]++;
@@ -233,7 +233,7 @@ namespace mra {
         else if (finish < 0) {finish += dim;}
 
         count = std::max(size_type(0),((finish-start-stride/std::abs(stride))/stride+1));
-        assert((count==0) || ((count<=dim) && (start>=0 && start<=dim)));
+        MRA_ASSERT((count==0) || ((count<=dim) && (start>=0 && start<=dim)));
         finish = start + count*stride; // finish is one past the last element
     }
 
@@ -247,8 +247,8 @@ namespace mra {
       bool operator!=(const iterator&other) {return value != other.value;}
     };
 
-    iterator begin() const {assert(count>=0); return iterator(start,stride); }
-    iterator end() const {assert(count>=0); return iterator(finish,stride); }
+    iterator begin() const {MRA_ASSERT(count>=0); return iterator(start,stride); }
+    iterator end() const {MRA_ASSERT(count>=0); return iterator(finish,stride); }
 
     SCOPE Slice& operator=(const Slice& other) {
       if (this != &other) {
@@ -530,7 +530,7 @@ namespace mra {
         std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
         // sanity check that indices are within bounds
         for (size_type i = 0; i < indices.size(); ++i) {
-          assert(indices[i] < dim(i));
+          MRA_ASSERT(indices[i] < dim(i));
         }
         offset = offset_impl<0>(std::forward<Dims>(idxs)...);
       }
@@ -667,7 +667,7 @@ namespace mra {
     SCOPE value_type& operator()(Dims... idxs) {
       std::array<size_type, sizeof...(Dims)> indices = {static_cast<size_type>(idxs)...};
       for (size_type i = 0; i < indices.size(); ++i) {
-        assert(indices[i] < dim(i));
+        MRA_ASSERT(indices[i] < dim(i));
       }
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (is_sparse() && this->is_zero(indices[0])) {
@@ -689,7 +689,7 @@ namespace mra {
           return T{};
         }
         for (size_type i = 0; i < indices.size(); ++i) {
-          assert(indices[i] < dim(i));
+          MRA_ASSERT(indices[i] < dim(i));
         }
         return this->data()[offset(std::forward<Dims>(idxs)...)];
       }
@@ -907,8 +907,8 @@ namespace mra {
     }
 
   private:
-    dims_type m_dims;
     T *m_ptr; // may be const or non-const
+    dims_type m_dims;
   };
 
   template<concepts::TensorView TV>
