@@ -148,7 +148,11 @@ namespace mra::detail {
 #if defined(__CUDA_ARCH__) || defined(MRA_ENABLE_HOST)
 #define MRA_ASSERT(_cond) assert(_cond);
 #else  // __CUDA_ARCH__
+#ifdef NDEBUG
+#define MRA_ASSERT(_cond) do { } while(0)
+#else
 #define MRA_ASSERT(_cond) do { if (!(_cond)) { THROWF("Assertion failed: %s", #_cond); } } while(0)
+#endif // NDEBUG
 #endif // __CUDA_ARCH__
 
 #if defined(__CUDACC__)
