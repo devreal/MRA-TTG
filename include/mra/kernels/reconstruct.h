@@ -88,6 +88,98 @@ namespace mra {
 
 
     /**
+     * Does the actual per-fnid setup work (finding fnid, rebinding
+     * s/tmp_node/node/from_parent/block_r_arr/result to this function's
+     * slice of the batch), on behalf of the team lead only. Deliberately
+     * factored into its own noinline function -- called from inside
+     * `if (is_t0) { ... }` in reconstruct_process_one below -- rather than
+     * inlined there directly: nvcc was observed to miscompile the
+     * surrounding if(is_t0){...} SYNCTHREADS() pattern when this body was
+     * inlined, corrupting SHARED state (and even plain register-local
+     * values like is_t0 itself) by the time execution reaches the code
+     * after the barrier, for every thread including the one that did the
+     * writing. A real function-call boundary discards all of this
+     * function's own local/register state on return, leaving only the
+     * genuinely-SHARED outputs (passed by reference) to cross the barrier
+     * -- which sidesteps whatever register-liveness bug the inlined form
+     * was hitting.
+     *
+     * Every parameter that would naturally be an abbreviated
+     * `concepts::TensorView<...> auto&` is instead spelled out as its own
+     * named template parameter (NodeViewT, FPViewT, ...), deduced from the
+     * call site exactly as an abbreviated-auto parameter would be --
+     * confirmed load-bearing, not stylistic: compiling this file with a
+     * different nvcc release (12.9) crashes the front end outright with
+     * "internal error: assertion failed ... in
+     * check_name_hiding_by_template_parameters" pointing at this
+     * function's closing brace, when it mixes explicit template parameters
+     * (T, NDIM) with this many abbreviated-auto parameters. 13.3 doesn't
+     * crash on this shape, but the surrounding investigation (an
+     * overload-resolution ranking bug that made two independent,
+     * syntactically-correct SFINAE exclusions get ignored; a plain local
+     * bool reading back wrong for the writing thread across a
+     * __syncthreads() barrier with racecheck reporting 0 hazards; and,
+     * under -G, a hard jump to PC 0 at this call boundary) points at the
+     * same underlying template-parameter-resolution confusion, just
+     * miscompiling silently instead of crashing. Named template parameters
+     * sidestep it entirely.
+     */
+    template<typename T, Dimension NDIM, typename NodeViewT, typename FPViewT, typename RArrT, typename ResultViewT,
+             typename ST, typename TmpNodeT, typename NodeT, typename FromParentT, typename BlockRArrT, typename ResultT>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+    __noinline__
+#endif
+    DEVSCOPE void reconstruct_process_one_leader(
+      const NodeViewT& node_view,
+      T* tmp_ptr,
+      const FPViewT& from_parent_view,
+      RArrT& r_arr,
+      ResultViewT& result_view,
+      size_type N,
+      size_type K,
+      size_type tmp_pos,
+      ST& s,
+      TmpNodeT& tmp_node,
+      T*& workspace,
+      NodeT& node,
+      FromParentT& from_parent,
+      BlockRArrT& block_r_arr,
+      ResultT& result,
+      size_type& fnid)
+    {
+      // node_view/from_parent_view/result_view/r_arr[0..7] together have
+      // exactly n_nonzero positions where at least one is non-zero, so
+      // this always finds a valid function id -- see
+      // submit_reconstruct_kernel. result_view/r_arr must be included: a
+      // leaf/inner position can have an exactly-zero node/from_parent
+      // *value* yet still need its output slot visited (see
+      // mra/tasks/reconstruct.h's work_sparsity comment).
+      fnid = find_nth_nonzero_any_with_result(N, tmp_pos, node_view, from_parent_view, result_view, r_arr,
+                                              std::make_index_sequence<Key<NDIM>::num_children()>{});
+
+      T* block_tmp_ptr = &tmp_ptr[tmp_pos*reconstruct_tmp_size<NDIM>(K)];
+      const size_type TWOK2NDIM = std::pow(2*K,NDIM);
+      s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
+      tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
+      workspace   = &block_tmp_ptr[2*TWOK2NDIM];
+
+      node = node_view(fnid);
+      from_parent = from_parent_view(fnid);
+      for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
+        if (r_arr[i].is_zero(fnid)) {
+          block_r_arr[i] = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl expects a non-const view for all children
+        } else {
+          block_r_arr[i] = r_arr[i](fnid);
+        }
+      }
+      if (!result_view.is_zero(fnid)) {
+        result = result_view(fnid);
+      } else {
+        result = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl
+      }
+    }
+
+    /**
      * Processes one function of one node: the per-block body shared by both
      * the unbatched reconstruct_kernel below and reconstruct_kernel_batched
      * further down -- there is exactly one copy of this logic to maintain
@@ -122,36 +214,8 @@ namespace mra {
       SHARED size_type fnid;
 
       if (is_t0) {
-        // node_view/from_parent_view/result_view/r_arr[0..7] together have
-        // exactly n_nonzero positions where at least one is non-zero, so
-        // this always finds a valid function id -- see
-        // submit_reconstruct_kernel. result_view/r_arr must be included: a
-        // leaf/inner position can have an exactly-zero node/from_parent
-        // *value* yet still need its output slot visited (see
-        // mra/tasks/reconstruct.h's work_sparsity comment).
-        fnid = find_nth_nonzero_any_with_result(N, tmp_pos, node_view, from_parent_view, result_view, r_arr,
-                                                std::make_index_sequence<Key<NDIM>::num_children()>{});
-
-        T* block_tmp_ptr = &tmp_ptr[tmp_pos*reconstruct_tmp_size<NDIM>(K)];
-        const size_type TWOK2NDIM = std::pow(2*K,NDIM);
-        s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
-        tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
-        workspace   = &block_tmp_ptr[2*TWOK2NDIM];
-
-        node = node_view(fnid);
-        from_parent = from_parent_view(fnid);
-        for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
-          if (r_arr[i].is_zero(fnid)) {
-            block_r_arr[i] = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl expects a non-const view for all children
-          } else {
-            block_r_arr[i] = r_arr[i](fnid);
-          }
-        }
-        if (!result_view.is_zero(fnid)) {
-          result = result_view(fnid);
-        } else {
-          result = DenseTensorView<T, NDIM>(); // dummy view since reconstruct_kernel_impl
-        }
+        reconstruct_process_one_leader<T, NDIM>(node_view, tmp_ptr, from_parent_view, r_arr, result_view, N, K, tmp_pos,
+                                                s, tmp_node, workspace, node, from_parent, block_r_arr, result, fnid);
       }
       SYNCTHREADS();
       reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr, result);
