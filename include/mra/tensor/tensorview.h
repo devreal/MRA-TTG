@@ -579,13 +579,12 @@ namespace mra {
     : TensorView(const_cast<T*>(ptr), dims) // remove const, we store a non-const pointer internally
     { }
 
-    TensorView(TensorView&& other) = default;
+    //TensorView(TensorView&& other) = default;
     TensorView(const TensorView& other) = default;
 
     ~TensorView() = default;
 
-    TensorView& operator=(TensorView&& other) = default;
-
+    //TensorView& operator=(TensorView&& other) = default;
 
     /**
      * Move constructor for non-const TensorView from non-const TensorView.
@@ -597,7 +596,7 @@ namespace mra {
      * This overload is important to prevent accidental use of the copy-assignment operator `operator=(const TensorView auto& other)`,
      * which would try to assign values. We assume that move semantics are only used to construct tensors.
      */
-    template<typename U = T, typename OtherDims>
+    template<typename U, typename OtherDims>
     SCOPE TensorView& operator=(TensorView<U, NDIM, Sparsity, OtherDims>&& other) {
       static_assert(std::is_same_v<U, T>, "Can only move from TensorView of same type. Make sure source and destination have the same T.");
       m_dims = other.m_dims;
@@ -641,7 +640,7 @@ namespace mra {
      * Returns a reference to the i-th allocated element.
      **/
     SCOPE value_type& operator[](size_type i) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #1");
       return this->data()[i];
     }
 
@@ -669,7 +668,7 @@ namespace mra {
       for (size_type i = 0; i < indices.size(); ++i) {
         MRA_ASSERT(indices[i] < dim(i));
       }
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #2");
       if (is_sparse() && this->is_zero(indices[0])) {
         THROW("TensorView: non-const attempt to access unallocated sparse subview or element");
       }
@@ -735,7 +734,7 @@ namespace mra {
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
     SCOPE TensorView& operator=(const value_type& value) requires(!std::is_const_v<T>) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #3");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) = value; });
       return *this;
     }
@@ -744,7 +743,7 @@ namespace mra {
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
     SCOPE TensorView& operator*=(const value_type& value) requires(!std::is_const_v<T>) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #4");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) *= value; });
       return *this;
     }
@@ -753,7 +752,7 @@ namespace mra {
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
     SCOPE TensorView& operator+=(const concepts::DenseTensorView<NDIM> auto& value) requires(!std::is_const_v<T>) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #5");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) += value[i]; });
       return *this;
     }
@@ -762,8 +761,29 @@ namespace mra {
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator=(const TensorView& other) requires(!std::is_const_v<T>) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+    ///
+    /// Same nvcc EDG mis-ranking as the value_type-mismatch copy operator
+    /// below (see its comment), but for the OTHER copy path: since this
+    /// overload's argument type is exactly `TensorView` (same T, same Dims),
+    /// value_type always matches, so that exclusion trick doesn't apply
+    /// here -- instead exclude rvalue arguments directly via a forwarding
+    /// reference + is_lvalue_reference_v check, so an exact-type rebind like
+    /// `s = DenseTensorView<T,NDIM>(ptr, dims);` can ONLY match the
+    /// rvalue-ref move-assignment above, not this value-copy. Without this,
+    /// nvcc was preferring THIS operator for that rvalue, silently
+    /// value-copying INTO whatever garbage pointer `s` (freshly SHARED, not
+    /// yet bound) already held instead of rebinding it -- since that
+    /// garbage pointer is not reliably non-null, this shows up as "non-const
+    /// call with nullptr" either here or, if the garbage pointer happened to
+    /// look non-null, downstream (e.g. `s = 0.0;` right after, once `s` is
+    /// actually used) -- confirmed by tagging every "nullptr" THROW site in
+    /// this file and observing the fill-with-scalar operator's throw fire
+    /// instead of this one.
+    template<typename OtherT>
+    requires(!std::is_const_v<T> && std::is_same_v<std::remove_reference_t<OtherT>, TensorView>
+             && std::is_lvalue_reference_v<OtherT>)
+    SCOPE TensorView& operator=(OtherT&& other) {
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #6");
       if (other.data() == nullptr) {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
       } else {
@@ -809,7 +829,7 @@ namespace mra {
     requires(!std::is_const_v<T> && concepts::DenseTensorView<std::remove_reference_t<OtherT>, NDIM>
              && !std::is_same_v<typename std::remove_reference_t<OtherT>::value_type, T>)
     SCOPE TensorView& operator=(OtherT&& other) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #7");
       if (other.data() == nullptr) {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
       } else {
@@ -837,7 +857,7 @@ namespace mra {
     /// Host: assumes this operation is called by a single CPU thread
     template<typename TensorViewT>
     SCOPE TensorView& operator=(const TensorSlice<TensorViewT>& other) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #8");
       foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
       return *this;
     }
@@ -845,12 +865,12 @@ namespace mra {
     SCOPE void reduce_rank(const T& eps) {return;}
 
     SCOPE TensorSlice<TensorView> operator()(const std::array<Slice, NDIM>& slices) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #9");
       return TensorSlice<TensorView>(*this, slices);
     }
 
     SCOPE TensorSlice<TensorView> get_slice(const std::array<Slice, NDIM>& slices) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
+      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #10");
       return TensorSlice<TensorView>(*this, slices);
     }
 
