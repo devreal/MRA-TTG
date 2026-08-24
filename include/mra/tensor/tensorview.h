@@ -105,6 +105,25 @@ namespace mra {
 
 
   namespace detail {
+    /**
+     * Broadcasts a single value to construct a DimsT with N copies of it --
+     * used by TensorView::make_dims() for the "one dimension provided,
+     * populate all NDIM dimensions with it" case. Written as a top-level
+     * function template taking the index_sequence as an explicit parameter,
+     * rather than as a nested generic lambda (`[]<std::size_t... Is>(...){...}`)
+     * at the call site inside make_dims() (itself a member of the templated,
+     * abbreviated-auto-heavy TensorView class) -- that nested-lambda-inside-
+     * template-inside-template shape is the same pattern that reliably
+     * confuses nvcc's EDG front end elsewhere in this codebase (see e.g.
+     * muopxv_fast's comment in mra/kernels/convolution.h, or
+     * find_nth_nonzero_any_with_result in mra/tensor/sparsity.h for the
+     * exact same fix applied to a different function).
+     */
+    template<typename DimsT, typename ValT, std::size_t... Is>
+    SCOPE DimsT broadcast_dims(ValT dim0, std::index_sequence<Is...>) {
+      return DimsT(((void)Is, dim0)...);
+    }
+
     template<Dimension I, typename Fn, typename... Args>
     SCOPE void foreach_idxs_impl(const concepts::TensorView auto& t, Fn&& fn, Args... args)
     {
@@ -527,10 +546,10 @@ namespace mra {
       if constexpr (sizeof...(Dims) == NDIM) {
         return dims_type(dims...);
       } else {
-        // provided 1 dimension, populate it to all other dimensions
-        return []<std::size_t... Is>(std::index_sequence<Is...>, auto dim0) {
-                  return dims_type(((void)Is, dim0)...);
-                }(std::make_index_sequence<NDIM>{}, dims...);
+        // provided 1 dimension, populate it to all other dimensions -- see
+        // detail::broadcast_dims's comment for why this isn't a nested
+        // lambda here.
+        return detail::broadcast_dims<dims_type>(dims..., std::make_index_sequence<NDIM>{});
       }
     }
 
