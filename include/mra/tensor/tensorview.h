@@ -66,7 +66,7 @@ namespace mra {
 
     template<typename T, Dimension NDIM, template<typename, typename> typename Sparsity, typename Dims>
     struct is_sparse_tensorview<TensorView<T, NDIM, Sparsity, Dims>,
-                                std::enable_if_t<is_sparsity_view_v<typename TensorView<T, NDIM, Sparsity>::sparsity_type>>>
+                                std::enable_if_t<is_sparsity_view_v<typename TensorView<T, NDIM, Sparsity, Dims>::sparsity_type>>>
     : std::true_type { };
 
   } // namespace detail
@@ -578,8 +578,8 @@ namespace mra {
      * This overload is important to prevent accidental use of the copy-assignment operator `operator=(const TensorView auto& other)`,
      * which would try to assign values. We assume that move semantics are only used to construct tensors.
      */
-    template<typename U = T>
-    SCOPE TensorView& operator=(TensorView<U, NDIM, Sparsity>&& other) {
+    template<typename U = T, typename OtherDims>
+    SCOPE TensorView& operator=(TensorView<U, NDIM, Sparsity, OtherDims>&& other) {
       static_assert(std::is_same_v<U, T>, "Can only move from TensorView of same type. Make sure source and destination have the same T.");
       m_dims = other.m_dims;
       m_ptr = other.m_ptr;
