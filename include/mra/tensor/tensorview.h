@@ -567,17 +567,6 @@ namespace mra {
 
     TensorView& operator=(TensorView&& other) = default;
 
-#if 0
-    /**
-     * Overload to capture assignment of rvalue tensors with const T.
-     */
-    SCOPE TensorView& operator=(TensorView<const T, NDIM, Sparsity>&& other) requires(std::is_const_v<T>) {
-      m_dims = other.m_dims;
-      m_ptr = other.m_ptr;
-      other.m_ptr = nullptr;
-      return *this;
-    }
-#endif // 0
 
     /**
      * Move constructor for non-const TensorView from non-const TensorView.
