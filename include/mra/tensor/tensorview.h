@@ -757,7 +757,39 @@ namespace mra {
     /// Copy into patch
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
-    SCOPE TensorView& operator=(const concepts::DenseTensorView<NDIM> auto& other) requires(!std::is_const_v<T>) {
+    ///
+    /// Constrained to exclude the case where `other`'s value_type is
+    /// IDENTICAL to `T` (modulo the top-level cv-qualification difference a
+    /// forwarding reference can't itself remove) -- that case is handled by
+    /// either the non-template `operator=(const TensorView&)` above (lvalue,
+    /// exact type match) or the templated rvalue-ref move-assignment below
+    /// (rvalue, T matches, Dims may differ). This operator's actual job is
+    /// value-copying from a source whose value_type DIFFERS from T (e.g.
+    /// `const double` into `double`), which neither of those two can do
+    /// (exact-copy needs a full type match; move-assign's own
+    /// static_assert(is_same_v<U,T>) requires it too).
+    ///
+    /// This exclusion is load-bearing, not stylistic: once the Dims
+    /// templating gave TensorView an extra template parameter, nvcc's EDG
+    /// front end started ranking this constrained abbreviated-auto-style
+    /// template ABOVE both of those same-T candidates whenever it was ALSO
+    /// viable (e.g. for an exact-type rvalue) -- so a rebind like
+    /// `s = DenseTensorView<T,NDIM>(ptr, dims);` (meant to move-assign a
+    /// fresh pointer into a freshly-SHARED, not-yet-bound `s`) was instead
+    /// being value-copied through THIS operator, into whatever garbage
+    /// pointer `s` already held -- hence "non-const call with nullptr"
+    /// throws (or, worse, silent corruption when the garbage pointer looked
+    /// non-null). Excluding same-T sources removes the ambiguity outright
+    /// rather than relying on nvcc to rank T&& over const T& correctly when
+    /// a constrained template is also a candidate. Verified against the
+    /// full set of call sites across mra/kernels/*.h by temporarily
+    /// disabling this operator and confirming every remaining compile error
+    /// was a genuine value_type mismatch (const vs non-const T) -- none was
+    /// a same-T rebind.
+    template<typename OtherT>
+    requires(!std::is_const_v<T> && concepts::DenseTensorView<std::remove_reference_t<OtherT>, NDIM>
+             && !std::is_same_v<typename std::remove_reference_t<OtherT>::value_type, T>)
+    SCOPE TensorView& operator=(OtherT&& other) {
       if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr");
       if (other.data() == nullptr) {
         foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
