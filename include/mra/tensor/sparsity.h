@@ -100,10 +100,25 @@ namespace mra {
      * Device-callable; call ONCE per thread-block, same as find_nth_nonzero.
      */
     template<typename ViewT, typename... MoreViews>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+    __noinline__
+#endif
     SCOPE size_type find_nth_nonzero_any(size_type N, size_type pos, const ViewT& view, const MoreViews&... more) {
       size_type count = 0;
       for (size_type i = 0; i < N; ++i) {
-        if (view.is_nonzero(i) || (more.is_nonzero(i) || ...)) {
+        // Deliberately NOT a `(more.is_nonzero(i) || ...)` fold expression:
+        // with ~10 identically-typed MoreViews (reconstruct's
+        // from_parent/result/r_arr[0..7]), that fold was observed to make
+        // this function report zero non-zero entries in the union even
+        // though every individual view's is_nonzero(i) checked out true
+        // when read directly at the call site -- the same class of nvcc EDG
+        // front-end confusion documented elsewhere in this codebase for
+        // complex pack-expansion patterns (see e.g. muopxv_fast's comment in
+        // mra/kernels/convolution.h). A plain comma-fold accumulating into a
+        // local sidesteps whatever code path the `||`-fold takes.
+        bool nz = view.is_nonzero(i);
+        ((nz = nz || more.is_nonzero(i)), ...);
+        if (nz) {
           if (count == pos) {
             return i;
           }
@@ -130,6 +145,9 @@ namespace mra {
      * comment in mra/kernels/convolution.h for the same class of issue.
      */
     template<typename NodeViewT, typename FPViewT, typename ResultViewT, typename ArrT, std::size_t... Is>
+#if defined(__CUDA_ARCH__)
+    __forceinline__
+#endif
     SCOPE size_type find_nth_nonzero_any_with_result(size_type N, size_type pos,
                                                       const NodeViewT& node_view, const FPViewT& from_parent_view,
                                                       const ResultViewT& result_view, const ArrT& r_arr,
