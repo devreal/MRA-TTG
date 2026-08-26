@@ -539,7 +539,7 @@ namespace mra {
     }
 
     template<typename... Dims>
-    auto make_dims(Dims... dims) {
+    SCOPE auto make_dims(Dims... dims) {
       static_assert(sizeof...(Dims) == NDIM || sizeof...(Dims) == 1,
                     "Number of arguments does not match number of Dimensions. "
                     "A single argument for all dimensions may be provided.");
