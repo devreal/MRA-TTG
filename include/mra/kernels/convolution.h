@@ -33,17 +33,22 @@ namespace mra{
 
   namespace detail {
 
-    template <typename T, Dimension NDIM>
+    template <typename T, Dimension NDIM,
+              concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+              concepts::TensorView<NDIM> ViewF,
+              concepts::TensorView<NDIM> ViewResult,
+              concepts::TensorView<NDIM> ViewWork1,
+              concepts::TensorView<NDIM> ViewWork2>
     DEVSCOPE void conv_transform(
       int opid,
       const size_type dimk,
       const size_type mu,
       const T mufac,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto& trans,
-      const concepts::TensorView<NDIM> auto& f,
-      concepts::TensorView<NDIM> auto& result,
-      concepts::TensorView<NDIM> auto& work1,
-      concepts::TensorView<NDIM> auto& work2)
+      const ViewTrans& trans,
+      const ViewF& f,
+      ViewResult& result,
+      ViewWork1& work1,
+      ViewWork2& work2)
     {
       size_type rank = dimk; // doing computation assuming full rank
       size_type size = 1;
@@ -132,22 +137,59 @@ namespace mra{
     }
 
 
-    template<typename T, Dimension NDIM>
+    /**
+     * Rebinds work1_k/work2_k to K-sized views of work1/work2's storage, on
+     * behalf of the team lead only. Factored into its own noinline function
+     * for the same reason as compress_process_one_leader (see
+     * mra/kernels/compress.h) and convolution_process_one_leader below:
+     * nvcc was observed to miscompile a SHARED-tensor rebind directly
+     * inside if(is_team_lead()){...} before a SYNCTHREADS() barrier. Uses
+     * detail::broadcast_dims directly (bypassing TensorView's make_dims()
+     * single-value-broadcast dispatch, itself a separate confirmed nvcc
+     * miscompile site -- see reconstruct_process_one_leader's comment)
+     * rather than passing K straight to the variadic-Dims constructor.
+     */
+    template<typename T, Dimension NDIM, typename KT, typename Work1T, typename Work2T,
+             typename Work1KT, typename Work2KT>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+    __noinline__
+#endif
+    DEVSCOPE void apply_conv_leader(
+      Work1T& work1,
+      Work2T& work2,
+      KT K,
+      Work1KT& work1_k,
+      Work2KT& work2_k)
+    {
+      work1_k = Work1KT(work1.data(), detail::broadcast_dims<typename Work1KT::dims_type>(K, std::make_index_sequence<NDIM>{}));
+      work2_k = Work2KT(work2.data(), detail::broadcast_dims<typename Work2KT::dims_type>(K, std::make_index_sequence<NDIM>{}));
+    }
+
+    template<typename T, Dimension NDIM,
+             concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
+             concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+             concepts::TensorView<4> ViewOpnorms,
+             concepts::TensorView<NDIM> ViewF,
+             concepts::TensorView<NDIM> ViewF0,
+             concepts::TensorView<NDIM> ViewResultc,
+             concepts::TensorView<NDIM> ViewResult,
+             concepts::TensorView<NDIM> ViewWork1,
+             concepts::TensorView<NDIM> ViewWork2>
     DEVSCOPE void apply_conv(
       int opid,
       auto K,
       const T fac,
       const T tol,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
-      const concepts::TensorView<4> auto& opnorms,
+      const ViewTransr& transr,
+      const ViewTranss& transs,
+      const ViewOpnorms& opnorms,
       const std::array<bool, 2>& at,
-      concepts::TensorView<NDIM> auto& f,
-      concepts::TensorView<NDIM> auto& f0,
-      concepts::TensorView<NDIM> auto& resultc,
-      concepts::TensorView<NDIM> auto& result,  // size K, stores the sum
-      concepts::TensorView<NDIM> auto& work1,
-      concepts::TensorView<NDIM> auto& work2)
+      ViewF& f,
+      ViewF0& f0,
+      ViewResultc& resultc,
+      ViewResult& result,  // size K, stores the sum
+      ViewWork1& work1,
+      ViewWork2& work2)
     {
       using dims_k_type = decltype(make_dims<NDIM>(K));
       using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
@@ -155,8 +197,7 @@ namespace mra{
       // cannot be SHARED because ctors won't run
       std::array<Slice,NDIM> s0 = std::array<Slice,NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
       if (is_team_lead()) {
-        work1_k = tensor_view_k_type(work1.data(), K);
-        work2_k = tensor_view_k_type(work2.data(), K);
+        apply_conv_leader<T, NDIM>(work1, work2, K, work1_k, work2_k);
       }
 
       const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
@@ -187,12 +228,12 @@ namespace mra{
      * applies the aggressive-screening threshold, writing the final per-function norm to
      * `resnorm_out` (if non-null).
      */
-    template <typename T, Dimension NDIM>
+    template <typename T, Dimension NDIM, concepts::TensorView<NDIM> ViewIn, concepts::TensorView<NDIM> ViewResult>
     DEVSCOPE void convolution_finalize(
       const T fac,
       const T tol,
-      const concepts::TensorView<NDIM> auto& in,
-      concepts::TensorView<NDIM> auto& result,
+      const ViewIn& in,
+      ViewResult& result,
       T* resnorm_out)
     {
       T resnorm = normf(result);
@@ -273,26 +314,84 @@ namespace mra{
     }
 
     /**
+     * Does the actual per-fnid setup work (finding fnid, rebinding
+     * f0/resultc/work1/work2/f/in/result to this function's slice of the
+     * batch), on behalf of the team lead only. Deliberately factored into
+     * its own noinline function -- see compress_process_one_leader's
+     * comment in mra/kernels/compress.h (and reconstruct_process_one_leader's
+     * in mra/kernels/reconstruct.h) for the full story: nvcc was observed to
+     * miscompile the surrounding if(is_team_lead()){...} SYNCTHREADS()
+     * pattern when this body was inlined here, corrupting SHARED state
+     * across the barrier. Uses detail::broadcast_dims directly (bypassing
+     * TensorView's make_dims() single-value-broadcast dispatch, itself a
+     * separate confirmed nvcc miscompile site) rather than passing K/TWOK
+     * straight to the variadic-Dims constructor.
+     */
+    template<typename T, Dimension NDIM, typename KT, typename TwoKT, typename InViewT, typename FViewT, typename ResultViewT,
+             typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename FT, typename InT, typename ResultT>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+    __noinline__
+#endif
+    DEVSCOPE void convolution_process_one_leader(
+      const InViewT& in_view,
+      const FViewT& f_view,
+      ResultViewT& result_view,
+      T* tmp,
+      KT K,
+      TwoKT TWOK,
+      size_type N,
+      size_type tmp_pos,
+      F0T& f0,
+      ResultcT& resultc,
+      Work1T& work1,
+      Work2T& work2,
+      FT& f,
+      InT& in,
+      ResultT& result,
+      size_type& i)
+    {
+      // result_view has exactly n_nonzero non-zero entries, so this
+      // always finds a valid function id -- see submit_convolution_kernel.
+      // Excluded (zero) functions' resnorms entries are pre-filled with
+      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
+      // them here.
+      i = find_nth_nonzero(N, tmp_pos, result_view);
+
+      const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
+      const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
+      T* block_tmp_ptr = &tmp[tmp_pos*convolution_tmp_size<NDIM>(K)];
+      // construct temporaries and pass them to conv_transform
+      f0        = F0T(&block_tmp_ptr[                      0], detail::broadcast_dims<typename F0T::dims_type>(K, std::make_index_sequence<NDIM>{}));
+      resultc   = ResultcT(&block_tmp_ptr[                 K2NDIM], detail::broadcast_dims<typename ResultcT::dims_type>(K, std::make_index_sequence<NDIM>{}));
+      work1     = Work1T(&block_tmp_ptr[              2*K2NDIM], detail::broadcast_dims<typename Work1T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      work2     = Work2T(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename Work2T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      in        = make_ct_tensorview_from(in_view(i), TWOK);
+      f         = make_ct_tensorview_from(f_view(i), TWOK);
+      result    = make_ct_tensorview_from(result_view(i), TWOK);
+    }
+
+    /**
      * Processes one (node, function-index) pair: the per-block body shared by
      * both the unbatched convolution_kernel below and the batched
      * convolution_kernel_batched further down -- there is exactly one copy of
      * this logic to maintain instead of two near-identical grid-stride loops.
      */
-    template <typename T, Dimension NDIM>
+    template <typename T, Dimension NDIM, typename TransrT, typename TranssT, typename OpnormsViewT,
+              typename InViewT, typename FViewT, typename ResultViewT, typename ResnormsT>
     DEVSCOPE void convolution_process_one(
       Key<NDIM> key,
       Key<NDIM> displacement,
       auto K,
       const T fac,
       const T tol,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
-      const concepts::TensorView<4> auto& opnorms_view,
+      const TransrT& transr,
+      const TranssT& transs,
+      const OpnormsViewT& opnorms_view,
       const std::array<bool, 2>& at,
-      const concepts::TensorView<NDIM+1> auto& in_view,
-      const concepts::TensorView<NDIM+1> auto& f_view,
-      concepts::TensorView<NDIM+1> auto& result_view,
-      concepts::TensorView<1> auto& resnorms,
+      const InViewT& in_view,
+      const FViewT& f_view,
+      ResultViewT& result_view,
+      ResnormsT& resnorms,
       T* tmp,
       size_type N,
       size_type tmp_pos)
@@ -309,24 +408,8 @@ namespace mra{
       SHARED size_type i;
 
       if (is_team_lead()) {
-        // result_view has exactly n_nonzero non-zero entries, so this
-        // always finds a valid function id -- see submit_convolution_kernel.
-        // Excluded (zero) functions' resnorms entries are pre-filled with
-        // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
-        // them here.
-        i = find_nth_nonzero(N, tmp_pos, result_view);
-
-        const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
-        const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
-        T* block_tmp_ptr = &tmp[tmp_pos*convolution_tmp_size<NDIM>(K)];
-        // construct temporaries and pass them to conv_transform
-        f0        = tensor_view_k_type(&block_tmp_ptr[                      0],   K);
-        resultc   = tensor_view_k_type(&block_tmp_ptr[                 K2NDIM],   K);
-        work1     = tensor_view_2k_type(&block_tmp_ptr[              2*K2NDIM], TWOK);
-        work2     = tensor_view_2k_type(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], TWOK);
-        in        = make_ct_tensorview_from(in_view(i), TWOK);
-        f         = make_ct_tensorview_from(f_view(i), TWOK);
-        result    = make_ct_tensorview_from(result_view(i), TWOK);
+        convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos,
+                                                f0, resultc, work1, work2, f, in, result, i);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -370,13 +453,13 @@ namespace mra{
      * step) doesn't have non-zero positions outside result_view's coverage
      * -- those would never be visited by this launch.
      */
-    template<typename T, Dimension NDIM>
+    template<typename T, Dimension NDIM, concepts::TensorView<NDIM+1> ViewF, concepts::TensorView<NDIM+1> ViewResult>
     GLOBALSCOPE void convolution_verify_sparsity_kernel_single(
       Key<NDIM> key,
       size_type N,
       size_type n_nonzero,
-      const concepts::TensorView<NDIM+1> auto f_view,
-      concepts::TensorView<NDIM+1> auto result_view)
+      const ViewF f_view,
+      ViewResult result_view)
     {
       if (is_team_lead()) {
         const size_type actual = count_union_nonzero(N, result_view);
@@ -394,7 +477,14 @@ namespace mra{
     }
 #endif // MRA_CHECK_NORMS
 
-    template <typename T, Dimension NDIM>
+    template <typename T, Dimension NDIM,
+              concepts::TensorView<NDIM+1> ViewIn,
+              concepts::TensorView<NDIM+1> ViewF,
+              concepts::TensorView<NDIM+1> ViewResult,
+              concepts::TensorView<1> ViewResnorms,
+              concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
+              concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+              concepts::TensorView<4> ViewOpnorms>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void convolution_kernel(
       Key<NDIM> key,
@@ -404,13 +494,13 @@ namespace mra{
       size_type n_nonzero,
       const T fac,
       const T tol,
-      const concepts::TensorView<NDIM+1> auto in_view,
-      const concepts::TensorView<NDIM+1> auto f_view,
-      concepts::TensorView<NDIM+1> auto result_view,
-      concepts::TensorView<1> auto resnorms,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto transr,
-      const concepts::TensorViewArray<4, (size_t)NDIM> auto transs,
-      const concepts::TensorView<4> auto opnorms_view,
+      const ViewIn in_view,
+      const ViewF f_view,
+      ViewResult result_view,
+      ViewResnorms resnorms,
+      const ViewTransr transr,
+      const ViewTranss transs,
+      const ViewOpnorms opnorms_view,
       const std::array<bool, 2> at,
       T* tmp)
     {
@@ -422,7 +512,14 @@ namespace mra{
 
   } // namespace detail
 
-  template <typename T, Dimension NDIM>
+  template <typename T, Dimension NDIM,
+            concepts::TensorView<NDIM+1> ViewIn,
+            concepts::TensorView<NDIM+1> ViewF,
+            concepts::TensorView<NDIM+1> ViewResult,
+            concepts::TensorView<1> ViewResnorms,
+            concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
+            concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+            concepts::TensorView<4> ViewOpnorms>
   void submit_convolution_kernel(
     Key<NDIM> key,
 	  Key<NDIM> displacement,
@@ -431,13 +528,13 @@ namespace mra{
     size_type n_nonzero,
     const T fac,
     const T tol,
-    const concepts::TensorView<NDIM+1> auto& in_view,
-    const concepts::TensorView<NDIM+1> auto& f_view,
-    concepts::TensorView<NDIM+1> auto& result_view,
-    concepts::TensorView<1> auto& resnorms,
-    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transr,
-    const concepts::TensorViewArray<4, (size_t)NDIM> auto& transs,
-    const concepts::TensorView<4> auto& opnorms,
+    const ViewIn& in_view,
+    const ViewF& f_view,
+    ViewResult& result_view,
+    ViewResnorms& resnorms,
+    const ViewTransr& transr,
+    const ViewTranss& transs,
+    const ViewOpnorms& opnorms,
     const std::array<bool, 2>& at,
     T* tmp,
     ttg::device::Stream stream)
@@ -488,11 +585,11 @@ namespace mra{
      * ttg::device::wait(resnorms.buffer()) brings resnorms back to host.
      * Single block, N small -- not meant for the hot path beyond this use.
      */
-    template <Dimension NDIM>
+    template <Dimension NDIM, concepts::TensorView<1> ViewResnorms, concepts::TensorView<NDIM+1> ViewOut>
     GLOBALSCOPE void convolution_prune_zero_norm_kernel(
       size_type N,
-      const concepts::TensorView<1> auto resnorms,
-      concepts::TensorView<NDIM+1> auto out_view)
+      const ViewResnorms resnorms,
+      ViewOut out_view)
     {
       for (size_type i = threadIdx.x; i < N; i += blockDim.x) {
         if (out_view.is_nonzero(i) && resnorms[i] == 0.0) {
@@ -508,11 +605,11 @@ namespace mra{
    * stream as the kernel that just computed resnorms/out, before that
    * stream's data is brought back to host.
    */
-  template <Dimension NDIM>
+  template <Dimension NDIM, concepts::TensorView<1> ViewResnorms, concepts::TensorView<NDIM+1> ViewOut>
   void submit_convolution_prune_zero_norm_kernel(
     size_type N,
-    const concepts::TensorView<1> auto& resnorms,
-    concepts::TensorView<NDIM+1> auto& out_view,
+    const ViewResnorms& resnorms,
+    ViewOut& out_view,
     ttg::device::Stream stream)
   {
     CALL_KERNEL((detail::convolution_prune_zero_norm_kernel<NDIM>), 1, 32, 0, stream, (N, resnorms, out_view));

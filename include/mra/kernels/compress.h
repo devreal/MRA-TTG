@@ -30,18 +30,18 @@ namespace mra {
 
   namespace detail {
 
-    template<typename T, Dimension NDIM>
+    template<typename T, Dimension NDIM, typename PT, typename DT, typename HgtT, typename ST, typename InViewsT>
     DEVSCOPE void compress_kernel_impl(
       Key<NDIM> key,
       size_type K,
       bool is_ns,
-      concepts::TensorView<NDIM> auto& p,
-      concepts::TensorView<NDIM> auto& d,
-      const concepts::TensorView<2> auto& hgT,
-      concepts::TensorView<NDIM> auto& s,
+      PT& p,
+      DT& d,
+      const HgtT& hgT,
+      ST& s,
       T* workspace,
       T* d_sumsq,
-      const concepts::TensorViewArray<NDIM, Key<NDIM>::num_children()> auto& in_views)
+      const InViewsT& in_views)
     {
 
       for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
@@ -63,6 +63,74 @@ namespace mra {
     }
 
     /**
+     * Does the actual per-fnid setup work (finding fnid, rebinding
+     * s/node/p/d/block_in_views to this function's slice of the batch), on
+     * behalf of the team lead only. Deliberately factored into its own
+     * noinline function -- called from inside `if (is_team_lead()) { ... }`
+     * in compress_process_one below -- rather than inlined there directly:
+     * see reconstruct_process_one_leader's comment in
+     * mra/kernels/reconstruct.h for the full story (nvcc was observed to
+     * miscompile the surrounding if(is_team_lead()){...} SYNCTHREADS()
+     * pattern when this body was inlined, corrupting SHARED state -- here,
+     * `p` reading back wrong after the barrier -- for every thread including
+     * the one that did the writing; a real function-call boundary sidesteps
+     * whatever register-liveness/name-hiding confusion the inlined form was
+     * hitting).
+     *
+     * Every parameter that would naturally be an abbreviated
+     * `concepts::TensorView<...> auto&` is instead spelled out as its own
+     * named template parameter (NodeInT, PInT, ...), deduced from the call
+     * site exactly as an abbreviated-auto parameter would be -- confirmed
+     * load-bearing for the analogous reconstruct_process_one_leader, not
+     * stylistic: this shape (explicit template parameters T, NDIM mixed with
+     * many abbreviated-auto parameters) is what crashes nvcc 12.9/13.0's
+     * front end outright with "internal error: assertion failed ... in
+     * check_name_hiding_by_template_parameters".
+     */
+    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename InViewsT,
+             typename ST, typename BlockInViewsT, typename NodeT, typename PT, typename DT>
+#if defined(__CUDACC__) || defined(__HIPCC__)
+    __noinline__
+#endif
+    DEVSCOPE void compress_process_one_leader(
+      const NodeInT& node_in,
+      PInT& p_in,
+      ResultInT& result_in,
+      const InViewsT& in_views,
+      T* tmp,
+      size_type K,
+      size_type N,
+      size_type tmp_pos,
+      ST& s,
+      T*& workspace,
+      BlockInViewsT& block_in_views,
+      NodeT& node,
+      PT& p,
+      DT& d,
+      size_type& fnid)
+    {
+      const size_type TWOK2NDIM = std::pow(2*K,NDIM);
+      // p_in has exactly n_nonzero non-zero entries (that's how tmp_pos's
+      // range was sized), so this always finds a valid function id.
+      fnid = find_nth_nonzero(N, tmp_pos, p_in);
+      T* block_tmp = &tmp[tmp_pos*compress_tmp_size<NDIM>(K)];
+      s = DenseTensorView<T, NDIM>(&block_tmp[0], DynamicDimensions<NDIM>(2*K, 2*K, 2*K));
+      workspace = &block_tmp[TWOK2NDIM];
+      for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
+        if (in_views[i].is_zero(fnid)) {
+          block_in_views[i] = DenseTensorView<const T, NDIM>(); // dummy view since compress_kernel_impl expects a non-const view for all children
+        } else {
+          block_in_views[i] = in_views[i](fnid);
+        }
+      }
+      p = p_in(fnid);
+      if (!result_in.is_zero(fnid)) {
+        d = result_in(fnid);
+      }
+      node = node_in(fnid);
+    }
+
+    /**
      * Processes one function of one node: the per-block body shared by both
      * the unbatched compress_kernel below and compress_kernel_batched further
      * down -- there is exactly one copy of this logic to maintain instead of
@@ -74,22 +142,21 @@ namespace mra {
      * separate host-built index list/transfer needed), and shared with the
      * rest of the block via a SHARED variable.
      */
-    template<typename T, Dimension NDIM>
+    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT>
     DEVSCOPE void compress_process_one(
       Key<NDIM> key,
       size_type K,
       bool is_ns,
-      const concepts::TensorView<NDIM+1> auto& node_in,
-      concepts::TensorView<NDIM+1> auto& p_in,
-      concepts::TensorView<NDIM+1> auto& result_in,
-      const concepts::TensorView<2> auto& hgT,
+      const NodeInT& node_in,
+      PInT& p_in,
+      ResultInT& result_in,
+      const HgtT& hgT,
       T* tmp,
       T* d_sumsq,
-      const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& in_views,
+      const InViewsT& in_views,
       size_type N,
       size_type tmp_pos)
     {
-      const size_type TWOK2NDIM = std::pow(2*K,NDIM);
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
       SHARED T* workspace;
       SHARED DenseTensorView<const T, NDIM> node;
@@ -97,26 +164,11 @@ namespace mra {
       SHARED size_type fnid;
 
       if (is_team_lead()) {
-        // p_in has exactly n_nonzero non-zero entries (that's how tmp_pos's
-        // range was sized), so this always finds a valid function id.
-        fnid = find_nth_nonzero(N, tmp_pos, p_in);
-        T* block_tmp = &tmp[tmp_pos*compress_tmp_size<NDIM>(K)];
-        s = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
-        workspace = &block_tmp[TWOK2NDIM];
-        for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
-          if (in_views[i].is_zero(fnid)) {
-            block_in_views[i] = DenseTensorView<const T, NDIM>(); // dummy view since compress_kernel_impl expects a non-const view for all children
-          } else {
-            block_in_views[i] = in_views[i](fnid);
-          }
-        }
-        p = p_in(fnid);
-        if (!result_in.is_zero(fnid)) {
-          d = result_in(fnid);
-        }
-        node = node_in(fnid);
+        compress_process_one_leader<T, NDIM>(node_in, p_in, result_in, in_views, tmp, K, N, tmp_pos,
+                                              s, workspace, block_in_views, node, p, d, fnid);
       }
       SYNCTHREADS();
+      assert(!p.empty());
       if (result_in.is_zero(fnid) && !p_in.is_zero(fnid)) {
         p = node; // pass through the input to the output
         d_sumsq[tmp_pos] = 0.0;
@@ -152,13 +204,13 @@ namespace mra {
      * that result_in (documented as a subset of p_in's coverage) doesn't
      * need data outside it.
      */
-    template<typename T, Dimension NDIM>
+    template<typename T, Dimension NDIM, typename PInT, typename ResultInT>
     GLOBALSCOPE void compress_verify_sparsity_kernel(
       Key<NDIM> key,
       size_type N,
       size_type n_nonzero,
-      concepts::TensorView<NDIM+1> auto p_in,
-      concepts::TensorView<NDIM+1> auto result_in)
+      PInT p_in,
+      ResultInT result_in)
     {
       if (is_team_lead()) {
         const size_type actual = count_union_nonzero(N, p_in);
@@ -176,7 +228,7 @@ namespace mra {
     }
 #endif // MRA_CHECK_NORMS
 
-    template<typename T, Dimension NDIM>
+    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
@@ -184,13 +236,13 @@ namespace mra {
       size_type n_nonzero,
       size_type K,
       bool is_ns,
-      const concepts::TensorView<NDIM+1> auto node_in,
-      concepts::TensorView<NDIM+1> auto p_in,
-      concepts::TensorView<NDIM+1> auto result_in,
-      const concepts::TensorView<2> auto hgT,
+      const NodeInT node_in,
+      PInT p_in,
+      ResultInT result_in,
+      const HgtT hgT,
       T* tmp,
       T* d_sumsq,
-      const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto in_views)
+      const InViewsT in_views)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         compress_process_one<T, NDIM>(key, K, is_ns, node_in, p_in, result_in, hgT,
@@ -199,20 +251,20 @@ namespace mra {
     }
   } // namespace detail
 
-  template<typename T, Dimension NDIM>
+  template<typename T, Dimension NDIM, typename InViewT, typename PViewT, typename ResultViewT, typename HgtViewT, typename InViewsT>
   void submit_compress_kernel(
     const Key<NDIM>& key,
     size_type N,
     size_type n_nonzero,
     size_type K,
     bool is_ns,
-    const concepts::TensorView<NDIM+1> auto& in_view,
-    concepts::TensorView<NDIM+1> auto& p_view,
-    concepts::TensorView<NDIM+1> auto& result_view,
-    const concepts::TensorView<2> auto& hgT_view,
+    const InViewT& in_view,
+    PViewT& p_view,
+    ResultViewT& result_view,
+    const HgtViewT& hgT_view,
     T* tmp,
     T* d_sumsq,
-    const concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& in_views,
+    const InViewsT& in_views,
     ttg::device::Stream stream)
   {
 #if defined(MRA_CHECK_NORMS)
@@ -301,7 +353,7 @@ namespace mra {
      * off to the exact same per-(node, function) body compress_kernel itself
      * uses (compress_process_one, defined above with compress_kernel_impl).
      */
-    template<typename T, Dimension NDIM>
+    template<typename T, Dimension NDIM, typename HgtT>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel_batched(
       CompressBatchArg<T, NDIM>* args,        // device ptr, size == num_members
@@ -310,7 +362,7 @@ namespace mra {
       size_type total_nonzero,
       size_type K,
       bool is_ns,
-      const concepts::TensorView<2> auto hgT)
+      const HgtT hgT)
     {
       using idx = CompressBatchArgIdx;
       SHARED size_type member;
@@ -377,7 +429,7 @@ namespace mra {
    * `offset_pool`/`offset_slot` carry the small per-member offsets array
    * (size num_members+1), also assembled by submit_compress_batch_leader.
    */
-  template<typename T, Dimension NDIM>
+  template<typename T, Dimension NDIM, typename HgtT>
   void submit_compress_kernel_batched(
     detail::BatchPool<detail::CompressBatchArg<T, NDIM>>& pool,
     typename detail::BatchPool<detail::CompressBatchArg<T, NDIM>>::slot_t& slot,
@@ -388,7 +440,7 @@ namespace mra {
     size_type total_nonzero,
     size_type K,
     bool is_ns,
-    const concepts::TensorView<2> auto& hgT,
+    const HgtT& hgT,
     ttg::device::Stream stream)
   {
     using idx = detail::CompressBatchArgIdx;
@@ -473,13 +525,13 @@ namespace mra {
      * (max_batch_size * 2 * total_functions), so, like the *BatchArg and
      * offsets pools above, it never needs to grow after that.
      */
-    template <typename T, Dimension NDIM, typename BatchView>
+    template <typename T, Dimension NDIM, typename BatchView, typename HgtT>
     void submit_compress_batch_leader(
       BatchView& batch,
       BatchPoolRegistry<CompressBatchArg<T, NDIM>>& registry,
       size_type K,
       bool is_ns,
-      const concepts::TensorView<2> auto& hgT,
+      const HgtT& hgT,
       size_type total_functions)
     {
       if (!batch.is_leader()) return;
@@ -517,6 +569,7 @@ namespace mra {
       sparsity_slot.host_args.resize(total_sparsity_bytes);
 
       size_type sparsity_offset = 0;
+      auto key = batch[0].template get<0>();
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_key       = batch[m].template get<0>();
         auto& m_node_in   = batch[m].template get<1>();

@@ -124,8 +124,8 @@ namespace mra {
       return DimsT(((void)Is, dim0)...);
     }
 
-    template<Dimension I, typename Fn, typename... Args>
-    SCOPE void foreach_idxs_impl(const concepts::TensorView auto& t, Fn&& fn, Args... args)
+    template<Dimension I, typename TensorT, typename Fn, typename... Args>
+    SCOPE void foreach_idxs_impl(const TensorT& t, Fn&& fn, Args... args)
     {
       constexpr Dimension NDIM = std::decay_t<decltype(t)>::ndim();
 #ifdef HAVE_DEVICE_ARCH
@@ -164,14 +164,14 @@ namespace mra {
   } // namespace detail
 
   /* invoke fn for each NDIM index set */
-  template<typename Fn>
-  SCOPE void foreach_idxs(const concepts::TensorView auto& t, Fn&& fn) {
+  template<typename TensorT, typename Fn>
+  SCOPE void foreach_idxs(const TensorT& t, Fn&& fn) {
     detail::foreach_idxs_impl<0>(t, std::forward<Fn>(fn));
   }
 
   /* invoke fn for each flat index */
-  template<typename Fn>
-  SCOPE void foreach_idx(const concepts::TensorView auto& t, Fn&& fn) {
+  template<typename TensorT, typename Fn>
+  SCOPE void foreach_idx(const TensorT& t, Fn&& fn) {
     size_type tid = thread_id();
     for (size_type i = tid; i < t.size(); i += block_size()) {
       fn(i);
