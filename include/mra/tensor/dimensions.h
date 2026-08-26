@@ -19,9 +19,9 @@ namespace mra {
 
     Dimensions() = default;
 
-    Dimensions(Dims... dims) : m_dims(dims...) {}
+    SCOPE Dimensions(Dims... dims) : m_dims(dims...) {}
 
-    Dimensions(std::tuple<Dims...> dims) : m_dims(dims) {}
+    SCOPE Dimensions(std::tuple<Dims...> dims) : m_dims(dims) {}
 
     SCOPE std::array<size_type, sizeof...(Dims)> array() const {
       std::array<size_type, sizeof...(Dims)> dims_array;
@@ -82,16 +82,16 @@ namespace mra {
 
     DynamicDimensions() = default;
 
-    DynamicDimensions(std::initializer_list<size_type> dims) {
+    SCOPE DynamicDimensions(std::initializer_list<size_type> dims) {
       assert(dims.size() == NDIM);
       std::copy(dims.begin(), dims.end(), m_dims.begin());
     }
 
     template<typename... Dims>
     requires(sizeof...(Dims) <= NDIM && (std::is_integral_v<std::decay_t<Dims>>&&...))
-    DynamicDimensions(Dims... dims) : m_dims({dims...}) {}
+    SCOPE DynamicDimensions(Dims... dims) : m_dims({dims...}) {}
 
-    DynamicDimensions(const std::array<size_type, NDIM>& dims) : m_dims(dims) {}
+    SCOPE DynamicDimensions(const std::array<size_type, NDIM>& dims) : m_dims(dims) {}
 
     SCOPE const std::array<size_type, NDIM>& array() const {
       return m_dims;
