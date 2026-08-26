@@ -2,6 +2,7 @@
 #include "mra/mra.h"
 #include <any>
 #include <numbers>
+#include <random>
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
 #include <madness/mra/operator.h>
@@ -24,8 +25,7 @@ void print_incomplete_tasks() {
 using namespace mra;
 
 static double Length = 6.0;
-// static double width = 2*Length;
-static double expnt = 1500.0;
+static double expnt = 10.0;
 static const int init_lev = 2;
 
 using coord_t = madness::Vector<double, 3>;
@@ -33,39 +33,50 @@ using real_factory_t = madness::FunctionFactory<double, 3>;
 using real_function_t = madness::Function<double, 3>;
 using real_convolution_t = madness::SeparatedConvolution<double, 3>;
 
-template <typename T>
-static T u_exact(const coord_t &pt, T expnt) {
-  auto fac = std::pow(T(2.0*expnt/std::numbers::pi),T(0.25*3)); // normalization factor
-  return fac*(std::exp(-1*expnt*pt[0]*pt[0]) * std::exp(-1*expnt*pt[1]*pt[1]) * std::exp(-1*expnt*pt[2]*pt[2]));
-}
-
-
-template <typename T>
-static T u1(const coord_t &pt) {
-  return u_exact(pt, expnt);
-}
-
-template <typename T>
-static T u2(const coord_t &pt) {
-  return u_exact(pt, expnt/2);
-}
+enum class FunctionType { Slater, Gaussian };
 
 template <typename T, Dimension NDIM>
-auto compute_conv_madness(size_type N, real_convolution_t& mad_conv) {
+auto compute_conv_madness(madness::World& world, size_type N,
+                          real_convolution_t& mad_conv,
+                          FunctionType type,
+                          double variance = 1.0, // max radius for contribution of function to be considered nonzero
+                          double exponent = 10.0) {
+  std::random_device rd{};
+  std::mt19937 gen{rd()};
 
-  //madness::FunctionDefaults<3>::set_truncate_on_project(false);
+  auto gaussian_random_distribution = [&](const madness::Vector<double,NDIM>& origin, double variance) {
+      madness::Vector<double,NDIM> result;
+      for (size_t i = 0; i < NDIM; ++i) {
+          std::normal_distribution<> d{origin[i], variance};
+          result[i]=d(gen);
+      }
+      return result;
+  };
 
-  if (N > 2) {
-    throw std::runtime_error("compute_conv_madness: only support N=1 or 2 for now");
+  std::vector<madness::Vector<double,NDIM>> grid;
+  // Initialize the grid
+  for (size_t i = 0; i < N; ++i) {
+    grid.push_back(gaussian_random_distribution(madness::Vector<double,NDIM>(0.0), variance));
   }
 
-  std::vector<real_function_t> functions(N);
-  functions[0] = real_factory_t(mad_conv.get_world()).f(u1);
-  if (N == 2) {
-    functions[1] = real_factory_t(mad_conv.get_world()).f(u2);
+  // Create a vector of Gaussian functions
+  std::vector<madness::Function<double,NDIM>> functions;
+  double coeff=std::pow(2.0*exponent/madness::constants::pi,0.25*NDIM);
+  for (const auto& point : grid) {
+    functions.push_back(madness::FunctionFactory<double,NDIM>(world)
+                            .functor([&point,&exponent,&coeff, type](const madness::Vector<double,NDIM>& r)
+                                      {
+                                          auto r_rel=r-point;
+                                          if (type==FunctionType::Slater) {
+                                              return coeff*std::exp(-exponent*r_rel.normf());
+                                          } else if (type==FunctionType::Gaussian) {
+                                              return coeff*std::exp(-exponent*madness::inner(r_rel,r_rel));
+                                          } else {
+                                              throw std::runtime_error("compute_conv_madness: unknown function type");
+                                          }
+                                      }));
   }
 
-  madness::World& world = mad_conv.get_world();
   for (auto& f : functions) {
     f.set_autorefine(false);
     f.make_nonstandard(false, false);
@@ -175,7 +186,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
   ttg::fence();
 
   {
-    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(N, *mad_conv);
+    auto [madfunc, madconv] = compute_conv_madness<T, NDIM>(mad_conv->get_world(), N, *mad_conv, FunctionType::Slater, 1.0, expnt);
     // std::cout << "Tree State of madfunc: " << madfunc.get_impl()->get_tree_state() << std::endl;
     // auto madkey = madness::Key<NDIM>(0, {0, 0, 0});
     // const auto &madcoeffs = madfunc.get_impl()->get_coeffs();
@@ -255,11 +266,7 @@ int main(int argc, char **argv) {
 
   double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   madness::World world(SafeMPI::COMM_WORLD);
-  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops(num_ops);
-  for (int i = 0; i < num_ops; ++i) {
-    ops[i].reset(new madness::GaussianConvolution1D<double>(K, 1/(i+1)*100, 1/(i+1)*100, 0, madness::LatticeRange()));
-  }
-  auto mad_conv = std::make_shared<real_convolution_t>(world, ops, K);
+  auto mad_conv = std::make_shared<madness::SeparatedConvolution<double,3>>(madness::CoulombOperator(world, 1e-6 /*lo*/, precision));
 
 
   if (ttg::default_execution_context().rank() == 0) {
