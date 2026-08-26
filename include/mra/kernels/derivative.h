@@ -103,25 +103,44 @@ namespace mra {
     }
     #endif
 
-    template <typename T, Dimension NDIM>
+    /**
+     * See the comment on multiply_kernel_impl in mra/kernels/multiply.h for
+     * why this uses explicitly-named template parameters instead of the
+     * abbreviated (concept-constrained `auto`) form used elsewhere: too many
+     * compiler-synthesized template parameters in one function trips an nvcc
+     * EDG front-end assertion ("check_name_hiding_by_template_parameters").
+     */
+    template <typename T, Dimension NDIM,
+              concepts::TensorView<NDIM> ViewNodeLeft,
+              concepts::TensorView<NDIM> ViewNodeCenter,
+              concepts::TensorView<NDIM> ViewNodeRight,
+              concepts::TensorView<3> ViewOperators,
+              concepts::TensorView<NDIM> ViewDeriv,
+              concepts::TensorView<NDIM+1> ViewTmp,
+              concepts::TensorView<NDIM> ViewLeftTmp,
+              concepts::TensorView<NDIM> ViewCenterTmp,
+              concepts::TensorView<NDIM> ViewRightTmp,
+              concepts::TensorView<2> ViewPhi,
+              concepts::TensorView<2> ViewPhibar,
+              concepts::TensorView<1> ViewQuadX>
     DEVSCOPE void derivative_inner(
       const Domain<NDIM>& D,
       const Key<NDIM>& key,
       const Key<NDIM>& left,
       const Key<NDIM>& center,
       const Key<NDIM>& right,
-      const concepts::TensorView<NDIM> auto& node_left,
-      const concepts::TensorView<NDIM> auto& node_center,
-      const concepts::TensorView<NDIM> auto& node_right,
-      const concepts::TensorView<3> auto& operators,
-      concepts::TensorView<NDIM> auto& deriv,
-      concepts::TensorView<NDIM+1> auto& tmp,
-      concepts::TensorView<NDIM> auto& left_tmp,
-      concepts::TensorView<NDIM> auto& center_tmp,
-      concepts::TensorView<NDIM> auto& right_tmp,
-      const concepts::TensorView<2> auto& phi,
-      const concepts::TensorView<2> auto& phibar,
-      const concepts::TensorView<1> auto& quad_x,
+      const ViewNodeLeft& node_left,
+      const ViewNodeCenter& node_center,
+      const ViewNodeRight& node_right,
+      const ViewOperators& operators,
+      ViewDeriv& deriv,
+      ViewTmp& tmp,
+      ViewLeftTmp& left_tmp,
+      ViewCenterTmp& center_tmp,
+      ViewRightTmp& right_tmp,
+      const ViewPhi& phi,
+      const ViewPhibar& phibar,
+      const ViewQuadX& quad_x,
       const int bc_left,
       const int bc_right,
       size_type axis,
@@ -165,25 +184,38 @@ namespace mra {
       //std::cout << "INNER " << key << " axis " << axis << " scale " << scale << " RESULT "<< " deriv " << normf(deriv) << std::endl;
     }
 
-    template <typename T, Dimension NDIM>
+    /** See the comment on derivative_inner above. */
+    template <typename T, Dimension NDIM,
+              concepts::TensorView<NDIM> ViewNodeLeft,
+              concepts::TensorView<NDIM> ViewNodeCenter,
+              concepts::TensorView<NDIM> ViewNodeRight,
+              concepts::TensorView<3> ViewOperators,
+              concepts::TensorView<NDIM> ViewDeriv,
+              concepts::TensorView<NDIM+1> ViewTmp,
+              concepts::TensorView<NDIM> ViewLeftTmp,
+              concepts::TensorView<NDIM> ViewCenterTmp,
+              concepts::TensorView<NDIM> ViewRightTmp,
+              concepts::TensorView<2> ViewPhi,
+              concepts::TensorView<2> ViewPhibar,
+              concepts::TensorView<1> ViewQuadX>
     DEVSCOPE void derivative_boundary(
       const Domain<NDIM>& D,
       const Key<NDIM>& key,
       const Key<NDIM>& left,
       const Key<NDIM>& center,
       const Key<NDIM>& right,
-      const concepts::TensorView<NDIM> auto& node_left,
-      const concepts::TensorView<NDIM> auto& node_center,
-      const concepts::TensorView<NDIM> auto& node_right,
-      const concepts::TensorView<3> auto& operators,
-      concepts::TensorView<NDIM> auto& deriv,
-      concepts::TensorView<NDIM+1> auto& tmp,
-      concepts::TensorView<NDIM> auto& left_tmp,
-      concepts::TensorView<NDIM> auto& center_tmp,
-      concepts::TensorView<NDIM> auto& right_tmp,
-      const concepts::TensorView<2> auto& phi,
-      const concepts::TensorView<2> auto& phibar,
-      const concepts::TensorView<1> auto& quad_x,
+      const ViewNodeLeft& node_left,
+      const ViewNodeCenter& node_center,
+      const ViewNodeRight& node_right,
+      const ViewOperators& operators,
+      ViewDeriv& deriv,
+      ViewTmp& tmp,
+      ViewLeftTmp& left_tmp,
+      ViewCenterTmp& center_tmp,
+      ViewRightTmp& right_tmp,
+      const ViewPhi& phi,
+      const ViewPhibar& phibar,
+      const ViewQuadX& quad_x,
       const T g1,
       const T g2,
       const int bc_left,
@@ -250,6 +282,7 @@ namespace mra {
       const concepts::TensorView<2> auto& phibar,
       const concepts::TensorView<1> auto& quad_x,
       T* tmp,
+      size_type tmp_pos,
       size_type K,
       const T g1,
       const T g2,
@@ -263,8 +296,7 @@ namespace mra {
         SHARED DenseTensorView<T, NDIM+1> tmp_result;
         SHARED T* workspace;
 
-        size_type blockId = blockIdx.x;
-        T* block_tmp_ptr = &tmp[blockId*derivative_tmp_size<NDIM>(K)];
+        T* block_tmp_ptr = &tmp[tmp_pos*derivative_tmp_size<NDIM>(K)];
         const size_type K2NDIM = std::pow(K, NDIM);
         if (is_team_lead()) {
           tmp_result = DenseTensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
@@ -305,6 +337,7 @@ namespace mra {
       const concepts::TensorView<1> auto quad_x,
       T* tmp,
       size_type N,
+      size_type n_nonzero,
       size_type K,
       const T g1,
       const T g2,
@@ -319,12 +352,12 @@ namespace mra {
 
       SHARED DenseTensorView<T, NDIM> deriv_view;
       SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
-      for (size_type blockid = blockIdx.x; blockid < N; blockid += gridDim.x) {
-        if (deriv.is_zero(blockid)) {
-          /* nothing to do */
-          continue;
-        }
+      SHARED size_type blockid;
+      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         if (is_team_lead()) {
+          // deriv has exactly n_nonzero non-zero entries, so this always
+          // finds a valid function id -- see submit_derivative_kernel.
+          blockid = find_nth_nonzero(N, pos, deriv);
           node_left_view = node_left(blockid);
           node_center_view = node_center(blockid);
           node_right_view = node_right(blockid);
@@ -332,7 +365,7 @@ namespace mra {
         }
         SYNCTHREADS();
         derivative_kernel_impl<T, NDIM>(D, key, left, center, right, node_left_view, node_center_view, node_right_view,
-          operators, deriv_view, phi, phibar, quad_x, tmp, K, g1, g2, axis, bc_left, bc_right);
+          operators, deriv_view, phi, phibar, quad_x, tmp, pos, K, g1, g2, axis, bc_left, bc_right);
       }
     }
 
@@ -355,6 +388,7 @@ namespace mra {
     const concepts::TensorView<1> auto quad_x,
     T* tmp,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     const T g1,
     const T g2,
@@ -370,9 +404,9 @@ namespace mra {
                               mTxmq_shmem_size<T>(2*K));
 
     //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::derivative_kernel, N, thread_dims, smem_size, stream,
+    CALL_KERNEL(detail::derivative_kernel, n_nonzero, thread_dims, smem_size, stream,
       (D, key, left, center, right, node_left, node_center, node_right, operators,
-        deriv, phi, phibar, quad_x, tmp, N, K, g1, g2, axis, bc_left, bc_right));
+        deriv, phi, phibar, quad_x, tmp, N, n_nonzero, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
 
@@ -395,6 +429,7 @@ namespace mra {
     const DenseTensorView<double, 1>& quad_x,
     double* tmp,
     size_type N,
+    size_type n_nonzero,
     size_type K,
     const double g1,
     const double g2,

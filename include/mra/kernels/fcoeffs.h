@@ -95,31 +95,45 @@ namespace mra {
       T thresh,
       T truncate_tol,
       const DenseTensorView<LeafStatus, 1> leaf_info_view,
-      DenseTensorView<LeafStatus, 1> result_leaf_info_view)
+      DenseTensorView<LeafStatus, 1> result_leaf_info_view,
+      size_type n_nonzero)
     {
       /* set up temporaries once in each block */
       SHARED DenseTensorView<T, NDIM> values, r0, r1, child_values, coeffs;
       SHARED DenseTensorView<T, 2   > x_vec, x;
       SHARED T* workspace;
+      SHARED size_type fnid;
       size_type N = fns.dim(0);
 
-      if (is_team_lead()) {
-        const size_type K2NDIM    = std::pow(K, NDIM);
-        const size_type TWOK2NDIM = std::pow(2*K, NDIM);
-        T* block_tmp = &tmp[blockIdx.x*fcoeffs_tmp_size<NDIM>(K)];
-        values       = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
-        r0           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM], K);
-        r1           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM+K2NDIM], 2*K);
-        child_values = DenseTensorView<T, NDIM>(&block_tmp[2*TWOK2NDIM+K2NDIM], K);
-        x_vec        = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+2*K2NDIM], NDIM, K2NDIM);
-        x            = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM], NDIM, K);
-        workspace    = &block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM+NDIM*K];
-      }
+      /* Functions excluded from coeffs_view's sparsity host-side (already
+       * leaf/invalid, or negligible -- see mra/tasks/project.h) never reach
+       * this loop at all; their result_leaf_info entries are pre-filled with
+       * Invalid host-side, matching what this kernel would otherwise have
+       * set for them below. The checks below are kept as-is (redundant, but
+       * harmless) for functions that DO reach here -- e.g. the initial_level
+       * check, which the host does not pre-evaluate per function. */
+      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
+        if (is_team_lead()) {
+          // coeffs_view has exactly n_nonzero non-zero entries, so this
+          // always finds a valid function id -- see submit_fcoeffs_kernel.
+          fnid = find_nth_nonzero(N, pos, coeffs_view);
 
-      /* adjust pointers for the function of each block */
-      for (size_type fnid = blockIdx.x; fnid < N; fnid += gridDim.x) {
-        /* carry over leaf info */
-        if (is_team_lead()) result_leaf_info_view[fnid] = leaf_info_view[fnid];
+          const size_type K2NDIM    = std::pow(K, NDIM);
+          const size_type TWOK2NDIM = std::pow(2*K, NDIM);
+          T* block_tmp = &tmp[pos*fcoeffs_tmp_size<NDIM>(K)];
+          values       = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
+          r0           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM], K);
+          r1           = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM+K2NDIM], 2*K);
+          child_values = DenseTensorView<T, NDIM>(&block_tmp[2*TWOK2NDIM+K2NDIM], K);
+          x_vec        = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+2*K2NDIM], NDIM, K2NDIM);
+          x            = DenseTensorView<T, 2   >(&block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM], NDIM, K);
+          workspace    = &block_tmp[2*TWOK2NDIM+(NDIM+2)*K2NDIM+NDIM*K];
+
+          /* carry over leaf info */
+          result_leaf_info_view[fnid] = leaf_info_view[fnid];
+        }
+        SYNCTHREADS();
+
         auto& f = fns(fnid);
         // if we have seen a leaf for this function, skip and set the status to Invalid
         if (leaf_info_view(fnid) == LeafStatus::Leaf || leaf_info_view(fnid) == LeafStatus::Invalid) {
@@ -192,10 +206,11 @@ namespace mra {
       T truncate_tol,
       const DenseTensorView<LeafStatus, 1>& leaf_info_view,
       DenseTensorView<LeafStatus, 1>& result_leaf_info_view,
+      size_type n_nonzero,
       ttg::device::Stream stream)
   {
     /**
-     * Launch the kernel with KxKxK threads in each of the N blocks.
+     * Launch the kernel with KxKxK threads in each of the n_nonzero blocks.
      * Computation on functions is embarassingly parallel and no
      * synchronization is required.
      */
@@ -203,11 +218,11 @@ namespace mra {
 
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     //CONFIGURE_KERNEL((detail::fcoeffs_kernel<Fn, T, NDIM>), smem_size);
-    /* launch one block per child */
-    CALL_KERNEL(detail::fcoeffs_kernel, fns.size(), thread_dims, smem_size, stream,
+    /* launch one block per non-zero function */
+    CALL_KERNEL(detail::fcoeffs_kernel, n_nonzero, thread_dims, smem_size, stream,
       (D, gldata, fns, key, K, tmp,
        phibar_view, hgT_view, coeffs_view,
-       thresh, truncate_tol, leaf_info_view, result_leaf_info_view));
+       thresh, truncate_tol, leaf_info_view, result_leaf_info_view, n_nonzero));
     checkSubmit();
   }
 

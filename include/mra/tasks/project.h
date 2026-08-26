@@ -137,7 +137,24 @@ namespace mra{
           result.allocate(sparsity, K, ttg::scope::Allocate);
           auto& coeffs = result.coeffs();
 
-          result_leaf_info = LeafInfo(N, ttg::scope::Allocate);
+          // Only functions still non-zero in sparsity (i.e. not already
+          // leaf/invalid or negligible per the host loop above) get a
+          // thread-block launched below, so tmp only needs scratch space for
+          // those.
+          const size_type n_nonzero = sparsity.count_nonzero();
+
+          // result_leaf_info must carry a defined value for every function,
+          // not just the ones the (compacted) kernel below actually visits:
+          // pre-fill with Invalid -- exactly what fcoeffs_kernel would set
+          // for any function excluded from sparsity here (both the
+          // leaf/invalid carry-over and the negligible case map to Invalid)
+          // -- since it's later read back verbatim as the authoritative leaf
+          // status for every function (see the loop over is_leafs_arr below).
+          // Needs SyncIn (rather than Allocate) so this host fill reaches
+          // the device copy the kernel reads/writes.
+          result_leaf_info = LeafInfo(N, ttg::scope::SyncIn);
+          std::fill(result_leaf_info.buffer().host_ptr(), result_leaf_info.buffer().host_ptr() + N,
+                    LeafStatus::Invalid);
 
           //std::cout << name << " " << key << " all negligible " << all_negligible << " sparsity: " << sparsity << std::endl;
 
@@ -149,7 +166,7 @@ namespace mra{
           const auto& hgT = functiondata.get_hgT();
 
           /* temporaries */
-          const std::size_t tmp_size = fcoeffs_tmp_size<NDIM>(K)*N;
+          const std::size_t tmp_size = fcoeffs_tmp_size<NDIM>(K)*n_nonzero;
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
 
           /* TODO: cannot do this from a function, had to move it into the main task */
@@ -175,7 +192,7 @@ namespace mra{
           submit_fcoeffs_kernel(domain, gldata, fn_view, key, K, tmp_device,
                                 phibar_view, hgT_view, coeffs_view,
                                 thresh, trunc,
-                                leaf_info_view, result_leaf_info_view,
+                                leaf_info_view, result_leaf_info_view, n_nonzero,
                                 ttg::device::current_stream());
 
           result_norms.compute();

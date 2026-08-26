@@ -151,9 +151,6 @@ namespace mra{
      */
     template<typename T, Dimension NDIM, typename KT, typename Work1T, typename Work2T,
              typename Work1KT, typename Work2KT>
-#if defined(__CUDACC__) || defined(__HIPCC__)
-    __noinline__
-#endif
     DEVSCOPE void apply_conv_leader(
       Work1T& work1,
       Work2T& work2,

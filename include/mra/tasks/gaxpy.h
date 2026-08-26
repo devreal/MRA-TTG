@@ -76,6 +76,10 @@ namespace mra{
 
         SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
         sparsity.nonzero_if_any(t1, t2);
+        // out's own sparsity (built below) is exactly this OR, so a single
+        // on-device scan of out's sparsity (find_nth_nonzero) suffices to
+        // recover each real function id -- no union scan needed here.
+        const size_type n_nonzero = sparsity.count_nonzero();
 
         auto out = mra::FunctionsCompressedNode<T, NDIM>(key, sparsity, K, ttg::scope::Allocate);
 
@@ -105,7 +109,7 @@ namespace mra{
         sparseman.populate_device_sparsity();
 
         submit_gaxpy_kernel(key, t1_view, t2_view, out_view,
-                            scalarA, scalarB, N, K, ttg::device::current_stream());
+                            scalarA, scalarB, N, n_nonzero, K, ttg::device::current_stream());
 
         norms.compute();
 
