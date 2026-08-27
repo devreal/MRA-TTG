@@ -100,9 +100,6 @@ namespace mra {
      * Device-callable; call ONCE per thread-block, same as find_nth_nonzero.
      */
     template<typename ViewT, typename... MoreViews>
-#if defined(__CUDACC__) || defined(__HIPCC__)
-    __noinline__
-#endif
     SCOPE size_type find_nth_nonzero_any(size_type N, size_type pos, const ViewT& view, const MoreViews&... more) {
       size_type count = 0;
       for (size_type i = 0; i < N; ++i) {
