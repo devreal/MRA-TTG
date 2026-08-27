@@ -4,18 +4,19 @@
 #include <assert.h>
 #include <cstddef>
 
+#include "mra/misc/conv_mad.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/types.h"
 
 namespace mra {
 
-#ifndef MRA_ENABLE_HOST
+#ifdef MRA_HAVE_DEVICE_ARCH
 
   namespace detail {
     extern __shared__ char arena[];
   }
 
-#endif // MRA_ENABLE_HOST
+#endif // MRA_HAVE_DEVICE_ARCH
 
 class BlockStackAllocator {
 
@@ -26,19 +27,19 @@ class BlockStackAllocator {
         return (offset + align - 1u) & ~(align - 1u);
     }
 
-#ifndef MRA_ENABLE_HOST
+#ifdef MRA_HAVE_DEVICE_ARCH
     __device__ __forceinline__
     char* get_arena() {
       return detail::arena;
     }
-#else
+#else // MRA_HAVE_DEVICE_ARCH
     char* get_arena() {
       if (!m_arena) {
         m_arena = new char[m_capacity];
       }
       return m_arena;
     }
-#endif // MRA_ENABLE_HOST
+#endif // MRA_HAVE_DEVICE_ARCH
 
   public:
     static constexpr size_t DefaultAlign = 16;
