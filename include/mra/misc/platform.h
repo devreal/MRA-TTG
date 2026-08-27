@@ -37,6 +37,7 @@ namespace mra::detail {
 #define DEVSCOPE __device__
 #define SHARED __shared__
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
+#define MRA_WARP_SIZE 32
 #define HAVE_DEVICE_ARCH 1
 #elif defined(__HIP__)
 #define SCOPE __device__ __host__ inline
@@ -44,6 +45,7 @@ namespace mra::detail {
   #define SYNCTHREADS() __syncthreads()
   #define SHARED __shared__
   #define HAVE_DEVICE_ARCH 1
+  #define MRA_WARP_SIZE 64
 #else
   #define SYNCTHREADS()
   #define SHARED
