@@ -13,10 +13,12 @@
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
+#include "mra/kernels/impl/convolution_cuda_wmma.h"
 #include "mra/misc/conv_mad.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
+#include "mra/misc/stacked_allocator.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
@@ -175,7 +177,6 @@ namespace mra{
     DEVSCOPE void apply_conv(
       int opid,
       auto K,
-      const T fac,
       const T tol,
       const ViewTransr& transr,
       const ViewTranss& transs,
@@ -186,7 +187,8 @@ namespace mra{
       ViewResultc& resultc,
       ViewResult& result,  // size K, stores the sum
       ViewWork1& work1,
-      ViewWork2& work2)
+      ViewWork2& work2,
+      mra::BlockStackAllocator& smem_allocator)
     {
       using dims_k_type = decltype(make_dims<NDIM>(K));
       using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
@@ -201,22 +203,31 @@ namespace mra{
 
       T optol = 0.01*tol/rank; // can potentially be a parameter
 
-      f0(s0) = f(s0);
+      f0 = f(s0);
 
       // TODO: do we care about modified() operators?
 
-      // TODO: why does this fix correctness?!
-      result = 0.0;
-      resultc = 0.0;
+      if (!mra::accel::apply_conv(opid, K, optol, transr, transs, opnorms, at, f, f0,
+                                 resultc, result, smem_allocator)) {
 
-      for (size_type mu = 0; mu < rank; ++mu) {
-        T munorm = opnorms(opid, mu, 0, (size_type)NormId::MUnorm);
-        if (munorm > optol) {
-          T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
-          muopxv_fast<T, NDIM>(opid, K, mu, mufac, tol/std::abs(mufac), at, transr, transs, opnorms, f, f0,
-                               resultc, result, work1, work2, work1_k, work2_k);
+        // TODO: why does this fix correctness?!
+        result = 0.0;
+        resultc = 0.0;
+
+        for (size_type mu = 0; mu < rank; ++mu) {
+          T munorm = opnorms(opid, mu, 0, (size_type)NormId::MUnorm);
+          if (munorm > optol) {
+            T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
+            muopxv_fast<T, NDIM>(opid, K, mu, mufac, tol/std::abs(mufac), at,
+                                 transr, transs, opnorms,
+                                 f, f0,
+                                 resultc, result,
+                                 work1, work2,
+                                 work1_k, work2_k);
+          }
         }
       }
+
       result(s0) += resultc;
     }
 
@@ -288,18 +299,20 @@ namespace mra{
       ViewResult& result,  // size K, stores the sum
       ViewWork1& work1,
       ViewWork2& work2,
-      T* resnorm_out)
+      T* resnorm_out,
+      mra::BlockStackAllocator& smem_allocator)
     {
       SYNCTHREADS();
       const T cnorm = mra::normf(f);
       T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
+      mra::BlockStackAllocator block_alloc();
 
       //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
-        apply_conv<T, NDIM>(opid, K, fac, (tol / fac / cnorm), transr, transs,
+        apply_conv<T, NDIM>(opid, K, (tol / fac / cnorm), transr, transs,
                    opnorms, at, f, f0, resultc,
-                   result, work1, work2);
+                   result, work1, work2, smem_allocator);
       } else {
         result = 0.0;
       }
@@ -391,7 +404,8 @@ namespace mra{
       ResnormsT& resnorms,
       T* tmp,
       size_type N,
-      size_type tmp_pos)
+      size_type tmp_pos,
+      mra::BlockStackAllocator smem_allocator)
     {
       auto TWOK = Int<2>{}*K;
       using dims_k_type = decltype(make_dims<NDIM>(K));
@@ -426,7 +440,8 @@ namespace mra{
       convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
                                        transr, transs, opnorms_view, at, in, f, f0,
                                        resultc, result, work1, work2,
-                                       resnorms.empty() ? nullptr : &resnorms[i]);
+                                       resnorms.empty() ? nullptr : &resnorms[i],
+                                       smem_allocator);
     }
 
 #if defined(MRA_CHECK_NORMS)
@@ -499,11 +514,27 @@ namespace mra{
       const ViewTranss transs,
       const ViewOpnorms opnorms_view,
       const std::array<bool, 2> at,
-      T* tmp)
+      T* tmp,
+      mra::BlockStackAllocator smem_allocator)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
-                                         in_view, f_view, result_view, resnorms, tmp, N, pos);
+                                         in_view, f_view, result_view, resnorms, tmp, N, pos, smem_allocator);
+      }
+    }
+
+    /**
+     * Returns the number of bytes of shared memory required to launch convolution_kernel with the given K.
+     * Currently, only uses shared memory if using WMMA. WE may want to put some tensors into shared memory
+     * for non-WMMA runs.
+     */
+    template<typename T>
+    SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
+      size_type accel_smem_size = mra::accel::apply_conv_shmem_size<T>(K);
+      if (accel_smem_size > 0) {
+        return accel_smem_size;
+      } else {
+        return mTxmq_shmem_size<T>(2*K);
       }
     }
 
@@ -546,18 +577,19 @@ namespace mra{
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = detail::apply_conv_shmem_size<T>(2*K);
+    mra::BlockStackAllocator smem_allocator(smem_size);
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     if (K == 8) {
       //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
                   (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp));
+                  resnorms, transr, transs, opnorms, at, tmp, smem_allocator));
     } else {
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
                   (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp));
+                  resnorms, transr, transs, opnorms, at, tmp, smem_allocator));
     }
     checkSubmit();
   }
@@ -872,14 +904,15 @@ namespace mra{
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = detail::apply_conv_shmem_size<T>(2*K);
+    mra::BlockStackAllocator smem_allocator(smem_size);
 
     if (K == 8) {
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, Int<8>{}, fac));
+                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, Int<8>{}, fac, smem_allocator));
     } else {
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, fac));
+                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, fac, smem_allocator));
     }
     checkSubmit();
 
