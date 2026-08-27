@@ -35,6 +35,22 @@ namespace mra{
 
   namespace detail {
 
+    /**
+     * Returns the number of bytes of shared memory required to launch convolution_kernel with the given K.
+     * Currently, only uses shared memory if using WMMA. WE may want to put some tensors into shared memory
+     * for non-WMMA runs.
+     */
+    template<typename T>
+    SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
+      size_type accel_smem_size = mra::accel::apply_conv_shmem_size<T>(K);
+      if (accel_smem_size > 0) {
+        return accel_smem_size;
+      } else {
+        return mTxmq_shmem_size<T>(2*K);
+      }
+    }
+
+
     template <typename T, Dimension NDIM,
               concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
               concepts::TensorView<NDIM> ViewF,
@@ -206,9 +222,9 @@ namespace mra{
       f0 = f(s0);
 
       // TODO: do we care about modified() operators?
-
-      if (!mra::accel::apply_conv(opid, K, optol, transr, transs, opnorms, at, f, f0,
-                                 resultc, result, smem_allocator)) {
+      auto accel_done = mra::accel::apply_conv(opid, K, optol, transr, transs, opnorms, at, f, f0,
+                                 resultc, result, smem_allocator);
+      if (!accel_done) {
 
         // TODO: why does this fix correctness?!
         result = 0.0;
@@ -514,21 +530,6 @@ namespace mra{
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
                                          in_view, f_view, result_view, resnorms, tmp, N, pos);
-      }
-    }
-
-    /**
-     * Returns the number of bytes of shared memory required to launch convolution_kernel with the given K.
-     * Currently, only uses shared memory if using WMMA. WE may want to put some tensors into shared memory
-     * for non-WMMA runs.
-     */
-    template<typename T>
-    SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
-      size_type accel_smem_size = mra::accel::apply_conv_shmem_size<T>(K);
-      if (accel_smem_size > 0) {
-        return accel_smem_size;
-      } else {
-        return mTxmq_shmem_size<T>(2*K);
       }
     }
 
