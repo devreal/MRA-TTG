@@ -141,7 +141,7 @@ namespace mra{
 
     /**
      * Rebinds work1_k/work2_k to K-sized views of work1/work2's storage, on
-     * behalf of the team lead only. Factored into its own noinline function
+     * behalf of the team lead only. Factored into its own function
      * for the same reason as compress_process_one_leader (see
      * mra/kernels/compress.h) and convolution_process_one_leader below:
      * nvcc was observed to miscompile a SHARED-tensor rebind directly

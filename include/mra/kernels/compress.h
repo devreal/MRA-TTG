@@ -66,7 +66,7 @@ namespace mra {
      * Does the actual per-fnid setup work (finding fnid, rebinding
      * s/node/p/d/block_in_views to this function's slice of the batch), on
      * behalf of the team lead only. Deliberately factored into its own
-     * noinline function -- called from inside `if (is_team_lead()) { ... }`
+     * function -- called from inside `if (is_team_lead()) { ... }`
      * in compress_process_one below -- rather than inlined there directly:
      * see reconstruct_process_one_leader's comment in
      * mra/kernels/reconstruct.h for the full story (nvcc was observed to
@@ -89,9 +89,6 @@ namespace mra {
      */
     template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename InViewsT,
              typename ST, typename BlockInViewsT, typename NodeT, typename PT, typename DT>
-#if defined(__CUDACC__) || defined(__HIPCC__)
-    __noinline__
-#endif
     DEVSCOPE void compress_process_one_leader(
       const NodeInT& node_in,
       PInT& p_in,

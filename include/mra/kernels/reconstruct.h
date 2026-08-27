@@ -91,7 +91,7 @@ namespace mra {
      * Does the actual per-fnid setup work (finding fnid, rebinding
      * s/tmp_node/node/from_parent/block_r_arr/result to this function's
      * slice of the batch), on behalf of the team lead only. Deliberately
-     * factored into its own noinline function -- called from inside
+     * factored into its own function -- called from inside
      * `if (is_t0) { ... }` in reconstruct_process_one below -- rather than
      * inlined there directly: nvcc was observed to miscompile the
      * surrounding if(is_t0){...} SYNCTHREADS() pattern when this body was
@@ -126,9 +126,6 @@ namespace mra {
      */
     template<typename T, Dimension NDIM, typename NodeViewT, typename FPViewT, typename RArrT, typename ResultViewT,
              typename ST, typename TmpNodeT, typename NodeT, typename FromParentT, typename BlockRArrT, typename ResultT>
-#if defined(__CUDACC__) || defined(__HIPCC__)
-    __noinline__
-#endif
     DEVSCOPE void reconstruct_process_one_leader(
       const NodeViewT& node_view,
       T* tmp_ptr,
