@@ -25,7 +25,7 @@ namespace mra {
     template<>
     struct mma_traits<double> {
       using T = double;
-      static constexpr int WarpSize = 32;
+      static constexpr int WarpSize = MRA_WARP_SIZE;
       static constexpr int M = 8;
       static constexpr int N = 8;
       static constexpr int K = 4;
@@ -82,7 +82,8 @@ namespace mra {
     {
       using mma = mma_traits<T>;
       constexpr int K2            = K * K;
-      constexpr int ROWS_PER_WARP = K2 / mma::NumWarps;
+      // need at least 1 fragment per warp
+      constexpr int ROWS_PER_WARP = ((K2 / mma::NumWarps) + mma::M - 1) / mma::M * mma::M;
       constexpr int ROW_TILES     = ROWS_PER_WARP / mma::M;
       constexpr int NSTEPS        = K / mma::K;
       constexpr int COL_TILES     = K / mma::K;
@@ -90,12 +91,13 @@ namespace mra {
         if (Term == NormId::Rnorm) return 1.e-20; else return 0.0;
       };
 
-      const int warp_id         = thread_id() / MRA_WARP_SIZE;
-      const int warp_row_offset = warp_id * (K2 / mma::NumWarps);
+      const int warp_id         = thread_id() / mra::WarpSize;
+      const int warp_row_offset = warp_id * ROWS_PER_WARP;
 
+      const bool has_work = (warp_row_offset < K2);
 
       /**
-       * Allocate shared memory for the result matrix to rotate.
+       * Allocate shared memory for the intermediates results to rotate.
        */
       auto c_smem = smem_allocator.template alloc<T>(K2);
 
@@ -107,15 +109,17 @@ namespace mra {
       mma::FragA f_frags[ROW_TILES][NSTEPS];
       // we accumulate the result in registers, and only write back to memory at the end
       mma::FragC c_frags[ROW_TILES][COL_TILES];
-      #pragma unroll
-      for (int i = 0; i < ROW_TILES; ++i) {
+      if (has_work) {
         #pragma unroll
-        for (int j = 0; j < NSTEPS; ++j) {
-          mma::load_a(f_frags[i][j], f.data(),
-                      j * mma::K,                            /* contraction offset */
-                      warp_row_offset + i * mma::M,          /* row in A^T         */
-                      K2);                                   /* col-major ldm      */
-          nvcuda::wmma::fill_fragment(c_frags[i][j], 0.0);
+        for (int i = 0; i < ROW_TILES; ++i) {
+          #pragma unroll
+          for (int j = 0; j < NSTEPS; ++j) {
+            mma::load_a(f_frags[i][j], f.data(),
+                        j * mma::K,                            /* contraction offset */
+                        warp_row_offset + i * mma::M,          /* row in A^T         */
+                        K2);                                   /* col-major ldm      */
+            nvcuda::wmma::fill_fragment(c_frags[i][j], 0.0);
+          }
         }
       }
 
@@ -129,13 +133,15 @@ namespace mra {
           if (NormId::Snorm == normid) mufac *= -1.0; // sign flip for Snorm
           mma::FragA a_frags[ROW_TILES][NSTEPS];
           // fill the a_frags from the loaded f_frags
-          #pragma unroll
-          for (int i = 0; i < ROW_TILES; ++i) {
+          if (has_work) {
             #pragma unroll
-            for (int j = 0; j < NSTEPS; ++j) {
+            for (int i = 0; i < ROW_TILES; ++i) {
               #pragma unroll
-              for(int e=0; e<f_frags[i][j].num_elements; e++)
-                a_frags[i][j].x[e] = f_frags[i][j].x[e];
+              for (int j = 0; j < NSTEPS; ++j) {
+                #pragma unroll
+                for(int e=0; e<f_frags[i][j].num_elements; e++)
+                  a_frags[i][j].x[e] = f_frags[i][j].x[e];
+              }
             }
           }
           // iterate over dimensions
@@ -148,47 +154,51 @@ namespace mra {
              * TODO: preload the next B fragment into SMEM using copy_async().
              */
             mma::FragB b_frags[NSTEPS][COL_TILES];
-            #pragma unroll
-            for (int i = 0; i < COL_TILES; ++i) {
+            if (has_work) {
               #pragma unroll
-              for (int j = 0; j < NSTEPS; ++j) {
-                mma::load_b(b_frags[j][i], trans[d](opid, mu).data(),
-                            j * mma::K,                            /* contraction offset */
-                            i * mma::K,                            /* col in B           */
-                            K);                                    /* row-major ldm      */
+              for (int i = 0; i < COL_TILES; ++i) {
+                #pragma unroll
+                for (int j = 0; j < NSTEPS; ++j) {
+                  mma::load_b(b_frags[j][i], trans[d](opid, mu).data(),
+                              j * mma::K,                            /* contraction offset */
+                              i * mma::K,                            /* col in B           */
+                              K);                                    /* row-major ldm      */
+                }
               }
             }
 
             // sync to make sure that all warps have read the previous result from SMEM
             SYNCTHREADS();
             /* --- Accumulate and store ---------------------------------------------- */
-            #pragma unroll
-            for (int t = 0; t < ROW_TILES; ++t) {
+            if (has_work) {
               #pragma unroll
-              for (int ct = 0; ct < COL_TILES; ++ct) {
-                mma::FragC acc;
-                nvcuda::wmma::fill_fragment(acc, 0.0);
+              for (int t = 0; t < ROW_TILES; ++t) {
                 #pragma unroll
-                for (int s = 0; s < NSTEPS; ++s) {
-                  nvcuda::wmma::mma_sync(acc, a_frags[t][s], b_frags[s][ct], acc);
-                }
-                if (d < NDIM-1) {
-                  // store back to SMEM for the next dimension's convolution
-                  mma::store_c(c_smem.get(), acc,
-                              warp_row_offset + t * mma::M,   /* row in C   */
-                              ct * mma::N,                    /* col in C   */
-                              K);                             /* row-major ldm */
-                } else {
-                  // last dimension, scale and accumulate into result fragment
+                for (int ct = 0; ct < COL_TILES; ++ct) {
+                  mma::FragC acc;
+                  nvcuda::wmma::fill_fragment(acc, 0.0);
                   #pragma unroll
-                  for(int e = 0; e < acc.num_elements; e++)
-                    c_frags[t][ct].x[e] += mufac * acc.x[e];
+                  for (int s = 0; s < NSTEPS; ++s) {
+                    nvcuda::wmma::mma_sync(acc, a_frags[t][s], b_frags[s][ct], acc);
+                  }
+                  if (d < NDIM-1) {
+                    // store back to SMEM for the next dimension's convolution
+                    mma::store_c(c_smem.get(), acc,
+                                warp_row_offset + t * mma::M,   /* row in C   */
+                                ct * mma::N,                    /* col in C   */
+                                K);                             /* row-major ldm */
+                  } else {
+                    // last dimension, scale and accumulate into result fragment
+                    #pragma unroll
+                    for(int e = 0; e < acc.num_elements; e++)
+                      c_frags[t][ct].x[e] += mufac * acc.x[e];
+                  }
                 }
               }
             }
             // wait for all warps to finish writing to SMEM before the next dimension's convolution
             SYNCTHREADS();
-            if (d < NDIM-1) {
+            if (has_work && d < NDIM-1) {
               // rotate the result in SMEM for the next dimension's convolution
               #pragma unroll
               for (int t = 0; t < ROW_TILES; ++t) {
@@ -237,9 +247,7 @@ namespace mra {
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewF0,
              concepts::TensorView<NDIM> ViewResultc,
-             concepts::TensorView<NDIM> ViewResult,
-             concepts::TensorView<NDIM> ViewWork1,
-             concepts::TensorView<NDIM> ViewWork2>
+             concepts::TensorView<NDIM> ViewResult>
     DEVSCOPE bool apply_conv(
       int opid,
       auto K,
