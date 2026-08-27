@@ -10,8 +10,6 @@
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 #  define MRA_HAVE_MMA 1
 #  include <mma.h>
-#else
-#  define MRA_HAVE_MMA 0
 #endif
 
 
@@ -42,29 +40,29 @@ namespace mra {
       using FragC = nvcuda::wmma::fragment<nvcuda::wmma::accumulator,
                                           M, N, K,
                                           double>;
+
+      /** Load one 8x4 tile of A^T starting at row `row`, contraction offset `k`. */
+      __device__ __forceinline__
+      static void load_a(FragA& frag, const double* a, int k, int row, int ldm) {
+        nvcuda::wmma::load_matrix_sync(frag, a + (size_t)k * ldm + row, ldm);
+      }
+
+      /** Load one 4x8 tile of B starting at contraction offset `k`, column `col`. */
+      __device__ __forceinline__
+      static void load_b(FragB& frag, const double* b, int k, int col, int ldm) {
+        nvcuda::wmma::load_matrix_sync(frag, b + (size_t)k * ldm + col, ldm);
+      }
+
+      /** Store one 8x8 accumulator tile to row-major C at [row][col]. */
+      __device__ __forceinline__
+      static void store_c(double* c, const FragC& frag, int row, int col, int ldm) {
+        nvcuda::wmma::store_matrix_sync(c + (size_t)row * ldm + col, frag, ldm,
+                                        nvcuda::wmma::mem_row_major);
+      }
     };
-
-    /** Load one 8x4 tile of A^T starting at row `row`, contraction offset `k`. */
-    __device__ __forceinline__
-    static void load_a(FragA& frag, const double* a, int k, int row, int ldm) {
-      nvcuda::wmma::load_matrix_sync(frag, a + (size_t)k * ldm + row, ldm);
-    }
-
-    /** Load one 4x8 tile of B starting at contraction offset `k`, column `col`. */
-    __device__ __forceinline__
-    static void load_b(FragB& frag, const double* b, int k, int col, int ldm) {
-      nvcuda::wmma::load_matrix_sync(frag, b + (size_t)k * ldm + col, ldm);
-    }
-
-    /** Store one 8x8 accumulator tile to row-major C at [row][col]. */
-    __device__ __forceinline__
-    static void store_c(double* c, const FragC& frag, int row, int col, int ldm) {
-      nvcuda::wmma::store_matrix_sync(c + (size_t)row * ldm + col, frag, ldm,
-                                      nvcuda::wmma::mem_row_major);
-    }
 #endif // defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 
-
+#ifdef MRA_HAVE_MMA
     template<typename T, Dimension NDIM, NormId Term,
              concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
@@ -222,6 +220,7 @@ namespace mra {
       }
       SYNCTHREADS();
     }
+#endif // MRA_HAVE_MMA
 
 
     /**
@@ -255,7 +254,7 @@ namespace mra {
       ViewResult& result,  // size K, stores the sum
       mra::BlockStackAllocator& smem_allocator)
     {
-#if MRA_HAVE_MMA
+#ifdef MRA_HAVE_MMA
       if constexpr (mra::is_ct_integral_v<decltype(K)>) {
         // get the rank of the operation
         const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
@@ -293,7 +292,7 @@ namespace mra {
      */
     template<typename T>
     SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
-#if MRA_HAVE_MMA
+#ifdef MRA_HAVE_MMA
       if (K == 8) {
         auto K2 = mra::Int<2>{}*K;
         return K2*K2*K2*sizeof(T); // SMEM for the result matrix to rotate
@@ -305,5 +304,7 @@ namespace mra {
   } // namespace accel
 
 } // namespace mra
+
+#undef MRA_HAVE_MMA
 
 #endif // MRA_KERNELS_IMPL_CONVOLUTION_CUDA_WMMA_H

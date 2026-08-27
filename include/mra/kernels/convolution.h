@@ -299,13 +299,13 @@ namespace mra{
       ViewResult& result,  // size K, stores the sum
       ViewWork1& work1,
       ViewWork2& work2,
-      T* resnorm_out,
-      mra::BlockStackAllocator& smem_allocator)
+      T* resnorm_out)
     {
       SYNCTHREADS();
       const T cnorm = mra::normf(f);
       T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
-      mra::BlockStackAllocator block_alloc();
+      auto smem_size = detail::apply_conv_shmem_size<T>(2*K);
+      mra::BlockStackAllocator smem_allocator(smem_size);
 
       //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
@@ -327,7 +327,7 @@ namespace mra{
      * Does the actual per-fnid setup work (finding fnid, rebinding
      * f0/resultc/work1/work2/f/in/result to this function's slice of the
      * batch), on behalf of the team lead only. Deliberately factored into
-     * its own noinline function -- see compress_process_one_leader's
+     * its own function -- see compress_process_one_leader's
      * comment in mra/kernels/compress.h (and reconstruct_process_one_leader's
      * in mra/kernels/reconstruct.h) for the full story: nvcc was observed to
      * miscompile the surrounding if(is_team_lead()){...} SYNCTHREADS()
@@ -339,9 +339,6 @@ namespace mra{
      */
     template<typename T, Dimension NDIM, typename KT, typename TwoKT, typename InViewT, typename FViewT, typename ResultViewT,
              typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename FT, typename InT, typename ResultT>
-#if defined(__CUDACC__) || defined(__HIPCC__)
-    __noinline__
-#endif
     DEVSCOPE void convolution_process_one_leader(
       const InViewT& in_view,
       const FViewT& f_view,
@@ -404,8 +401,7 @@ namespace mra{
       ResnormsT& resnorms,
       T* tmp,
       size_type N,
-      size_type tmp_pos,
-      mra::BlockStackAllocator smem_allocator)
+      size_type tmp_pos)
     {
       auto TWOK = Int<2>{}*K;
       using dims_k_type = decltype(make_dims<NDIM>(K));
@@ -440,8 +436,7 @@ namespace mra{
       convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
                                        transr, transs, opnorms_view, at, in, f, f0,
                                        resultc, result, work1, work2,
-                                       resnorms.empty() ? nullptr : &resnorms[i],
-                                       smem_allocator);
+                                       resnorms.empty() ? nullptr : &resnorms[i]);
     }
 
 #if defined(MRA_CHECK_NORMS)
@@ -514,12 +509,11 @@ namespace mra{
       const ViewTranss transs,
       const ViewOpnorms opnorms_view,
       const std::array<bool, 2> at,
-      T* tmp,
-      mra::BlockStackAllocator smem_allocator)
+      T* tmp)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
-                                         in_view, f_view, result_view, resnorms, tmp, N, pos, smem_allocator);
+                                         in_view, f_view, result_view, resnorms, tmp, N, pos);
       }
     }
 
@@ -577,19 +571,18 @@ namespace mra{
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = detail::apply_conv_shmem_size<T>(2*K);
-    mra::BlockStackAllocator smem_allocator(smem_size);
+    auto smem_size = detail::apply_conv_shmem_size<T>(K);
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     if (K == 8) {
       //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
                   (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp, smem_allocator));
+                  resnorms, transr, transs, opnorms, at, tmp));
     } else {
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
                   (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp, smem_allocator));
+                  resnorms, transr, transs, opnorms, at, tmp));
     }
     checkSubmit();
   }
@@ -904,15 +897,14 @@ namespace mra{
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = detail::apply_conv_shmem_size<T>(2*K);
-    mra::BlockStackAllocator smem_allocator(smem_size);
+    auto smem_size = detail::apply_conv_shmem_size<T>(K);
 
     if (K == 8) {
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, Int<8>{}, fac, smem_allocator));
+                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, Int<8>{}, fac));
     } else {
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, fac, smem_allocator));
+                  (slot.dev_args, offset_slot.dev_args, num_members, total_nonzero, K, fac));
     }
     checkSubmit();
 
