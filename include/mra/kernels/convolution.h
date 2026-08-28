@@ -222,11 +222,10 @@ namespace mra{
       f0 = f(s0);
 
       // TODO: do we care about modified() operators?
-      auto accel_done = mra::accel::apply_conv(opid, K, optol, transr, transs, opnorms, at, f, f0,
+      auto accel_done = mra::accel::apply_conv<T, NDIM>(opid, K, optol, transr, transs, opnorms, at, f, f0,
                                  resultc, result, smem_allocator);
       if (!accel_done) {
 
-        // TODO: why does this fix correctness?!
         result = 0.0;
         resultc = 0.0;
 
@@ -1044,6 +1043,20 @@ namespace mra{
     const std::array<bool, 2>& at,
     double* tmp,
     ttg::device::Stream stream);
+
+  extern template
+  void submit_convolution_kernel_batched<double, 3>(
+    detail::BatchPool<detail::ConvolutionBatchArg<double, 3>>& pool,
+    typename detail::BatchPool<detail::ConvolutionBatchArg<double, 3>>::slot_t& slot,
+    detail::BatchPool<detail::SparsityState>& sparsity_pool,
+    typename detail::BatchPool<detail::SparsityState>::slot_t& sparsity_slot,
+    detail::BatchPool<size_type>& offset_pool,
+    typename detail::BatchPool<size_type>::slot_t& offset_slot,
+    size_type total_nonzero,
+    size_type K,
+    const double fac,
+    ttg::device::Stream stream);
+
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra

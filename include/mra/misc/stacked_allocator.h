@@ -10,13 +10,13 @@
 
 namespace mra {
 
-#ifdef MRA_HAVE_DEVICE_ARCH
+#ifdef HAVE_DEVICE_ARCH
 
   namespace detail {
     extern __shared__ char arena[];
   }
 
-#endif // MRA_HAVE_DEVICE_ARCH
+#endif // HAVE_DEVICE_ARCH
 
 class BlockStackAllocator {
 
@@ -27,19 +27,19 @@ class BlockStackAllocator {
         return (offset + align - 1u) & ~(align - 1u);
     }
 
-#ifdef MRA_HAVE_DEVICE_ARCH
+#ifdef HAVE_DEVICE_ARCH
     __device__ __forceinline__
     char* get_arena() {
       return detail::arena;
     }
-#else // MRA_HAVE_DEVICE_ARCH
+#else // HAVE_DEVICE_ARCH
     char* get_arena() {
       if (!m_arena) {
         m_arena = new char[m_capacity];
       }
       return m_arena;
     }
-#endif // MRA_HAVE_DEVICE_ARCH
+#endif // HAVE_DEVICE_ARCH
 
   public:
     static constexpr size_t DefaultAlign = 16;
@@ -63,7 +63,7 @@ class BlockStackAllocator {
       SYNCTHREADS();
     }
 
-    ~BlockStackAllocator() {
+    SCOPE ~BlockStackAllocator() {
 #ifdef MRA_ENABLE_HOST
       delete[] m_arena;
       m_arena = nullptr;
@@ -73,19 +73,19 @@ class BlockStackAllocator {
     template<typename T>
     class BlockScopedAlloc {
       public:
-        BlockScopedAlloc(BlockStackAllocator& bsa, T* ptr, size_t cp)
+        SCOPE BlockScopedAlloc(BlockStackAllocator& bsa, T* ptr, size_t cp)
         : bsa_(bsa), ptr_(ptr), cp_(cp)
         { }
 
-        BlockScopedAlloc(const BlockScopedAlloc&)            = delete;
+        SCOPE BlockScopedAlloc(const BlockScopedAlloc&)            = delete;
         BlockScopedAlloc& operator=(const BlockScopedAlloc&) = delete;
 
-        BlockScopedAlloc(BlockScopedAlloc&& o)
+        SCOPE BlockScopedAlloc(BlockScopedAlloc&& o)
             : bsa_(o.bsa_), ptr_(o.ptr_), cp_(o.cp_) {
             o.ptr_ = nullptr;
         }
 
-        ~BlockScopedAlloc() {
+        SCOPE ~BlockScopedAlloc() {
             if (ptr_) bsa_.restore(cp_);
         }
 

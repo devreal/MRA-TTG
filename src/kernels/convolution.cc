@@ -24,6 +24,21 @@ namespace mra {
     const std::array<bool, 2>& at,
     double* tmp,
     ttg::device::Stream stream);
+
+
+  template
+  void submit_convolution_kernel_batched<double, 3>(
+    detail::BatchPool<detail::ConvolutionBatchArg<double, 3>>& pool,
+    typename detail::BatchPool<detail::ConvolutionBatchArg<double, 3>>::slot_t& slot,
+    detail::BatchPool<detail::SparsityState>& sparsity_pool,
+    typename detail::BatchPool<detail::SparsityState>::slot_t& sparsity_slot,
+    detail::BatchPool<size_type>& offset_pool,
+    typename detail::BatchPool<size_type>::slot_t& offset_slot,
+    size_type total_nonzero,
+    size_type K,
+    const double fac,
+    ttg::device::Stream stream);
+
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
 } // namespace mra

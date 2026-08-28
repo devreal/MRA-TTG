@@ -81,9 +81,12 @@ namespace mra {
       )
     {
       using mma = mma_traits<T>;
+      using FragA = typename mma::FragA;
+      using FragB = typename mma::FragB;
+      using FragC = typename mma::FragC;
       constexpr int K2            = K * K;
       // need at least 1 fragment per warp
-      constexpr int ROWS_PER_WARP = ((K2 / mma::NumWarps) + mma::M - 1) / mma::M * mma::M;
+      constexpr int ROWS_PER_WARP = (((K2 / mma::NumWarps) + mma::M - 1) / mma::M) * mma::M;
       constexpr int ROW_TILES     = ROWS_PER_WARP / mma::M;
       constexpr int NSTEPS        = K / mma::K;
       constexpr int COL_TILES     = K / mma::K;
@@ -91,7 +94,7 @@ namespace mra {
         if (Term == NormId::Rnorm) return 1.e-20; else return 0.0;
       };
 
-      const int warp_id         = thread_id() / mra::WarpSize;
+      const int warp_id         = thread_id() / mma::WarpSize;
       const int warp_row_offset = warp_id * ROWS_PER_WARP;
 
       const bool has_work = (warp_row_offset < K2);
@@ -106,9 +109,9 @@ namespace mra {
        * Pre-load the warp's A fragments (i.e., f).
        * The fragments will remain in registers for the entire convolution, and will be reused.
        */
-      mma::FragA f_frags[ROW_TILES][NSTEPS];
+      FragA f_frags[ROW_TILES][NSTEPS];
       // we accumulate the result in registers, and only write back to memory at the end
-      mma::FragC c_frags[ROW_TILES][COL_TILES];
+      FragC c_frags[ROW_TILES][COL_TILES];
       if (has_work) {
         #pragma unroll
         for (int i = 0; i < ROW_TILES; ++i) {
@@ -127,11 +130,11 @@ namespace mra {
       for (size_type mu = 0; mu < rank; ++mu) {
         T munorm = opnorms(opid, mu, 0, (size_type)NormId::MUnorm);
         double dnorm = 1.0;
-        for (Dimension d=0; d<NDIM; ++d) dnorm *= opnorms(opid, mu, d, (size_type)normid);
+        for (Dimension d=0; d<NDIM; ++d) dnorm *= opnorms(opid, mu, d, (size_type)Term);
         if (munorm > optol && dnorm > thresh()) {
           T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
-          if (NormId::Snorm == normid) mufac *= -1.0; // sign flip for Snorm
-          mma::FragA a_frags[ROW_TILES][NSTEPS];
+          if (NormId::Snorm == Term) mufac *= -1.0; // sign flip for Snorm
+          FragA a_frags[ROW_TILES][NSTEPS];
           // fill the a_frags from the loaded f_frags
           if (has_work) {
             #pragma unroll
@@ -153,7 +156,7 @@ namespace mra {
              * The fragments will remain in registers for the entire convolution, and will be reused.
              * TODO: preload the next B fragment into SMEM using copy_async().
              */
-            mma::FragB b_frags[NSTEPS][COL_TILES];
+            FragB b_frags[NSTEPS][COL_TILES];
             if (has_work) {
               #pragma unroll
               for (int i = 0; i < COL_TILES; ++i) {
@@ -175,7 +178,7 @@ namespace mra {
               for (int t = 0; t < ROW_TILES; ++t) {
                 #pragma unroll
                 for (int ct = 0; ct < COL_TILES; ++ct) {
-                  mma::FragC acc;
+                  FragC acc;
                   nvcuda::wmma::fill_fragment(acc, 0.0);
                   #pragma unroll
                   for (int s = 0; s < NSTEPS; ++s) {
@@ -272,7 +275,7 @@ namespace mra {
         // convolution for f
         if (at[0]) {
           apply_conv_k<T, NDIM, NormId::Rnorm>(
-                      opid, mra::Int<2>*K, rank, optol, transr, opnorms,
+                      opid, mra::Int<2>{}*K, rank, optol, transr, opnorms,
                       f, result, smem_allocator);
         } else {
           result = 0.0;
@@ -300,12 +303,12 @@ namespace mra {
      */
     template<typename T>
     SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
-#ifdef MRA_HAVE_MMA
+#ifdef MRA_ENABLE_CUDA
       if (K == 8) {
         auto K2 = mra::Int<2>{}*K;
         return K2*K2*K2*sizeof(T); // SMEM for the result matrix to rotate
       }
-#endif // MRA_HAVE_MMA
+#endif // MRA_ENABLE_CUDA
       return 0;
     }
 
