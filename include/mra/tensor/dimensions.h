@@ -122,9 +122,12 @@ namespace mra {
 
     template<size_type Start>
     SCOPE auto subdims(Int<Start>) const {
+      static_assert(Start <= NDIM, "Start index must not be larger than NDIM");
       std::array<size_type, NDIM - Start> subdims;
-      for (size_type i = 0; i < NDIM - Start; ++i) {
-        subdims[i] = m_dims[i + Start];
+      if constexpr (Start < NDIM) {
+        for (size_type i = 0; i < NDIM - Start; ++i) {
+          subdims[i] = m_dims[i + Start];
+        }
       }
       return DynamicDimensions<NDIM - Start>(subdims);
     }
