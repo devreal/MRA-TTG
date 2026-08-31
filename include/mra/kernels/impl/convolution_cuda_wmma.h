@@ -181,7 +181,7 @@ namespace mra {
               for (int i = 0; i < K_WARP_TILES; ++i) {
                 #pragma unroll
                 for (int j = 0; j < N_WARP_TILES; ++j) {
-                  mma::load_b(b_frags[j][i], trans[d](opid, mu).data(),
+                  mma::load_b(b_frags[i][j], trans[d](opid, mu).data(),
                               i * mma::K,                            /* contraction offset */
                               j * mma::N,                            /* col in B           */
                               K);                                    /* row-major ldm      */
