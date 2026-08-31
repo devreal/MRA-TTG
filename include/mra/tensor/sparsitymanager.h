@@ -113,16 +113,16 @@ namespace mra {
       /**
        * Mock tensor API
        */
-      size_type dim(size_type d) const {
+      SCOPE size_type dim(size_type d) const {
         return m_tensor.dim(d);
       }
 
 #ifndef MRA_ENABLE_HOST
-      value_type* storage() {
+      SCOPE value_type* storage() {
         return reinterpret_cast<value_type*>(m_slot->host_args.data());
       }
 #else
-      value_type* storage() {
+      SCOPE value_type* storage() {
         return m_buffer.host_ptr();
       }
 #endif // !MRA_ENABLE_HOST

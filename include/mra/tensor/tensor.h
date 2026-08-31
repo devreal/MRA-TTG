@@ -196,7 +196,7 @@ namespace mra {
       return m_dims.product();
     }
 
-    size_type dim(Dimension dim) const {
+    SCOPE size_type dim(Dimension dim) const {
       return m_dims[dim];
     }
 
