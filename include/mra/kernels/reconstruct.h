@@ -708,6 +708,7 @@ namespace mra {
         const size_type m_n_nonzero = batch[m].template get<8>();
         const size_type n = static_cast<size_type>(m_node_view.dim(0)); // structural N
 
+#if defined(MRA_CHECK_NORMS)
         // DEBUG: recompute the true device-side union (node_view OR
         // from_parent_view, exactly what find_nth_nonzero_any scans) right
         // here at batch-assembly/kernel-launch time, and compare against
@@ -737,6 +738,7 @@ namespace mra {
             std::cout << oss.str() << std::flush;
           }
         }
+#endif // MRA_CHECK_NORMS
 
         for (size_type c = 0; c < num_children; ++c) {
           sparsity_to_bytes(m_r_arr_tensor[c].coeffs().sparsity(),
