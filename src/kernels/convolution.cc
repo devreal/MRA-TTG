@@ -28,12 +28,8 @@ namespace mra {
 
   template
   void submit_convolution_kernel_batched<double, 3>(
-    detail::BatchPool<detail::ConvolutionBatchArg<double, 3>>& pool,
-    typename detail::BatchPool<detail::ConvolutionBatchArg<double, 3>>::slot_t& slot,
-    detail::BatchPool<detail::SparsityState>& sparsity_pool,
-    typename detail::BatchPool<detail::SparsityState>::slot_t& sparsity_slot,
-    detail::BatchPool<size_type>& offset_pool,
-    typename detail::BatchPool<size_type>::slot_t& offset_slot,
+    detail::GroupedBatchPool<detail::ConvolutionBatchArg<double, 3>>& pool,
+    typename detail::GroupedBatchPool<detail::ConvolutionBatchArg<double, 3>>::slot_t& slot,
     size_type total_nonzero,
     size_type K,
     const double fac,

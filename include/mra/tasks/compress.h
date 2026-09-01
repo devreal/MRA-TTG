@@ -63,13 +63,13 @@ namespace mra
     // mra/kernels/compress.h's batching-support comment) -- so unlike
     // convolution, batching here has no level/position restriction to begin
     // with; it's unrestricted from the start.
-    std::shared_ptr<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>> compress_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>> compress_pool;
     if (enable_compress_batching) {
-      compress_pool = std::make_shared<detail::BatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      compress_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
     }
 #else
-    // BatchPoolRegistry only exists on device builds; this placeholder only
-    // exists so the (shared host/device) do_compress lambda below can
+    // GroupedBatchPoolRegistry only exists on device builds; this placeholder
+    // only exists so the (shared host/device) do_compress lambda below can
     // unconditionally list compress_pool in its capture list -- it is never
     // accessed on host builds.
     std::nullptr_t compress_pool = nullptr;

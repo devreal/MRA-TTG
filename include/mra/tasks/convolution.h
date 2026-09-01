@@ -133,12 +133,12 @@ namespace mra {
     // bespoke pool. max_batch_size no longer sizes the pool (it now grows on
     // demand); it only bounds how many tasks set_batch_matcher below will
     // ever group into one launch.
-    std::shared_ptr<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>> conv_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>> conv_pool;
     if (enable_conv_batching) {
-      conv_pool = std::make_shared<detail::BatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      conv_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
     }
 #else
-    // BatchPoolRegistry only exists on device builds; this placeholder only
+    // GroupedBatchPoolRegistry only exists on device builds; this placeholder only
     // exists so the (shared host/device) task lambdas below can
     // unconditionally list conv_pool in their capture list -- it is never
     // accessed on host builds.
@@ -722,13 +722,16 @@ namespace mra {
           submit_convolution_kernel<T, NDIM>(key, key-key, K, N, n_nonzero, fac, tol, /*in_node_view*/ empty_node_view,
                                               in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
-        }
 
-        // Prune out_view's device sparsity for any function whose computed
-        // norm is exactly zero, on the same stream, before the host-only
-        // out.set_zero(i) loop below narrows the *host* side of the same
-        // sparsity -- see submit_convolution_prune_zero_norm_kernel's comment.
-        submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
+          // Prune out_view's device sparsity for any function whose computed
+          // norm is exactly zero, on the same stream, before the host-only
+          // out.set_zero(i) loop below narrows the *host* side of the same
+          // sparsity -- see submit_convolution_prune_zero_norm_kernel's
+          // comment. When batching is enabled this is instead done once for
+          // the whole batch by submit_convolution_batch_leader (see
+          // convolution_prune_zero_norm_kernel_batched), not per-task here.
+          submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
+        }
 
 #ifndef MRA_ENABLE_HOST
         // wait for the norms to come back
@@ -949,17 +952,23 @@ namespace mra {
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
-      }
 
-      // Prune out_view's device sparsity for any function whose computed
-      // norm is exactly zero, on the same stream, before the host-only
-      // out.set_zero(i) loop below (only reached when last_key) narrows the
-      // *host* side of the same sparsity -- see
-      // submit_convolution_prune_zero_norm_kernel's comment. resnorms is
-      // only allocated/meaningful when last_key (see above), so this must
-      // be gated the same way.
-      if (last_key) {
-        submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
+        // Prune out_view's device sparsity for any function whose computed
+        // norm is exactly zero, on the same stream, before the host-only
+        // out.set_zero(i) loop below (only reached when last_key) narrows the
+        // *host* side of the same sparsity -- see
+        // submit_convolution_prune_zero_norm_kernel's comment. resnorms is
+        // only allocated/meaningful when last_key (see above), so this must
+        // be gated the same way. When batching is enabled this is instead
+        // done once for the whole batch by submit_convolution_batch_leader
+        // (see convolution_prune_zero_norm_kernel_batched), not per-task
+        // here -- that batched kernel applies the same last_key gating by
+        // skipping any member whose resnorms_view is empty (exactly the
+        // members for which this branch's `if (last_key)` would have been
+        // false).
+        if (last_key) {
+          submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
+        }
       }
 
 #ifndef MRA_ENABLE_HOST

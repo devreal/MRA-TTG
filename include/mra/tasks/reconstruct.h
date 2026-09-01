@@ -55,12 +55,12 @@ namespace mra{
     // matrix from FunctionData that never varies by level or position (see
     // mra/kernels/reconstruct.h's batching-support comment) -- so, like
     // compress, batching here is unrestricted from the start.
-    std::shared_ptr<detail::BatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>> reconstruct_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>> reconstruct_pool;
     if (enable_reconstruct_batching) {
-      reconstruct_pool = std::make_shared<detail::BatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      reconstruct_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
     }
 #else
-    // BatchPoolRegistry only exists on device builds; this placeholder only
+    // GroupedBatchPoolRegistry only exists on device builds; this placeholder only
     // exists so the (shared host/device) do_reconstruct lambda below can
     // unconditionally list reconstruct_pool in its capture list -- it is
     // never accessed on host builds.
