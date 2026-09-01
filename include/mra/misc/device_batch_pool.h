@@ -438,6 +438,15 @@ namespace mra::detail {
    * ordinary async copies on the same stream; the caller still only records
    * one event for the slot afterwards (see GroupedBatchPool::mark_submitted),
    * so the slot/event count stays at one regardless of which path is taken.
+   *
+   * cudaMemcpyBatchAsync's signature is NOT stable across toolkits:
+   * CUDA 12.8-12.x takes a trailing `size_t* failIdx` output parameter;
+   * CUDA 13.0+ dropped it (and tightened dsts/srcs/sizes to const*). Both
+   * versions number CUDART_VERSION as major*1000+minor*10+patch (12.8 ->
+   * 12080, 13.0 -> 13000), so a single "CUDART_VERSION >= 12080" guard
+   * would (wrongly) take the old 9-argument path on CUDA 13, where it fails
+   * to compile ("too many arguments"). Band the check on 13000 to pick the
+   * right call shape per toolkit.
    */
   template <typename Arg>
   void submit_grouped_copy(typename GroupedBatchPool<Arg>::slot_t& slot,
@@ -445,9 +454,9 @@ namespace mra::detail {
                             int device_id, ttg::device::Stream stream)
   {
 #if defined(MRA_ENABLE_CUDA) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
-    void* dsts[3]         = { static_cast<void*>(slot.dev_args), static_cast<void*>(slot.dev_offsets),
+    const void* dsts[3]   = { static_cast<void*>(slot.dev_args), static_cast<void*>(slot.dev_offsets),
                               static_cast<void*>(slot.dev_sparsity) };
-    void* srcs[3]         = { static_cast<void*>(slot.args.data()), static_cast<void*>(slot.offsets.data()),
+    const void* srcs[3]   = { static_cast<void*>(slot.args.data()), static_cast<void*>(slot.offsets.data()),
                               static_cast<void*>(slot.sparsity.data()) };
     std::size_t sizes[3]  = { num_args*sizeof(Arg), num_offsets*sizeof(size_type), num_sparsity_bytes };
     cudaMemcpyAttributes attrs{};
@@ -456,9 +465,14 @@ namespace mra::detail {
     attrs.dstLocHint = cudaMemLocation{cudaMemLocationTypeDevice, device_id};
     attrs.flags = cudaMemcpyFlagDefault;
     std::size_t attrsIdxs[1] = { 2 }; // one attribute set applies to entries [0,2]
+#if CUDART_VERSION >= 13000
+    check_cuda_rt(cudaMemcpyBatchAsync(dsts, srcs, sizes, 3, &attrs, attrsIdxs, 1, stream),
+                  "cudaMemcpyBatchAsync");
+#else
     std::size_t failIdx = 0;
     check_cuda_rt(cudaMemcpyBatchAsync(dsts, srcs, sizes, 3, &attrs, attrsIdxs, 1, &failIdx, stream),
                   "cudaMemcpyBatchAsync");
+#endif
 #elif defined(MRA_ENABLE_CUDA)
     // Toolkit predates cudaMemcpyBatchAsync (added in CUDA 12.8).
     check_cuda_rt(cudaMemcpyAsync(slot.dev_args, slot.args.data(), num_args*sizeof(Arg),
