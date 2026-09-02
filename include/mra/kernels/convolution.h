@@ -397,10 +397,19 @@ namespace mra{
      * both the unbatched convolution_kernel below and the batched
      * convolution_kernel_batched further down -- there is exactly one copy of
      * this logic to maintain instead of two near-identical grid-stride loops.
+     * Returns the function index `i` it just processed (found via
+     * find_nth_nonzero inside convolution_process_one_leader; same value on
+     * every thread in the block, courtesy of the SHARED `i`), so a caller
+     * that needs it right after the call doesn't have to re-derive it --
+     * currently only convolution_kernel, to demote result_view's sparsity
+     * state for a position whose computed norm turned out to be exactly
+     * zero. convolution_kernel_batched deliberately does NOT do that
+     * per-position; its equivalent runs as one combined per-member launch
+     * afterward instead (see convolution_prune_zero_norm_kernel_batched).
      */
     template <typename T, Dimension NDIM, typename TransrT, typename TranssT, typename OpnormsViewT,
               typename InViewT, typename FViewT, typename ResultViewT, typename ResnormsT>
-    DEVSCOPE void convolution_process_one(
+    DEVSCOPE size_type convolution_process_one(
       Key<NDIM> key,
       Key<NDIM> displacement,
       auto K,
@@ -443,7 +452,7 @@ namespace mra{
             resnorms[i] = resnorm;
           }
         }
-        return;
+        return i;
       }
 
       int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0; // TODO: this is a bit hacky, can we do better?
@@ -452,6 +461,7 @@ namespace mra{
                                        transr, transs, opnorms_view, at, in, f, f0,
                                        resultc, result, work1, work2,
                                        resnorms.empty() ? nullptr : &resnorms[i]);
+      return i;
     }
 
 #if defined(MRA_CHECK_NORMS)
@@ -527,8 +537,34 @@ namespace mra{
       T* tmp)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
-                                         in_view, f_view, result_view, resnorms, tmp, N, pos);
+        size_type i = convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
+                                                        in_view, f_view, result_view, resnorms, tmp, N, pos);
+        // result_view's bitfield was populated optimistically (from the
+        // structural union of the inputs' sparsity, via SparsityManager)
+        // before this position's real value was known -- demote it now that
+        // resnorms[i] says otherwise. Safe with no extra synchronization:
+        // only this position's own block/team-lead thread ever touches
+        // resnorms[i]/result_view's state for this i.
+        if (!resnorms.empty() && is_team_lead() && resnorms[i] == 0.0) {
+          result_view.set_state(i, SparsityState::ALLOCATED);
+        }
+      }
+
+      // Finalize resnorms for positions convolution_process_one never visits
+      // above (result_view.is_zero(i) -- structurally excluded from the
+      // n_nonzero union, not just computed to zero). resnorms is
+      // Allocate-scoped (see mra/tasks/convolution.h) so these entries hold
+      // garbage otherwise; this set is disjoint from anything any block
+      // writes above, so block 0 alone doing this is safe regardless of the
+      // other blocks' progress. submit_convolution_kernel forces at least one
+      // block whenever resnorms is non-empty, so this still runs even when
+      // n_nonzero == 0.
+      if (!resnorms.empty() && blockIdx.x == 0) {
+        for (size_type i = threadIdx.x; i < N; i += blockDim.x) {
+          if (result_view.is_zero(i)) {
+            resnorms[i] = T(0);
+          }
+        }
       }
     }
 
@@ -573,68 +609,25 @@ namespace mra{
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = detail::apply_conv_shmem_size<T>(K);
 
+    // At least one block even when n_nonzero == 0, but only when resnorms is
+    // actually in use (accumulate_tt's non-last_key calls pass an empty one
+    // every time, the common case -- forcing a block there would be a wasted
+    // launch for nothing): convolution_kernel's block 0 also finalizes
+    // resnorms for positions never visited by the position loop (see its
+    // comment), which must still happen when there's no real work otherwise.
+    const size_type grid = (n_nonzero > 0 || resnorms.empty()) ? n_nonzero : size_type(1);
+
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     if (K == 8) {
       //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
-      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
+      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
                   (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
     } else {
-      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
+      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
                   (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
     }
-    checkSubmit();
-  }
-
-
-  namespace detail {
-    /**
-     * Prunes out_view's device-side sparsity bitfield for any function whose
-     * *computed* resnorms entry is exactly zero. mra/tasks/convolution.h's
-     * shell0_tt/accumulate_tt call out.set_zero(i) host-side for these same
-     * positions right after resnorms comes back to host -- but
-     * FunctionNodeBase::set_zero() only updates the host RangeSparsityBase
-     * ranges (see mra/tensor/sparsity.h), never the device inline bitfield
-     * that was already populated earlier (via SparsityManager or the batch
-     * scatter kernel, before this node's actual coefficient values were even
-     * computed). Without this device-side counterpart, out_view keeps
-     * reporting non-zero for positions the host has since pruned, so a
-     * downstream consumer's device-side union scan (e.g. reconstruct's,
-     * treating this node as its "node" input) finds MORE non-zero positions
-     * than the host ever expected. Must run while resnorms/out_view are
-     * still device-resident, i.e. before co_await
-     * ttg::device::wait(resnorms.buffer()) brings resnorms back to host.
-     * Single block, N small -- not meant for the hot path beyond this use.
-     */
-    template <Dimension NDIM, concepts::TensorView<1> ViewResnorms, concepts::TensorView<NDIM+1> ViewOut>
-    GLOBALSCOPE void convolution_prune_zero_norm_kernel(
-      size_type N,
-      const ViewResnorms resnorms,
-      ViewOut out_view)
-    {
-      for (size_type i = threadIdx.x; i < N; i += blockDim.x) {
-        if (out_view.is_nonzero(i) && resnorms[i] == 0.0) {
-          out_view.set_state(i, SparsityState::ALLOCATED);
-        }
-      }
-    }
-  } // namespace detail
-
-  /**
-   * See detail::convolution_prune_zero_norm_kernel's comment. Called by both
-   * shell0_tt and accumulate_tt (mra/tasks/convolution.h), on the same
-   * stream as the kernel that just computed resnorms/out, before that
-   * stream's data is brought back to host.
-   */
-  template <Dimension NDIM, concepts::TensorView<1> ViewResnorms, concepts::TensorView<NDIM+1> ViewOut>
-  void submit_convolution_prune_zero_norm_kernel(
-    size_type N,
-    const ViewResnorms& resnorms,
-    ViewOut& out_view,
-    ttg::device::Stream stream)
-  {
-    CALL_KERNEL((detail::convolution_prune_zero_norm_kernel<NDIM>), 1, 32, 0, stream, (N, resnorms, out_view));
     checkSubmit();
   }
 
@@ -761,6 +754,17 @@ namespace mra{
      * time that kernel reads result_view.is_zero(i)/is_nonzero(i) the bytes
      * are already in place; stream ordering alone makes this correct, no
      * extra synchronization needed.
+     *
+     * Also zero-fills each member's resnorms_view here, before
+     * convolution_kernel_batched runs: resnorms is Allocate-scoped now (see
+     * mra/tasks/convolution.h -- no host zero-fill/H2D transfer of zeros
+     * anymore), so positions convolution_process_one never visits for this
+     * member (result_view already zero for them) need to be finalized to 0
+     * somewhere; doing it in this already-required, already one-block-per-
+     * member launch costs nothing extra. Positions it does visit get
+     * overwritten there. A non-last-key accumulate_tt member passes an empty
+     * resnorms_view through coop() -- skipped here, same guard used
+     * elsewhere for that case.
      */
     template <typename T, Dimension NDIM>
     GLOBALSCOPE void convolution_scatter_sparsity_kernel(
@@ -772,25 +776,31 @@ namespace mra{
       const size_type member = blockIdx.x;
       auto& arg = args[member];
       auto& result_view = std::get<idx::result_view>(arg);
+      auto& resnorms_view = std::get<idx::resnorms_view>(arg);
       const size_type n = std::get<idx::n>(arg);
       const size_type offset = std::get<idx::sparsity_offset>(arg);
 
       for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
         result_view.set_state(i, sparsity[offset + i]);
       }
+      if (!resnorms_view.empty()) {
+        for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
+          resnorms_view[i] = T(0);
+        }
+      }
     }
 
     /**
-     * Batched counterpart of submit_convolution_prune_zero_norm_kernel: prunes
-     * every batch member's device-side sparsity in ONE combined launch (one
-     * block per member) instead of every task in the batch -- leader and
-     * followers alike -- submitting its own single-block kernel (that used to
-     * mean N launches per batch; see the call site in
-     * mra/tasks/convolution.h). A follower's out/resnorms tensors are the same
-     * underlying device memory its own ConvolutionBatchArg entry points at
-     * (see the batching-support comment on ConvolutionBatchArg above), so
-     * pruning them here from the leader's single launch is equivalent to each
-     * task calling the unbatched kernel individually.
+     * Batched counterpart of the demotion convolution_kernel does inline
+     * per-position (see convolution_process_one's comment): prunes every
+     * batch member's device-side sparsity in ONE combined launch (one block
+     * per member) instead of requiring per-position access to each member's
+     * own tuple entry mid-launch, the way the unbatched kernel can. A
+     * follower's out/resnorms tensors are the same underlying device memory
+     * its own ConvolutionBatchArg entry points at (see the batching-support
+     * comment on ConvolutionBatchArg above), so pruning them here from the
+     * leader's single launch is equivalent to each task's own position being
+     * pruned individually.
      *
      * A member that never computes a final resnorm this step (a non-last-key
      * accumulate_tt step -- see mra/tasks/convolution.h) passes an empty

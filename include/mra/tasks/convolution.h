@@ -654,14 +654,11 @@ namespace mra {
         out.set_ns();
         mra::apply_leaf_info(out, in_node);
 
-        // Zero-fill host-side first (rather than relying on default-
-        // constructed 0), since the kernel below only launches blocks for
-        // in_node's non-zero functions -- covers exactly what
-        // convolution_process_one used to write 0.0 for explicitly. Needs
-        // SyncIn (rather than TempScope/Allocate) so this host fill reaches
-        // the device copy the kernel reads/writes.
-        DenseTensor<T, 1> resnorms(N, ttg::scope::SyncIn);
-        std::fill(resnorms.buffer().host_ptr(), resnorms.buffer().host_ptr() + N, T(0));
+        // No host zero-fill needed: entries the compute kernel doesn't visit
+        // are finalized to 0 device-side instead -- convolution_kernel's own
+        // tail pass for the unbatched path, convolution_scatter_sparsity_kernel
+        // for the batched path (see their comments in kernels/convolution.h).
+        DenseTensor<T, 1> resnorms(N, ttg::scope::Allocate);
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
@@ -719,18 +716,16 @@ namespace mra {
         {
           auto sparseman = make_sparsity_manager(out);
           sparseman.populate_device_sparsity();
+          // out_view's device sparsity is demoted inline, per position, by
+          // convolution_kernel itself (via convolution_process_one) for any
+          // function whose computed norm is exactly zero -- before the
+          // host-only out.set_zero(i) loop below narrows the *host* side of
+          // the same sparsity. When batching is enabled this is instead done
+          // once for the whole batch by submit_convolution_batch_leader (see
+          // convolution_prune_zero_norm_kernel_batched in kernels/convolution.h).
           submit_convolution_kernel<T, NDIM>(key, key-key, K, N, n_nonzero, fac, tol, /*in_node_view*/ empty_node_view,
                                               in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
-
-          // Prune out_view's device sparsity for any function whose computed
-          // norm is exactly zero, on the same stream, before the host-only
-          // out.set_zero(i) loop below narrows the *host* side of the same
-          // sparsity -- see submit_convolution_prune_zero_norm_kernel's
-          // comment. When batching is enabled this is instead done once for
-          // the whole batch by submit_convolution_batch_leader (see
-          // convolution_prune_zero_norm_kernel_batched), not per-task here.
-          submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
         }
 
 #ifndef MRA_ENABLE_HOST
@@ -892,14 +887,11 @@ namespace mra {
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
       if (last_key) {
-        // Zero-fill host-side first (rather than relying on default-
-        // constructed 0), since the kernel below only launches blocks for
-        // out's non-zero functions -- covers exactly what
-        // convolution_process_one used to write 0.0 for explicitly. Needs
-        // SyncIn (rather than TempScope/Allocate) so this host fill reaches
-        // the device copy the kernel reads/writes.
-        resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncIn);
-        std::fill(resnorms.buffer().host_ptr(), resnorms.buffer().host_ptr() + N, T(0));
+        // No host zero-fill needed: entries the compute kernel doesn't visit
+        // are finalized to 0 device-side instead -- convolution_kernel's own
+        // tail pass for the unbatched path, convolution_scatter_sparsity_kernel
+        // for the batched path (see their comments in kernels/convolution.h).
+        resnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
@@ -948,27 +940,19 @@ namespace mra {
       {
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
+        // out_view's device sparsity is demoted inline, per position, by
+        // convolution_kernel itself (via convolution_process_one) for any
+        // function whose computed norm is exactly zero -- gated the same way
+        // as resnorms itself (empty unless last_key, see above) -- before the
+        // host-only out.set_zero(i) loop below (only reached when last_key)
+        // narrows the *host* side of the same sparsity. When batching is
+        // enabled this is instead done once for the whole batch by
+        // submit_convolution_batch_leader (see
+        // convolution_prune_zero_norm_kernel_batched in kernels/convolution.h).
         submit_convolution_kernel<T, NDIM>(key, displacement, K, N, n_nonzero, fac, tol, in_node_view,
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,
                                             tmp.current_device_ptr(), ttg::device::current_stream());
-
-        // Prune out_view's device sparsity for any function whose computed
-        // norm is exactly zero, on the same stream, before the host-only
-        // out.set_zero(i) loop below (only reached when last_key) narrows the
-        // *host* side of the same sparsity -- see
-        // submit_convolution_prune_zero_norm_kernel's comment. resnorms is
-        // only allocated/meaningful when last_key (see above), so this must
-        // be gated the same way. When batching is enabled this is instead
-        // done once for the whole batch by submit_convolution_batch_leader
-        // (see convolution_prune_zero_norm_kernel_batched), not per-task
-        // here -- that batched kernel applies the same last_key gating by
-        // skipping any member whose resnorms_view is empty (exactly the
-        // members for which this branch's `if (last_key)` would have been
-        // false).
-        if (last_key) {
-          submit_convolution_prune_zero_norm_kernel<NDIM>(N, resnorms_view, out_view, ttg::device::current_stream());
-        }
       }
 
 #ifndef MRA_ENABLE_HOST
