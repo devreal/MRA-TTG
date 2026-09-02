@@ -464,7 +464,7 @@ namespace mra::detail {
     attrs.srcLocHint = cudaMemLocation{cudaMemLocationTypeHost, 0};
     attrs.dstLocHint = cudaMemLocation{cudaMemLocationTypeDevice, device_id};
     attrs.flags = cudaMemcpyFlagDefault;
-    std::size_t attrsIdxs[1] = { 2 }; // one attribute set applies to entries [0,2]
+    std::size_t attrsIdxs[1] = {0}; // one attribute set applies to entries [0,2]
 #if CUDART_VERSION >= 13000
     check_cuda_rt(cudaMemcpyBatchAsync(dsts, srcs, sizes, 3, &attrs, attrsIdxs, 1, stream),
                   "cudaMemcpyBatchAsync");
