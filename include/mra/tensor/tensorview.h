@@ -948,6 +948,8 @@ namespace mra {
     using dims_type = decltype(make_dims<T::ndim()>(dims...));
     // sanity check that the provided dimensions match the tensor dimensions
     if (!t.empty()) {
+      [[maybe_unused]]
+      int i = 0; // used only in the assert below
       std::apply([&](auto&&... args) {
         MRA_ASSERT(((t.dim(i++) == args)&&...) && "make_ct_tensorview_from: provided dimensions do not match tensor dimensions");
       }, std::make_tuple(dims...));
