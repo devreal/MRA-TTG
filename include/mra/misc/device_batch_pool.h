@@ -81,9 +81,9 @@ namespace mra::detail {
 
       slot_t() {
 #if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaEventCreate(&event), "cudaEventCreate");
+        check_cuda_rt(cudaEventCreateWithFlags(&event, cudaEventDisableTiming), "cudaEventCreate");
 #elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipEventCreate(&event), "hipEventCreate");
+        check_hip_rt(hipEventCreateWithFlags(&event, hipEventDisableTiming), "hipEventCreate");
 #endif
       }
 
@@ -279,9 +279,9 @@ namespace mra::detail {
 
       slot_t() {
 #if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaEventCreate(&event), "cudaEventCreate");
+        check_cuda_rt(cudaEventCreateWithFlags(&event, cudaEventDisableTiming), "cudaEventCreate");
 #elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipEventCreate(&event), "hipEventCreate");
+        check_hip_rt(hipEventCreateWithFlags(&event, hipEventDisableTiming), "hipEventCreate");
 #endif
       }
 
