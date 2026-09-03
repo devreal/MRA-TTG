@@ -434,19 +434,12 @@ namespace mra {
         DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          // Zero-fill host-side first, since the kernel below only launches
-          // blocks for in_node's non-zero functions -- covers exactly what
-          // simple_norm_kernel used to write 0.0 for explicitly. Needs
-          // SyncIn (rather than Allocate) so this host fill actually reaches
-          // the device copy the kernel reads/writes.
-          const size_type n_nonzero = in_node.coeffs().sparsity().count_nonzero();
-          cnorms = DenseTensor<T, 1>(N, ttg::scope::SyncIn);
-          std::fill(cnorms.buffer().host_ptr(), cnorms.buffer().host_ptr() + N, T(0));
+          cnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
 
-          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, n_nonzero, cnorms.current_view());
+          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, cnorms.current_view());
 
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::wait(cnorms.buffer());
@@ -455,7 +448,7 @@ namespace mra {
         send_out(key, std::move(cnorms), std::integral_constant<std::size_t, 0>{});
 
 #ifndef MRA_ENABLE_HOST
-      co_await std::move(sends);
+        co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(input), ttg::edges(norm_edge), "Norm");
 
