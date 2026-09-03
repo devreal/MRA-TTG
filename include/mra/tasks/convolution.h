@@ -710,12 +710,12 @@ namespace mra {
           auto sparseman = make_sparsity_manager(out);
           sparseman.populate_device_sparsity();
           // out_view's device sparsity is demoted inline, per position, by
-          // convolution_kernel itself (via convolution_process_one) for any
-          // function whose computed norm is exactly zero -- before the
-          // host-only out.set_zero(i) loop below narrows the *host* side of
-          // the same sparsity. When batching is enabled this is instead done
-          // once for the whole batch by submit_convolution_batch_leader (see
-          // convolution_prune_zero_norm_kernel_batched in kernels/convolution.h).
+          // convolution_process_one for any function whose computed norm is
+          // exactly zero -- before the host-only out.set_zero(i) loop below
+          // narrows the *host* side of the same sparsity. This is shared by
+          // both the unbatched (submit_convolution_kernel, below) and batched
+          // (convolution_kernel_batched, see submit_convolution_batch_leader)
+          // paths, so both get it with no separate prune kernel either way.
           submit_convolution_kernel<T, NDIM>(key, key-key, K, N, n_nonzero, fac, tol, /*in_node_view*/ empty_node_view,
                                               in_node_view, out_view, resnorms_view, transr, transs, opnorms_view,
                                               at, tmp.current_device_ptr(), ttg::device::current_stream());
@@ -934,14 +934,14 @@ namespace mra {
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
         // out_view's device sparsity is demoted inline, per position, by
-        // convolution_kernel itself (via convolution_process_one) for any
-        // function whose computed norm is exactly zero -- gated the same way
-        // as resnorms itself (empty unless last_key, see above) -- before the
-        // host-only out.set_zero(i) loop below (only reached when last_key)
-        // narrows the *host* side of the same sparsity. When batching is
-        // enabled this is instead done once for the whole batch by
-        // submit_convolution_batch_leader (see
-        // convolution_prune_zero_norm_kernel_batched in kernels/convolution.h).
+        // convolution_process_one for any function whose computed norm is
+        // exactly zero -- gated the same way as resnorms itself (empty
+        // unless last_key, see above) -- before the host-only out.set_zero(i)
+        // loop below (only reached when last_key) narrows the *host* side of
+        // the same sparsity. Shared by both the unbatched (submit_convolution_kernel,
+        // below) and batched (convolution_kernel_batched, see
+        // submit_convolution_batch_leader) paths, so both get it with no
+        // separate prune kernel either way.
         submit_convolution_kernel<T, NDIM>(key, displacement, K, N, n_nonzero, fac, tol, in_node_view,
                                             contribution_view, out_view, resnorms_view, transr, transs,
                                             opnorms_view, at,

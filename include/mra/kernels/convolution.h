@@ -399,13 +399,11 @@ namespace mra{
      * this logic to maintain instead of two near-identical grid-stride loops.
      * Returns the function index `i` it just processed (found via
      * find_nth_nonzero inside convolution_process_one_leader; same value on
-     * every thread in the block, courtesy of the SHARED `i`), so a caller
-     * that needs it right after the call doesn't have to re-derive it --
-     * currently only convolution_kernel, to demote result_view's sparsity
-     * state for a position whose computed norm turned out to be exactly
-     * zero. convolution_kernel_batched deliberately does NOT do that
-     * per-position; its equivalent runs as one combined per-member launch
-     * afterward instead (see convolution_prune_zero_norm_kernel_batched).
+     * every thread in the block, courtesy of the SHARED `i`), so both callers
+     * can demote result_view's sparsity state for that position right after
+     * the call, on the same team-lead thread that just wrote resnorms[i], if
+     * the computed norm turned out to be exactly zero -- no extra
+     * synchronization needed, and no separate kernel launch either.
      */
     template <typename T, Dimension NDIM, typename TransrT, typename TranssT, typename OpnormsViewT,
               typename InViewT, typename FViewT, typename ResultViewT, typename ResnormsT>
@@ -732,13 +730,22 @@ namespace mra{
         SYNCTHREADS();
         auto& arg = args[member];
         const size_type member_N = std::get<idx::n>(arg);
+        auto& result_view = std::get<idx::result_view>(arg);
+        auto& resnorms_view = std::get<idx::resnorms_view>(arg);
 
-        convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<idx::tol>(arg),
+        size_type i = convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<idx::tol>(arg),
                                          std::get<idx::transr>(arg), std::get<idx::transs>(arg),
                                          std::get<idx::opnorms>(arg), std::get<idx::at>(arg),
                                          std::get<idx::in_view>(arg), std::get<idx::f_view>(arg),
-                                         std::get<idx::result_view>(arg), std::get<idx::resnorms_view>(arg),
+                                         result_view, resnorms_view,
                                          std::get<idx::tmp>(arg), member_N, local_pos);
+        // See convolution_kernel's comment: demote this member's result_view
+        // state for i now that resnorms_view[i] is known -- same inline
+        // check as the unbatched path, replacing the old, separately
+        // launched convolution_prune_zero_norm_kernel_batched.
+        if (!resnorms_view.empty() && is_team_lead() && resnorms_view[i] == 0.0) {
+          result_view.set_state(i, SparsityState::ALLOCATED);
+        }
       }
     }
 
@@ -786,48 +793,6 @@ namespace mra{
       if (!resnorms_view.empty()) {
         for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
           resnorms_view[i] = T(0);
-        }
-      }
-    }
-
-    /**
-     * Batched counterpart of the demotion convolution_kernel does inline
-     * per-position (see convolution_process_one's comment): prunes every
-     * batch member's device-side sparsity in ONE combined launch (one block
-     * per member) instead of requiring per-position access to each member's
-     * own tuple entry mid-launch, the way the unbatched kernel can. A
-     * follower's out/resnorms tensors are the same underlying device memory
-     * its own ConvolutionBatchArg entry points at (see the batching-support
-     * comment on ConvolutionBatchArg above), so pruning them here from the
-     * leader's single launch is equivalent to each task's own position being
-     * pruned individually.
-     *
-     * A member that never computes a final resnorm this step (a non-last-key
-     * accumulate_tt step -- see mra/tasks/convolution.h) passes an empty
-     * resnorms_view through coop(); such a member's block returns immediately,
-     * exactly mirroring the `if (last_key)` guard around the unbatched call.
-     * Must run on the same stream AFTER convolution_kernel_batched (needs its
-     * computed resnorms) and before any member's coroutine reads its own
-     * out/resnorms back on the host.
-     */
-    template <typename T, Dimension NDIM>
-    GLOBALSCOPE void convolution_prune_zero_norm_kernel_batched(
-      ConvolutionBatchArg<T, NDIM>* args,     // device ptr, size == num_members
-      size_type num_members)
-    {
-      using idx = ConvolutionBatchArgIdx;
-
-      const size_type member = blockIdx.x;
-      auto& arg = args[member];
-      auto& resnorms_view = std::get<idx::resnorms_view>(arg);
-      if (resnorms_view.empty()) return;
-
-      auto& result_view = std::get<idx::result_view>(arg);
-      const size_type n = std::get<idx::n>(arg);
-
-      for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
-        if (result_view.is_nonzero(i) && resnorms_view[i] == 0.0) {
-          result_view.set_state(i, SparsityState::ALLOCATED);
         }
       }
     }
@@ -935,6 +900,10 @@ namespace mra{
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = detail::apply_conv_shmem_size<T>(K);
 
+    // Sparsity demotion for a member position whose computed norm turns out
+    // to be exactly zero happens inline inside convolution_kernel_batched
+    // itself (see convolution_process_one's comment) -- no separate
+    // post-launch prune kernel needed.
     if (K == 8) {
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<8>{}, fac));
@@ -942,14 +911,6 @@ namespace mra{
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, fac));
     }
-    checkSubmit();
-
-    // Prune every member's device-side sparsity in one combined launch
-    // instead of each task in the batch submitting its own tiny kernel (see
-    // convolution_prune_zero_norm_kernel_batched's comment and the call site
-    // in mra/tasks/convolution.h). Must run after the main kernel above.
-    CALL_KERNEL((detail::convolution_prune_zero_norm_kernel_batched<T, NDIM>), num_members, 32, 0, stream,
-                (slot.dev_args, num_members));
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
