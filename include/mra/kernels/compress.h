@@ -485,7 +485,7 @@ namespace mra {
       if (!batch.is_leader()) return;
 
       const std::size_t nb = batch.size();
-      const int device = ttg::device::current_device();
+      const auto device = ttg::device::current_device();
       auto& pool = registry.get(device);
 
       // Args/offsets regions sized to a fixed upper bound (max_batch_size,

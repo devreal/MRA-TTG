@@ -929,7 +929,7 @@ namespace mra{
       if (!batch.is_leader()) return;
 
       const std::size_t nb = batch.size();
-      const int device = ttg::device::current_device();
+      const auto device = ttg::device::current_device();
       auto& pool = registry.get(device);
       auto& zero_pool = zero_source_pool_registry().get(device);
 
