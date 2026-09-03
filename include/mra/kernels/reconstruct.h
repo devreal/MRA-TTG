@@ -363,8 +363,11 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,                                        // from_parent_view
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // r_arr (the 8 children)
       SparseTensorView<T, NDIM+1>,                                        // result_view (leaf output)
-      size_type,                                                          // n: number of functions this member contributes
-      size_type                                                          // sparsity_offset: base of this member's [r_arr[0] bytes]...[r_arr[7] bytes][result bytes] span in the aggregated sparsity staging buffer (see reconstruct_scatter_sparsity_kernel)
+      size_type                                                          // n: number of functions this member contributes
+      // No sparsity_offset field anymore: sparsity scatter is done as part
+      // of the H2D transfer itself now (see
+      // submit_reconstruct_batch_leader/submit_grouped_copy's comments), not
+      // by a device kernel reading an offset out of this struct.
     >;
 
     /* Named indices into ReconstructBatchArg, so callers don't sprinkle magic
@@ -377,7 +380,6 @@ namespace mra {
       static constexpr std::size_t r_arr           = 4;
       static constexpr std::size_t result_view     = 5;
       static constexpr std::size_t n               = 6;
-      static constexpr std::size_t sparsity_offset = 7;
     };
 
     /**
@@ -427,44 +429,6 @@ namespace mra {
       }
     }
 
-    /**
-     * Scatters pre-aggregated per-member sparsity bytes into each member's
-     * own r_arr[0..7]/result tensors' inline bitfields. The bytes were
-     * computed host-side (from each member's real r_arr/result Tensors, via
-     * detail::sparsity_to_bytes in submit_reconstruct_batch_leader below),
-     * assembled into one contiguous pinned buffer -- r_arr[0]'s n bytes,
-     * ..., r_arr[7]'s n bytes, then result's n bytes, per member -- and
-     * copied to `sparsity` with a single H2D transfer, replacing what would
-     * otherwise be one SparsityManager/MockTensor allocation + copy per
-     * member per tensor. Launched on the same stream immediately before
-     * reconstruct_kernel_batched, so stream ordering alone guarantees the
-     * bytes are in place first.
-     */
-    template <typename T, Dimension NDIM>
-    GLOBALSCOPE void reconstruct_scatter_sparsity_kernel(
-      ReconstructBatchArg<T, NDIM>* args,     // device ptr, size == gridDim.x
-      const SparsityState* sparsity)          // device ptr, aggregated batch-wide staging buffer
-    {
-      using idx = ReconstructBatchArgIdx;
-      constexpr size_type num_children = Key<NDIM>::num_children();
-
-      const size_type member = blockIdx.x;
-      auto& arg = args[member];
-      auto& r_arr = std::get<idx::r_arr>(arg);
-      auto& result_view = std::get<idx::result_view>(arg);
-      const size_type n = std::get<idx::n>(arg);
-      const size_type base = std::get<idx::sparsity_offset>(arg);
-
-      for (size_type c = 0; c < num_children; ++c) {
-        for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
-          r_arr[c].set_state(i, sparsity[base + c*n + i]);
-        }
-      }
-      for (size_type i = threadIdx.x; i < n; i += blockDim.x) {
-        result_view.set_state(i, sparsity[base + num_children*n + i]);
-      }
-    }
-
 #if defined(MRA_CHECK_NORMS)
     /**
      * Debug-only: cross-checks, for every member, that the flattened launch
@@ -477,8 +441,7 @@ namespace mra {
      * *value* sparsity, so they must be part of this union too (see
      * mra/tasks/reconstruct.h's work_sparsity comment). Nothing scatters the
      * host union result into these views' own bitfields, so the two can
-     * silently drift apart. One block per member, same style as
-     * reconstruct_scatter_sparsity_kernel above. Launched (gated by
+     * silently drift apart. One block per member. Launched (gated by
      * MRA_CHECK_NORMS) immediately before reconstruct_kernel_batched in
      * submit_reconstruct_kernel_batched.
      */
@@ -537,12 +500,12 @@ namespace mra {
    * via detail::submit_reconstruct_batch_leader below), sharing only (K,
    * accumulate_NS, hg) across the whole batch. Grid is 1D over total_nonzero
    * -- see reconstruct_kernel_batched's comment for why. slot.offsets carries
-   * the small per-member offsets array (size num_members+1) and
-   * slot.sparsity the batch-wide aggregated sparsity bytes, both assembled by
-   * submit_reconstruct_batch_leader alongside slot.args in the same
-   * GroupedBatchPool slot -- see reconstruct_scatter_sparsity_kernel and
-   * GroupedBatchPool's comment for why bundling all three into one slot
-   * matters (one event instead of three).
+   * the small per-member offsets array (size num_members+1), assembled by
+   * submit_reconstruct_batch_leader alongside slot.args and slot.extra_dsts/
+   * extra_srcs/extra_sizes (the per-member r_arr[0..7]/result scatter
+   * destinations -- see submit_grouped_copy's comment) in the same
+   * GroupedBatchPool slot -- one event for the whole launch instead of
+   * separate ones per region.
    */
   template<typename T, Dimension NDIM>
   void submit_reconstruct_kernel_batched(
@@ -558,29 +521,22 @@ namespace mra {
     using arg_t = detail::ReconstructBatchArg<T, NDIM>;
     const size_type num_members = static_cast<size_type>(slot.args.size());
 
-    // Single combined H2D transfer for args/offsets/sparsity -- see
+    // Single combined H2D transfer for args/offsets, plus every member's
+    // r_arr[0..7]/result scatter destination copy -- see
     // submit_grouped_copy's comment for the CUDA-batched-memcpy vs. fallback
-    // split.
-    detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), slot.sparsity.size(),
-                                       pool.device_id, stream);
-
-    // Scatter each member's aggregated sparsity bytes into its own
-    // r_arr/result tensors' inline bitfields; same stream as the main kernel
-    // below, so stream ordering guarantees it completes first.
-    CALL_KERNEL((detail::reconstruct_scatter_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
-                (slot.dev_args, reinterpret_cast<const detail::SparsityState*>(slot.dev_sparsity)));
-    checkSubmit();
+    // split, and for why no separate scatter kernel is needed anymore.
+    detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
 #if defined(MRA_CHECK_NORMS)
     // Debug-only: verify the flattened grid's per-member slice (derived from
     // each member's host-computed n_nonzero) still matches a fresh on-device
     // union scan of that member's node_view/from_parent_view/result_view/
     // r_arr -- see reconstruct_verify_sparsity_kernel's comment for why these
-    // can drift. Must run AFTER the scatter above: result_view/r_arr are
-    // freshly-allocated output tensors whose device-side sparsity bitfield
-    // is only ever populated by that scatter (unlike node_view/
+    // can drift. Must run AFTER submit_grouped_copy above: result_view/r_arr
+    // are freshly-allocated output tensors whose device-side sparsity
+    // bitfield is only ever populated by that transfer (unlike node_view/
     // from_parent_view, already correctly set by their producing tasks) --
-    // checking them before the scatter reads whatever stale/uninitialized
+    // checking them before that transfer reads whatever stale/uninitialized
     // bytes happened to occupy that device allocation previously.
     CALL_KERNEL((detail::reconstruct_verify_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
                 (slot.dev_args, slot.dev_offsets));
@@ -611,14 +567,19 @@ namespace mra {
      * FunctionsReconstructedNode children, not just their views) and result
      * node through coop() (get<6>()/get<7>()), so this leader can read their
      * RangeSparsityBase-backed sparsity directly (no per-member
-     * SparsityManager/MockTensor allocation) and assemble every member's
+     * SparsityManager/MockTensor allocation), stage every member's
      * [r_arr[0] bytes]...[r_arr[7] bytes][result bytes] span into the slot's
      * own pinned sparsity region (part of the same GroupedBatchPool slot as
      * slot.args/slot.offsets, not the separate process-wide pool
      * SparsityManager uses for non-batched pushes -- see sparsitymanager.h),
-     * copied to the device in the single combined transfer
-     * submit_reconstruct_kernel_batched issues instead of one small H2D copy
-     * per member per tensor.
+     * and queue nine direct copies per member -- from each staged slice
+     * straight to that tensor's own device buffer, which coincides exactly
+     * with where its inline sparsity bitfield starts (see
+     * submit_grouped_copy's comment) -- as entries in slot.extra_dsts/
+     * extra_srcs/extra_sizes. No scatter kernel needed:
+     * submit_reconstruct_kernel_batched's single submit_grouped_copy call
+     * carries these straight to their final destinations alongside
+     * slot.args/slot.offsets.
      *
      * Flattening: each member also passes its own n_nonzero (get<8>())
      * through coop() -- already computed independently of batching,
@@ -650,21 +611,27 @@ namespace mra {
       constexpr size_type num_children = Key<NDIM>::num_children();
 
       const std::size_t nb = batch.size();
-      auto& pool = registry.get(ttg::device::current_device());
+      const int device = ttg::device::current_device();
+      auto& pool = registry.get(device);
 
       // Args/offsets regions sized to a fixed upper bound (max_batch_size,
-      // +1 for offsets), and the sparsity region to
+      // +1 for offsets), and the sparsity staging region to
       // (num_children+1)*max_batch_size*total_functions bytes (every member
       // contributes at most (num_children+1)*total_functions bytes) -- not
-      // the exact sizes needed this launch -- so the slot's three device
-      // buffers are each allocated once, on first use, and never resized
-      // after that.
+      // the exact sizes needed this launch -- so the slot's device buffers
+      // are each allocated once, on first use, and never resized after that.
       const size_type max_sparsity_bytes =
           (num_children + 1) * static_cast<size_type>(registry.get_max_batch_size()) * total_functions;
       auto& slot = pool.acquire(registry.get_max_batch_size(), registry.get_max_batch_size() + 1, max_sparsity_bytes);
       slot.args.clear();
       slot.offsets.resize(nb + 1);
       slot.offsets[0] = 0;
+      slot.extra_dsts.clear();
+      slot.extra_srcs.clear();
+      slot.extra_sizes.clear();
+      slot.extra_dsts.reserve((num_children + 1) * nb);  // r_arr[0..7] + result destination per member
+      slot.extra_srcs.reserve((num_children + 1) * nb);
+      slot.extra_sizes.reserve((num_children + 1) * nb);
 
       // Logical (used) sparsity-byte size for this launch varies (different
       // nodes can have different structural N), unlike the slot's capacity
@@ -723,13 +690,19 @@ namespace mra {
         for (size_type c = 0; c < num_children; ++c) {
           sparsity_to_bytes(m_r_arr_tensor[c].coeffs().sparsity(),
                             reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset + c*n]), n);
+          slot.extra_dsts.push_back(const_cast<T*>(m_r_arr_tensor[c].coeffs().buffer().device_ptr_on(device)));
+          slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset + c*n]);
+          slot.extra_sizes.push_back(n);
         }
         sparsity_to_bytes(m_result_tensor.coeffs().sparsity(),
                           reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset + num_children*n]), n);
+        slot.extra_dsts.push_back(const_cast<T*>(m_result_tensor.coeffs().buffer().device_ptr_on(device)));
+        slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset + num_children*n]);
+        slot.extra_sizes.push_back(n);
 
         slot.args.emplace_back(m_key, m_node_view, m_tmp.current_device_ptr(),
                                m_from_parent_view, m_r_arr, m_result_view,
-                               n, sparsity_offset);
+                               n);
         sparsity_offset += (num_children + 1) * n;
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;

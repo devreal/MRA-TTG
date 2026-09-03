@@ -649,8 +649,9 @@ namespace mra {
 
         // No host zero-fill needed: entries the compute kernel doesn't visit
         // are finalized to 0 device-side instead -- convolution_kernel's own
-        // tail pass for the unbatched path, convolution_scatter_sparsity_kernel
-        // for the batched path (see their comments in kernels/convolution.h).
+        // tail pass for the unbatched path, a queued zero-fill copy from
+        // submit_convolution_batch_leader for the batched path (see their
+        // comments in kernels/convolution.h).
         DenseTensor<T, 1> resnorms(N, ttg::scope::Allocate);
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
@@ -692,16 +693,18 @@ namespace mra {
           // batch mate may have entirely different operator data -- see the
           // batching-support comment on ConvolutionBatchArg in kernels/convolution.h.
           // out.coeffs() (the real tensor, not just its view) travels through
-          // too, so the batch leader can read its sparsity and aggregate every
-          // member's bytes into one pinned buffer + one H2D copy instead of
-          // each member pushing its own via SparsityManager here. n_nonzero
-          // (this member's own, computed above independent of batching)
-          // travels through as well, so the leader can flatten every
-          // member's own non-zero work items into one combined 1D launch
-          // (see submit_convolution_batch_leader).
+          // too, so the batch leader can read its sparsity and queue a direct
+          // copy into its own device buffer instead of each member pushing
+          // its own via SparsityManager here. n_nonzero (this member's own,
+          // computed above independent of batching) travels through as well,
+          // so the leader can flatten every member's own non-zero work items
+          // into one combined 1D launch. resnorms (the real tensor, not just
+          // resnorms_view) travels through too, so the leader can likewise
+          // queue a direct zero-fill copy into its own device buffer (see
+          // submit_convolution_batch_leader).
           auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
                                                                   transr, transs, opnorms_view, tol, at, out.coeffs(),
-                                                                  n_nonzero);
+                                                                  n_nonzero, resnorms);
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
           detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, total_functions);
         } else
@@ -882,8 +885,9 @@ namespace mra {
       if (last_key) {
         // No host zero-fill needed: entries the compute kernel doesn't visit
         // are finalized to 0 device-side instead -- convolution_kernel's own
-        // tail pass for the unbatched path, convolution_scatter_sparsity_kernel
-        // for the batched path (see their comments in kernels/convolution.h).
+        // tail pass for the unbatched path, a queued zero-fill copy from
+        // submit_convolution_batch_leader for the batched path (see their
+        // comments in kernels/convolution.h).
         resnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
       }
 #ifndef MRA_ENABLE_HOST
@@ -916,16 +920,19 @@ namespace mra {
         // batch mate may have entirely different operator data -- see the
         // batching-support comment on ConvolutionBatchArg in kernels/convolution.h.
         // out.coeffs() (the real tensor, not just its view) travels through
-        // too, so the batch leader can read its sparsity and aggregate every
-        // member's bytes into one pinned buffer + one H2D copy instead of
-        // each member pushing its own via SparsityManager here. n_nonzero
-        // (this member's own, computed above independent of batching)
-        // travels through as well, so the leader can flatten every
-        // member's own non-zero work items into one combined 1D launch
-        // (see submit_convolution_batch_leader).
+        // too, so the batch leader can read its sparsity and queue a direct
+        // copy into its own device buffer instead of each member pushing its
+        // own via SparsityManager here. n_nonzero (this member's own,
+        // computed above independent of batching) travels through as well,
+        // so the leader can flatten every member's own non-zero work items
+        // into one combined 1D launch. resnorms (the real tensor, not just
+        // resnorms_view -- empty unless last_key, same as resnorms_view)
+        // travels through too, so the leader can likewise queue a direct
+        // zero-fill copy into its own device buffer (see
+        // submit_convolution_batch_leader).
         auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
                                                                        transr, transs, opnorms_view, tol, at, out.coeffs(),
-                                                                       n_nonzero);
+                                                                       n_nonzero, resnorms);
         // followers: the leader's batched launch already wrote our slice of out/resnorms.
         detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, total_functions);
       } else
