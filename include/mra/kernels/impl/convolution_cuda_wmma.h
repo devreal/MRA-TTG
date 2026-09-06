@@ -1,7 +1,6 @@
 #ifndef MRA_KERNELS_IMPL_CONVOLUTION_CUDA_WMMA_H
 #define MRA_KERNELS_IMPL_CONVOLUTION_CUDA_WMMA_H
 
-#include "mra/misc/stacked_allocator.h"
 #include "mra/misc/types.h"
 #include "mra/tensor/tensorview.h"
 
@@ -76,8 +75,7 @@ namespace mra {
       const ViewTrans& trans,
       const ViewOpnorms& opnorms,
       ViewF& f,
-      ViewResult& result,  // size K, stores the sum
-      mra::BlockStackAllocator& smem_allocator
+      ViewResult& result  // size K, stores the sum
       )
     {
       using mma = mma_traits<T>;
@@ -113,7 +111,6 @@ namespace mra {
       /**
        * Allocate shared memory for the intermediates results to rotate.
        */
-      //auto c_smem = smem_allocator.template alloc<T>(K3);
       extern __shared__ T c_smem[];
 
 

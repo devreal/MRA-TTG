@@ -34,6 +34,7 @@ class BlockStackAllocator {
     }
 #else // HAVE_DEVICE_ARCH
     char* get_arena() {
+      static char* m_arena = nullptr;
       if (!m_arena) {
         m_arena = new char[m_capacity];
       }
