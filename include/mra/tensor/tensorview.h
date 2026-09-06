@@ -936,7 +936,13 @@ namespace mra {
   requires concepts::DenseTensorView<U, TV::ndim()>
   SCOPE TensorSlice<TV>& TensorSlice<TV>::operator=(const U& view)
   {
-    foreach_idx(*this, [&](size_type i){ this->operator[](i) = view[i]; });
+    if (view.data() == nullptr) {
+      // source is a dummy/empty view (e.g. a zero child block) -- write zero
+      // instead of dereferencing its null storage.
+      foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
+    } else {
+      foreach_idx(*this, [&](size_type i){ this->operator[](i) = view[i]; });
+    }
     return *this;
   }
 
