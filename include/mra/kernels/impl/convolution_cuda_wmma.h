@@ -278,8 +278,7 @@ namespace mra {
       ViewF& f,
       ViewF0& f0,
       ViewResultc& resultc,
-      ViewResult& result,  // size K, stores the sum
-      mra::BlockStackAllocator& smem_allocator)
+      ViewResult& result)  // size K, stores the sum
     {
 #ifdef MRA_HAVE_MMA
       if constexpr (mra::is_ct_integral_v<decltype(K)>) {
@@ -292,7 +291,7 @@ namespace mra {
         if (at[0]) {
           apply_conv_k<T, NDIM, NormId::Rnorm>(
                       opid, mra::Int<2>{}*K, rank, optol, transr, opnorms,
-                      f, result, smem_allocator);
+                      f, result);
         } else {
           result = 0.0;
         }
@@ -300,7 +299,7 @@ namespace mra {
         if (at[1]) {
           apply_conv_k<T, NDIM, NormId::Snorm>(
                       opid, K, rank, optol, transs, opnorms,
-                      f0, resultc, smem_allocator);
+                      f0, resultc);
         } else {
           resultc = 0.0;
         }
