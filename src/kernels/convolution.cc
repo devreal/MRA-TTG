@@ -25,7 +25,7 @@ namespace mra {
     double* tmp,
     ttg::device::Stream stream);
 
-
+#ifndef MRA_ENABLE_HOST
   template
   void submit_convolution_kernel_batched<double, 3>(
     detail::GroupedBatchPool<detail::ConvolutionBatchArg<double, 3>>& pool,
@@ -34,6 +34,7 @@ namespace mra {
     size_type K,
     const double fac,
     ttg::device::Stream stream);
+#endif // !MRA_ENABLE_HOST
 
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 

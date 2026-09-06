@@ -18,7 +18,6 @@
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
-#include "mra/misc/stacked_allocator.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
@@ -203,8 +202,7 @@ namespace mra{
       ViewResultc& resultc,
       ViewResult& result,  // size K, stores the sum
       ViewWork1& work1,
-      ViewWork2& work2,
-      mra::BlockStackAllocator& smem_allocator)
+      ViewWork2& work2)
     {
       using dims_k_type = decltype(make_dims<NDIM>(K));
       using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
@@ -223,7 +221,7 @@ namespace mra{
 
       // TODO: do we care about modified() operators?
       auto accel_done = mra::accel::apply_conv<T, NDIM>(opid, K, optol, transr, transs, opnorms, at, f, f0,
-                                 resultc, result, smem_allocator);
+                                 resultc, result);
       if (!accel_done) {
 
         result = 0.0;
@@ -320,14 +318,13 @@ namespace mra{
       const T cnorm = mra::normf(f);
       T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
       auto smem_size = detail::apply_conv_shmem_size<T>(2*K);
-      mra::BlockStackAllocator smem_allocator(smem_size);
 
       //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
         apply_conv<T, NDIM>(opid, K, (tol / fac / cnorm), transr, transs,
                    opnorms, at, f, f0, resultc,
-                   result, work1, work2, smem_allocator);
+                   result, work1, work2);
       } else {
         result = 0.0;
       }
@@ -1025,6 +1022,7 @@ namespace mra{
     double* tmp,
     ttg::device::Stream stream);
 
+#ifndef MRA_ENABLE_HOST
   extern template
   void submit_convolution_kernel_batched<double, 3>(
     detail::GroupedBatchPool<detail::ConvolutionBatchArg<double, 3>>& pool,
@@ -1033,6 +1031,7 @@ namespace mra{
     size_type K,
     const double fac,
     ttg::device::Stream stream);
+#endif // !MRA_ENABLE_HOST
 
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
