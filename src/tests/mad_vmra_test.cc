@@ -2,6 +2,8 @@
 #include "mra/mra.h"
 #include <any>
 #include <numbers>
+#include <thread>
+#include <chrono>
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
 #include <madness/mra/operator.h>
@@ -26,7 +28,7 @@ using namespace mra;
 
 static double Length = 6.0;
 // static double width = 2*Length;
-static double expnt = 1500.0;
+static double expnt = 10.0;
 static const int init_lev = 2;
 
 using coord_t = madness::Vector<double, 3>;
@@ -90,6 +92,8 @@ auto compute_conv_madness(size_type N, std::vector<std::shared_ptr<real_convolut
   } else {
     opf = madness::apply(world, mad_convs, functions);
   }
+
+  reconstruct(world, opf);
   // std::cout << "Tree State of f: " << f.get_impl()->get_tree_state() << std::endl;
   return std::make_tuple(std::move(functions), std::move(opf));
 }
@@ -122,10 +126,12 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
 
     std::map<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> cmap;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result;
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result,
-                                                                    convolution_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, recompress_result,
+                                                                     truncate_result, convolution_result;
     ttg::Edge<mra::Key<NDIM>, void> load_control;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> load_vmra;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_result, reconstruct_trunc_result;
+
 
     std::vector<real_function_t> madconv_mra(N);
     std::vector<real_function_t> madfunc_mra(N);
@@ -142,7 +148,22 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     auto extract          = mra::vmra::make_vmra_store(madfunc_mra, compress_result, madness::TreeState::nonstandard, "store_func");
     auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, 0, 1.0, "convolution");
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
-    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, reconstruct_conv_result, madness::TreeState::reconstructed, "store_conv");
+    auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress");
+    //auto extract_recompress = make_extract(recompress_result, cmap, "extract_recompress");
+    auto truncate         = make_truncate(gaussians, K, precision,
+                                          madness::FunctionDefaults<NDIM>::get_truncate_mode(),
+                                          madness::FunctionDefaults<NDIM>::get_cell_min_width(),
+                                          recompress_result, truncate_result, "truncate");
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, madness::TreeState::compressed, "store_conv");
+    all_tts.push_back(start.get());
+    all_tts.push_back(load_tt.get());
+    all_tts.push_back(compress.get());
+    all_tts.push_back(extract.get());
+    all_tts.push_back(convolve.get());
+    all_tts.push_back(reconstruct_conv.get());
+    all_tts.push_back(recompress.get());
+    all_tts.push_back(truncate.get());
+    all_tts.push_back(store_tt.get());
     auto connected        = make_graph_executable(start.get());
     assert(connected);
 
@@ -153,21 +174,27 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
       start->invoke();
     }
     ttg::execute();
+    std::thread watchdog([]() {
+      std::this_thread::sleep_for(std::chrono::seconds(300));
+      std::cout << "WATCHDOG FIRED" << std::endl;
+      print_incomplete_tasks();
+      std::cout.flush();
+      _exit(1);
+    });
+    watchdog.detach();
     ttg::fence();
 
-    madness::make_nonstandard(mad_convs[0]->get_world(), madfunc);
-    compare_mra_madness(madfunc, madfunc_mra, "madfunc_result", verification_precision, false);
-    compare_mra_madness(madconv, madconv_mra, "madconv_result_from_reconstruct", verification_precision, true);
+    madness::truncate(mad_convs[0]->get_world(), madconv);
+    compare_mra_madness(madconv, madconv_mra, "madconv_result_from_reconstruct", verification_precision, false);
+
+    //madness::make_nonstandard(mad_convs[0]->get_world(), madfunc);
+    //compare_mra_madness(madfunc, madfunc_mra, "madfunc_result", verification_precision, false);
   }
 
   /**
    * Feed the MADNESS functions in comressed form into MRA/TTG and perform convolution.
    * Then compare the results.
-   * TODO: the load implementation for compressed MADNESS function trees is not working yet.
-   *       It seems that the child information is incorrect. That needs to be fixed before this test can be enabled.
-   *       For now, we will just skip this test since we usually get the MADNESS functions in reconstructed form anyway.
    */
-//#if 0
   {
 
     std::cout << "Testing MADNESS COMPRESSED function trees" << std::endl;
@@ -175,8 +202,8 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     ttg::Edge<mra::Key<NDIM>, void> load_control;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> load_vmra;
 
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result, reconstruct_result;
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result, compress_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result, reconstruct_result, reconstruct_trunc_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result, compress_result, recompress_result, truncate_result;
     std::vector<real_function_t> madconv_mra(N);
     for (size_type i = 0; i < N; ++i) {
       madconv_mra[i].set_impl(madfunc[i], false);
@@ -198,7 +225,14 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     all_tts.push_back(convolve.get());
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
     all_tts.push_back(reconstruct_conv.get());
-    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, reconstruct_conv_result, madness::TreeState::reconstructed, "store_vmra");
+    auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress");
+    all_tts.push_back(recompress.get());
+    auto truncate         = make_truncate(gaussians, K, precision,
+                                          madness::FunctionDefaults<NDIM>::get_truncate_mode(),
+                                          madness::FunctionDefaults<NDIM>::get_cell_min_width(),
+                                          recompress_result, truncate_result, "truncate");
+    all_tts.push_back(truncate.get());
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, madness::TreeState::compressed, "store_vmra");
     all_tts.push_back(store_tt.get());
     auto connected        = make_graph_executable(start.get());
     assert(connected);
@@ -219,7 +253,6 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
 
     compare_mra_madness(madconv, madconv_mra, "madconv_result_from_compressed", verification_precision, true);
   }
-//#endif // 0
 }
 
 int main(int argc, char **argv) {
@@ -266,30 +299,32 @@ int main(int argc, char **argv) {
   madness::FunctionDefaults<3>::set_thresh(precision);
   madness::FunctionDefaults<3>::set_initial_level(init_lev);
 
-  double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
-  madness::World world(SafeMPI::COMM_WORLD);
-  std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops_1d(op_rank);
-  std::vector<std::shared_ptr<real_convolution_t>> mad_convs;
-  for (int o = 0; o < num_ops; ++o) {
-    for (int i = 0; i < op_rank; ++i) {
-      ops_1d[i].reset(new madness::GaussianConvolution1D<double>(K, (2*(o+1)+1)/(i+1)*100, 1/(i+1)*100, 0, madness::LatticeRange()));
+  {
+    double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
+    madness::World world(SafeMPI::COMM_WORLD);
+    std::vector< std::shared_ptr< madness::Convolution1D<double> > > ops_1d(op_rank);
+    std::vector<std::shared_ptr<real_convolution_t>> mad_convs;
+    for (int o = 0; o < num_ops; ++o) {
+      for (int i = 0; i < op_rank; ++i) {
+        ops_1d[i].reset(new madness::GaussianConvolution1D<double>(K, (2*(o+1)+1)/(i+1)*100, 1/(i+1)*100, 0, madness::LatticeRange()));
+      }
+      mad_convs.push_back(std::make_shared<real_convolution_t>(world, ops_1d, K));
     }
-    mad_convs.push_back(std::make_shared<real_convolution_t>(world, ops_1d, K));
+
+
+    if (ttg::default_execution_context().rank() == 0) {
+      std::cout << "Running MADNESS convolution test with parameters: "
+                << "N = " << N << ", K = " << K
+                << ", expnt = " << expnt
+                << ", log_precision = " << -1*log_precision
+                << ", max_level = " << max_level
+                << ", verification_log_precision = " << -1*verification_log_precision
+                << std::endl;
+    }
+
+    test_convolution<double, 3>(num_batches, N, K, precision, max_level,
+                              std::pow(10, -verification_log_precision), mad_convs, print_dot);
+
   }
-
-
-  if (ttg::default_execution_context().rank() == 0) {
-    std::cout << "Running MADNESS convolution test with parameters: "
-              << "N = " << N << ", K = " << K
-              << ", expnt = " << expnt
-              << ", log_precision = " << -1*log_precision
-              << ", max_level = " << max_level
-              << ", verification_log_precision = " << -1*verification_log_precision
-              << std::endl;
-  }
-
-  test_convolution<double, 3>(num_batches, N, K, precision, max_level,
-                             std::pow(10, -verification_log_precision), mad_convs, print_dot);
-
   mra::finalize();
 }

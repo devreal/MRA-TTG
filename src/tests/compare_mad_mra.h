@@ -240,7 +240,7 @@ namespace mra {
         if (std::abs(norm1 - norm2) > precision) {
           std::cout << name << ": node " << node1.first << " in MADNESS function " << i
                     << " has norm " << norm1 << " in vector 1 but norm " << norm2 << " in vector 2 (absdiff "
-                    << std::abs(norm1 - norm2) << ")" << std::endl;
+                    << std::abs(norm1 - norm2) << "), precision " << precision << std::endl;
           check = false;
           continue;
         }

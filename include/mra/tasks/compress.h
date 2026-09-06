@@ -128,15 +128,6 @@ namespace mra
         // create empty, may be reset if needed
         mra::FunctionsReconstructedNode<T, NDIM> p(key, N);
 
-        //std::cout << name << " in " << in << std::endl;
-        //std::cout << name << " in0 " << in0 << std::endl;
-        //std::cout << name << " in1 " << in1 << std::endl;
-        //std::cout << name << " in2 " << in2 << std::endl;
-        //std::cout << name << " in3 " << in3 << std::endl;
-        //std::cout << name << " in4 " << in4 << std::endl;
-        //std::cout << name << " in5 " << in5 << std::endl;
-        //std::cout << name << " in6 " << in6 << std::endl;
-        //std::cout << name << " in7 " << in7 << std::endl;
 
 
         /* check if all inputs are empty */
