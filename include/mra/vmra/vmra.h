@@ -277,7 +277,7 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
   }
 
   auto store_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
-    [&vmra](const mra::Key<NDIM>& key, const NodeT& node) {
+    [&vmra, add_leaves](const mra::Key<NDIM>& key, const NodeT& node) {
       const auto mad_key = key.to_madness_key();
       const size_type N   = vmra.size();
       const size_type K   = vmra.front().get_impl()->get_k();
