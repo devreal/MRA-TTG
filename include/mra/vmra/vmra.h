@@ -250,11 +250,18 @@ namespace detail {
  * (marked via is_child_leaf in the parent) are not stored in MRA and must be separately
  * inserted into MADNESS if a fully populated tree is required.
  *
- * TODO: do we store the empty leaf nodes in MADNESS compressed form?
+ * \param vmra Vector of MADNESS functions to store into.
+ * \param in Input edge carrying MRA FunctionNodes.
+ * \param add_leaves If true, add empty leaves for compressed nodes. MRA does not store
+ *                   them but MADNESS sometimes does.
+ * \param tree_state The MADNESS TreeState to set for each function. Defaults to the state
+ *                   derived from the node type.
+ * \param name Name of the TTG task.
  */
 template<typename T, Dimension NDIM, typename NodeT>
 auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
                      ttg::Edge<mra::Key<NDIM>, NodeT>& in,
+                     bool add_leaves = false,
                      madness::TreeState tree_state = detail::madfunc_state_v<NodeT>,
                      const std::string& name = "vmra_store") {
 
@@ -327,7 +334,7 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
          * Instantiate them explicitly.
          */
         if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
-          if (!node.is_zero(fnid)) {
+          if (add_leaves && !node.is_zero(fnid)) {
             for (auto child : children(key)) {
               if (node.is_child_leaf(fnid, child)) {
                 const auto mad_child_key = child.to_madness_key();

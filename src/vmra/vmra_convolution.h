@@ -42,7 +42,7 @@ namespace mra::vmra {
                                                   op, "convolution");
     auto reconstruct_tt   = mra::make_reconstruct(gaussians, K, functiondata, convolution_to_reconstruct,
                                                   reconstruct_to_store, "reconstruct_vmra");
-    auto store_tt         = mra::make_vmra_store(result, reconstruct_to_store, "store_vmra");
+    auto store_tt         = mra::make_vmra_store(result, reconstruct_to_store, true);
 
 
     /**

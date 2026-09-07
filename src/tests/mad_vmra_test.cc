@@ -145,7 +145,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     auto start            = make_start(gaussians, load_control);
     auto load_tt          = mra::vmra::make_vmra_load(madfunc, load_control, load_vmra, "load_vmra");
     auto compress         = make_compress(gaussians, K, true, functiondata, load_vmra, compress_result, "compress");
-    auto extract          = mra::vmra::make_vmra_store(madfunc_mra, compress_result, madness::TreeState::nonstandard, "store_func");
+    auto extract          = mra::vmra::make_vmra_store(madfunc_mra, compress_result, true, madness::TreeState::nonstandard, "store_func");
     auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, 0, 1.0, "convolution");
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
     auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress");
@@ -154,7 +154,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
                                           madness::FunctionDefaults<NDIM>::get_truncate_mode(),
                                           madness::FunctionDefaults<NDIM>::get_cell_min_width(),
                                           recompress_result, truncate_result, "truncate");
-    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, madness::TreeState::compressed, "store_conv");
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, false, madness::TreeState::compressed, "store_conv");
     all_tts.push_back(start.get());
     all_tts.push_back(load_tt.get());
     all_tts.push_back(compress.get());
@@ -232,7 +232,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
                                           madness::FunctionDefaults<NDIM>::get_cell_min_width(),
                                           recompress_result, truncate_result, "truncate");
     all_tts.push_back(truncate.get());
-    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, madness::TreeState::compressed, "store_vmra");
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, false, madness::TreeState::compressed, "store_vmra");
     all_tts.push_back(store_tt.get());
     auto connected        = make_graph_executable(start.get());
     assert(connected);
