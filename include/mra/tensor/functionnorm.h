@@ -56,11 +56,9 @@ namespace mra {
         for (int i = 0; i < m_nodes.size(); ++i) {
           auto& node = *m_nodes[i];
           if (!node.empty()){
-            size_type dbg_nnz = std::as_const(node).sparsity().count_nonzero();
-            std::cout << "FUNCTIONNORMS-DEBUG " << m_name << " i=" << i << " key=" << node.key()
-                      << " count()=" << node.count() << " nnz=" << dbg_nnz << std::endl;
+            //std::cout << "norm compute " << m_name << " " << i << " " << node.key() << std::endl;
             submit_simple_norm_kernel(node.key(), node.coeffs().current_view(), node.count(),
-                                      dbg_nnz, m_norms.current_view()(i));
+                                      m_norms.current_view()(i));
           }
         }
       }
