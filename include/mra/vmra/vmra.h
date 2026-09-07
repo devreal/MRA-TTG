@@ -231,7 +231,7 @@ namespace detail {
    * Helper to map a node type to a MADNESS TreeState.
    */
   template<typename NodeT>
-  struct madfunc_state : std::conditional_t<std::is_same_v<NodeT, FunctionsCompressedNode<typename NodeT::value_type, NodeT::NDIM>>,
+  struct madfunc_state : std::conditional_t<std::is_same_v<NodeT, FunctionsCompressedNode<typename NodeT::value_type, NodeT::ndim()>>,
                      std::integral_constant<madness::TreeState, madness::TreeState::compressed>,
                      std::integral_constant<madness::TreeState, madness::TreeState::reconstructed>> {};
 
