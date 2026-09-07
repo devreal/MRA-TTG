@@ -42,8 +42,6 @@ namespace mra {
         }
         SYNCTHREADS();
         bool keep;
-        assert(!node.is_zero(blockid) &&
-               "blockid must have node non-zero -- find_nth_nonzero only returns non-zero ids");
         {
           bool any_child_nonzero = false;
           for (size_type c = 0; c < num_children; ++c) {
