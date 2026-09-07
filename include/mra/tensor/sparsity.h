@@ -62,6 +62,23 @@ namespace mra {
       }
     }
 
+
+    template<typename ViewT, typename PredT>
+    SCOPE size_type find_nth_pred(size_type N, size_type pos,
+                                  const ViewT& view, PredT&& pred) {
+      size_type count = 0;
+      for (size_type i = 0; i < N; ++i) {
+        if (pred(view, i)) {
+          if (count == pos) {
+            return i;
+          }
+          ++count;
+        }
+      }
+      assert(false && "find_nth_nonzero: pos out of range for the number of non-zero entries in view");
+      return N;
+    }
+
     /**
      * Finds the function id of the `pos`-th non-zero entry in `view`'s
      * sparsity (0-indexed among non-zero entries), by a linear scan over
@@ -77,17 +94,12 @@ namespace mra {
      */
     template<typename ViewT>
     SCOPE size_type find_nth_nonzero(size_type N, size_type pos, const ViewT& view) {
-      size_type count = 0;
-      for (size_type i = 0; i < N; ++i) {
-        if (view.is_nonzero(i)) {
-          if (count == pos) {
-            return i;
-          }
-          ++count;
-        }
-      }
-      assert(false && "find_nth_nonzero: pos out of range for the number of non-zero entries in view");
-      return N;
+      return find_nth_pred(N, pos, view, [](const ViewT& v, size_type i) { return v.is_nonzero(i); });
+    }
+
+    template<typename ViewT>
+    SCOPE size_type find_nth_allocated(size_type N, size_type pos, const ViewT& view) {
+      return find_nth_pred(N, pos, view, [](const ViewT& v, size_type i) { return v.is_allocated(i); });
     }
 
     /**

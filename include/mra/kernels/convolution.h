@@ -374,7 +374,7 @@ namespace mra{
       // Excluded (zero) functions' resnorms entries are pre-filled with
       // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
       // them here.
-      i = find_nth_nonzero(N, tmp_pos, result_view);
+      i = find_nth_allocated(N, tmp_pos, result_view);
 
       const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
       const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
@@ -395,7 +395,7 @@ namespace mra{
      * convolution_kernel_batched further down -- there is exactly one copy of
      * this logic to maintain instead of two near-identical grid-stride loops.
      * Returns the function index `i` it just processed (found via
-     * find_nth_nonzero inside convolution_process_one_leader; same value on
+     * find_nth_allocated inside convolution_process_one_leader; same value on
      * every thread in the block, courtesy of the SHARED `i`), so both callers
      * can demote result_view's sparsity state for that position right after
      * the call, on the same team-lead thread that just wrote resnorms[i], if
@@ -465,7 +465,7 @@ namespace mra{
      * before convolution_kernel below, on the same stream -- see
      * compress_verify_sparsity_kernel's comment (mra/kernels/compress.h) for
      * why this must not be inlined into convolution_kernel itself (a
-     * same-launch race against find_nth_nonzero's assert in other blocks
+     * same-launch race against find_nth_allocated's assert in other blocks
      * would let this check's own diagnostic go unprinted).
      *
      * n_nonzero was computed host-side (mra/tasks/convolution.h's `sparsity`,
@@ -703,7 +703,7 @@ namespace mra{
      * -- cheap since num_members is small); convolution_process_one's team
      * lead then turns that local position into a real function id via an
      * on-device scan of that member's own result_view sparsity
-     * (find_nth_nonzero). This makes convolution_kernel_batched a thin
+     * (find_nth_allocated). This makes convolution_kernel_batched a thin
      * wrapper: look up one work item and hand off to the exact same
      * per-(node, function) body convolution_kernel itself uses
      * (convolution_process_one, defined above with convolution_kernel_impl).
