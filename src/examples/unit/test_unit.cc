@@ -25,7 +25,8 @@ void test(std::size_t N, std::size_t K, int max_level) {
 
   ttg::Edge<mra::Key<NDIM>, void> project_control;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> project_result, reconstruct_result, multiply_result;
-  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, gaxpy_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> truncate_reconstructed_result;
+  ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, gaxpy_result, truncate_result;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> derivative_result;
 
   // define N Gaussians
@@ -55,6 +56,7 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto printer2 =  make_printer(compress_result,   "compressed   ", false);
   auto printer3 =  make_printer(reconstruct_result,"reconstructed", false);
   auto printer4 = make_printer(gaxpy_result, "gaxpy", false);
+  auto printer7 = make_printer(truncate_result, "truncate", false);
   auto printer5 = make_printer(multiply_result, "multiply", false);
   auto printer6 = make_printer(derivative_result, "derivative", false);
 
