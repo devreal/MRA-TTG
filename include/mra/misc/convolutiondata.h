@@ -1,6 +1,7 @@
 #ifndef MRA_CONVOLUTIONDATA_H
 #define MRA_CONVOLUTIONDATA_H
 
+#include "mra/ops/functions.h"
 #include "mra/ops/inner.h"
 #include "mra/misc/gl.h"
 #include "mra/misc/functiondata.h"

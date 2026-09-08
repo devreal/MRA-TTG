@@ -9,6 +9,7 @@
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
 #include "mra/misc/functionset.h"
+#include "mra/ops/functions.h"
 #include "mra/tensor/sparsitymanager.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/tensorview.h"

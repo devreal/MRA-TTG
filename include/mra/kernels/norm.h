@@ -4,6 +4,7 @@
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
+#include "mra/ops/functions.h"
 #include "mra/tensor/tensorview.h"
 
 namespace mra {
