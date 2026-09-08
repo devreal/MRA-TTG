@@ -3,6 +3,7 @@
 
 #include <ttg.h>
 #include "mra/kernels.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/functionset.h"
@@ -54,6 +55,27 @@ namespace mra {
     using kept_tensor_type = mra::DenseTensor<T, 1>;
     static constexpr const auto num_children = mra::Key<NDIM>::num_children();
 
+    // Batching is controlled process-wide via mra::set_batch_size(), not per
+    // call here -- see mra/misc/batch_size.h and mra/tasks/compress.h (same
+    // pattern). truncate has no operator data at all -- tol itself is
+    // per-member (it depends on each member's own key.level()) -- so, like
+    // simple_norm, batching here is unrestricted from the start.
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_truncate_batching = mra::batching_enabled();
+
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::TruncateBatchArg<T, NDIM>>> truncate_pool;
+    if (enable_truncate_batching) {
+      truncate_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::TruncateBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+    }
+#else
+    // GroupedBatchPoolRegistry only exists on device builds; this placeholder
+    // only exists so the (shared host/device) truncate_fn lambda below can
+    // unconditionally list truncate_pool in its capture list -- it is never
+    // accessed on host builds.
+    std::nullptr_t truncate_pool = nullptr;
+#endif // MRA_ENABLE_HOST
+
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> node_e;
     ttg::Edge<mra::Key<NDIM>, kept_tensor_type> kept_e0, kept_e1, kept_e2, kept_e3,
                                                 kept_e4, kept_e5, kept_e6, kept_e7;
@@ -104,7 +126,8 @@ namespace mra {
      * Always forwards the (possibly truncated) node to `out`, and forwards
      * its own post-decision "kept" signal up to the parent (unless at the root).
      */
-    auto truncate_fn = [fns, K, thresh, truncate_mode, cell_min_width, name](
+    auto truncate_fn = [fns, K, thresh, truncate_mode, cell_min_width, name,
+                        enable_truncate_batching, truncate_pool](
                             const mra::Key<NDIM>& key,
                             const kept_tensor_type& child0, const kept_tensor_type& child1,
                             const kept_tensor_type& child2, const kept_tensor_type& child3,
@@ -141,8 +164,22 @@ namespace mra {
 
       auto node_view = node.coeffs().current_view();
       auto kept_view = kept.current_view();
-      submit_truncate_kernel(key, node_view, kept_view, child_kept, N, tol,
-                            ttg::device::current_stream());
+
+#ifndef MRA_ENABLE_HOST
+      if (enable_truncate_batching) {
+        // truncate has no operator data at all -- not even tol is shared
+        // across members (it depends on each member's own key.level()) --
+        // so batching here is unrestricted. No upfront nonzero detection
+        // either: the leader launches N blocks per member, same as the
+        // unbatched path just below.
+        auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view, kept_view, child_kept, N, tol);
+        detail::submit_truncate_batch_leader<T, NDIM>(batch, *truncate_pool);
+      } else
+#endif // MRA_ENABLE_HOST
+      {
+        submit_truncate_kernel(key, node_view, kept_view, child_kept, N, tol,
+                              ttg::device::current_stream());
+      }
 
 #ifndef MRA_ENABLE_HOST
       // make sure the children are available on the host
@@ -218,6 +255,17 @@ namespace mra {
       dispatch_tt->set_devicemap(devicemap);
       truncate_tt->set_devicemap(devicemap);
     }
+
+#ifndef MRA_ENABLE_HOST
+    if (enable_truncate_batching) {
+      // Unrestricted matcher: any two truncate_tt tasks may batch together,
+      // regardless of level or position -- see the batching-support comment
+      // in mra/kernels/truncate.h for why.
+      truncate_tt->set_batch_matcher(
+          [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+          max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(dispatch_tt->template in<0>());
     auto outs = std::make_tuple(truncate_tt->template out<8>());

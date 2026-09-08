@@ -137,12 +137,23 @@ namespace mra {
     if (enable_conv_batching) {
       conv_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
     }
+    // Separate pool/registry for norm_tt's simple_norm kernel: its own
+    // SimpleNormBatchArg<T,NDIM> element type differs from
+    // ConvolutionBatchArg<T,NDIM>, so it cannot share conv_pool -- see
+    // mra/kernels/simple_norm.h's batching-support comment. Driven by the
+    // same process-wide enable_conv_batching/max_batch_size, since norm_tt
+    // is unrestricted-batchable exactly like the other tasks here.
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::SimpleNormBatchArg<T, NDIM>>> simple_norm_pool;
+    if (enable_conv_batching) {
+      simple_norm_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::SimpleNormBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+    }
 #else
     // GroupedBatchPoolRegistry only exists on device builds; this placeholder only
     // exists so the (shared host/device) task lambdas below can
     // unconditionally list conv_pool in their capture list -- it is never
     // accessed on host builds.
     std::nullptr_t conv_pool = nullptr;
+    std::nullptr_t simple_norm_pool = nullptr;
 #endif // MRA_ENABLE_HOST
 
     using ChildLeafInfo = typename mra::FunctionsCompressedNode<T, NDIM>::child_info_type;
@@ -439,7 +450,28 @@ namespace mra {
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
 
-          submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, cnorms.current_view());
+          auto node_view = in_node.coeffs().current_view();
+          auto result_view = cnorms.current_view();
+
+#ifndef MRA_ENABLE_HOST
+          if (enable_conv_batching) {
+            // simple_norm has no operator data at all, so batching here is
+            // unrestricted -- see mra/kernels/simple_norm.h's
+            // batching-support comment. No upfront nonzero detection either:
+            // the leader launches N blocks per member, same as the
+            // unbatched path just below.
+            auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(node_view, result_view, N);
+            detail::submit_simple_norm_batch_leader<T, NDIM>(batch, *simple_norm_pool);
+          } else
+#endif // MRA_ENABLE_HOST
+          {
+            // submit_simple_norm_kernel's `in` parameter only binds rvalues,
+            // so pass fresh views here rather than the named node_view/
+            // result_view above (those exist only so coop(), in the
+            // batching branch, has lvalues that survive the co_await
+            // suspension).
+            submit_simple_norm_kernel(key, in_node.coeffs().current_view(), N, cnorms.current_view());
+          }
 
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::wait(cnorms.buffer());
@@ -1323,6 +1355,14 @@ namespace mra {
 
       accumulate_tt->set_batch_matcher(
           [](const detail::KeyPair<NDIM>&, const detail::KeyPair<NDIM>&) { return true; },
+          max_batch_size);
+
+      // norm_tt: unrestricted just like the two above -- simple_norm has no
+      // operator data to begin with, so there is nothing to keep uniform
+      // across a batch (see mra/kernels/simple_norm.h's batching-support
+      // comment).
+      norm_tt->set_batch_matcher(
+          [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
           max_batch_size);
     }
 #endif // MRA_ENABLE_HOST
