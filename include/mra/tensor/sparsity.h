@@ -12,7 +12,8 @@ namespace mra {
 
     template<typename T>
     SCOPE std::size_t align_to_type(std::size_t size) {
-      std::size_t mask = alignof(T) - 1;
+      //std::size_t mask = alignof(T) - 1;
+      std::size_t mask = std::max(alignof(T), static_cast<size_t>(MRA_BUFFER_ALIGNMENT)) - 1;
       return size + (-size & mask);
     }
 

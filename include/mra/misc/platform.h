@@ -171,6 +171,17 @@ namespace mra::detail {
 #define MAX_THREADS_PER_BLOCK 512
 #endif
 
+/**
+ * CUDA and HIP require minimum alignment of 128 bytes
+ * for buffers used in kernel launches.
+ * On the host, let's align them to cache lines.
+ */
+#if defined(MRA_ENABLE_HOST)
+#define MRA_BUFFER_ALIGNMENT 64
+#else
+#define MRA_BUFFER_ALIGNMENT 128
+#endif // MRA_ENABLE_HOST
+
 #if defined(MRA_ENABLE_HOST)
 using Dim3 = mra::detail::dim3;
 #else
