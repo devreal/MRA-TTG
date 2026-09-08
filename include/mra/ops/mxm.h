@@ -117,15 +117,17 @@ namespace mra {
       for (size_type i = threadIdx.y; i < dimi; i += blockDim.y) {
         cT* ci = c + i*dimj; // the row of C all threads in dim x work on
         const aT *ai_ptr = a + i*dimk;
-        if constexpr(Q) {
-          for (size_type j = threadIdx.x; j < dimj; j += blockDim.x) {
-            ci[j] = 0.0;
-          }
-        }
         for (size_type j = threadIdx.x; j < dimj; j += blockDim.x) {
-          for (long k=0; k<dimk; ++k) { /* not parallelized */
-            ci[j] += ai_ptr[k]*b[k*dimj+j];
+          cT sum;
+          if constexpr(Q) {
+            sum = 0.0;
+          } else {
+            sum = ci[j];
           }
+          for (long k=0; k<dimk; ++k) { /* not parallelized */
+            sum += ai_ptr[k]*b[k*dimj+j];
+          }
+          ci[j] = sum;
         }
       }
     }
