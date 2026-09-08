@@ -213,8 +213,8 @@ namespace mra {
       auto kept_host_view = kept.view_on(ttg::device::Device::host());
       bool keep = false;
       for (size_type i = 0; i < N; ++i) {
-        std::cout << "TRUNCATE " << key << " fnid=" << i
-                  << " kept=" << kept_host_view[i] << std::endl;
+        //std::cout << "TRUNCATE " << key << " fnid=" << i
+        //          << " kept=" << kept_host_view[i] << std::endl;
         if (kept_host_view[i] == T(0.0)) {
           node.set_zero(i);
         } else {
