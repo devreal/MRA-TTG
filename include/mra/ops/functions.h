@@ -208,18 +208,64 @@ namespace mra {
       /**
        * Reduce the contributions of each calling thread in a block into a single value.
        * On the host, we simply copy the result into the output value.
-       * This requires block_size() elements in shared memory.
+       * This requires block_size() elements in shared memory (or, if
+       * USE_SHFL_REDUCE is defined, one element per warp).
        * The block size can be controlled explicitly in case not all threads
        * contribute values.
-       *
-       * TODO: use __shfl_down_sync instead of shared memory for reduction on supported architectures.
        */
       template <typename T>
       SCOPE void reduce_block(const T input, T* output, size_type blocksize = block_size()) {
 #ifdef HAVE_DEVICE_ARCH
 
 #ifdef USE_SHFL_REDUCE
-        // TODO!
+        constexpr size_type NumWarps = MAX_THREADS_PER_BLOCK / MRA_WARP_SIZE;
+        __shared__ T sdata[NumWarps];
+        size_type tid = thread_id();
+        bool have_data = (tid < blocksize);
+        size_type warp_id = tid / MRA_WARP_SIZE;
+        size_type lane_id = tid % MRA_WARP_SIZE;
+        size_type warp_count = (blocksize + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
+
+        /* reduce within the warp -- mask must reflect exactly the threads
+         * about to execute the shuffles below (have_data), since blocksize
+         * need not be a multiple of the warp size: a fixed full mask would
+         * mismatch the set of threads actually participating for a partial
+         * last warp, which is undefined behavior for __shfl_down_sync. */
+        unsigned mask = __ballot_sync(0xffffffff, have_data);
+        if (have_data) {
+          T val = input;
+          for (int offset = 16; offset > 0; offset /= 2)
+            val += __shfl_down_sync(mask, val, offset);
+          if (lane_id == 0) {
+            sdata[warp_id] = val;
+          }
+        }
+
+        /* handle odd number of elements */
+        if (warp_count % 2 && warp_count > 1) {
+          if (tid == 0) {
+            sdata[0] += sdata[warp_count - 1];
+          }
+          SYNCTHREADS();
+        }
+
+        for (size_type s = warp_count / 2; s > 0; s /= 2) {
+          if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+          }
+          SYNCTHREADS();
+          /* handle odd sizes */
+          if (s % 2 == 1 && s > 1 && tid == 0) {
+            /* have thread 0 fold in the last (odd) element */
+            sdata[0] += sdata[s-1];
+          }
+        }
+
+        SYNCTHREADS();
+
+        // every thread returns a result
+        *output = sdata[0];
+
 
 #else // USE_SHFL_REDUCE
         __shared__ T sdata[MAX_THREADS_PER_BLOCK];
@@ -248,9 +294,9 @@ namespace mra {
           }
         }
 
-        if (tid == 0) {
-            *output = sdata[0];
-        }
+        SYNCTHREADS();
+        // every thread returns a result
+        *output = sdata[0];
         SYNCTHREADS();
 #endif // USE_SHFL_REDUCE
 #else  // HAVE_DEVICE_ARCH
@@ -302,6 +348,26 @@ namespace mra {
 #endif // HAVE_DEVICE_ARCH
       return std::sqrt(sum);
     }
+
+
+    /// Compute Frobenius norm ... still needs specializing for complex
+    template<typename T>
+    SCOPE auto normf(const T* a, size_type n) {
+      using accumulatorT = accumulator_type_t<T>;
+      accumulatorT s = 0.0;
+      for (size_type i = thread_id(); i < n; i += block_size()) {
+        accumulatorT x = a[i];
+        s += x*x;
+      }
+      accumulatorT sum = 0.0;
+      detail::reduce_block(s, &sum, std::min(n, static_cast<size_type>(block_size())));
+#ifdef HAVE_DEVICE_ARCH
+      /* wait for all threads to contribute */
+      SYNCTHREADS();
+#endif // HAVE_DEVICE_ARCH
+      return std::sqrt(sum);
+    }
+
 
     template<typename T>
     SCOPE void print(const T& t) {
