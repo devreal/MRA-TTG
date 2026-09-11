@@ -132,7 +132,7 @@ namespace mra {
     : ttvalue_type()
     , sparsity_type()
     , m_dims(create_dims_array(dim, std::make_index_sequence<NDIM>{}))
-    , m_buffer(buffer_size())
+    , m_buffer(buffer_size(), scope)
     { }
 
     template<typename... Dims, typename = std::enable_if_t<(sizeof...(Dims) > 1)>>
