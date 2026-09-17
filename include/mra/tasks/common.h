@@ -86,18 +86,47 @@ namespace mra{
     }
   }
 
-  template<mra::Dimension NDIM, typename Value, std::size_t I, std::size_t... Is>
+  /**
+   * Companion to do_send_leafs_up used by make_compress's optional in-line
+   * truncation support: forwards an empty "kept" placeholder up for the same
+   * leaf nodes do_send_leafs_up forwards `p` for. A true tree leaf has no
+   * wavelet coefficients of its own, so there is nothing to have "kept" --
+   * an empty tensor is the same "nothing here" placeholder
+   * make_truncate's own dispatch_fn synthesizes for structurally-absent
+   * children (see tasks/truncate.h).
+   */
+  template<typename T, mra::Dimension NDIM>
+  static TASKTYPE do_send_leafs_kept_up(const mra::Key<NDIM>& key, const mra::FunctionsReconstructedNode<T, NDIM>& node) {
+    if (!node.any_have_children()) {
+      mra::DenseTensor<T, 1> kept; // empty placeholder
+#ifndef MRA_ENABLE_HOST
+      co_await select_send_up(key, std::move(kept), std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "do_send_leafs_kept_up");
+#else
+      select_send_up(key, std::move(kept), std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "do_send_leafs_kept_up");
+#endif
+    }
+  }
+
+  /**
+   * `Base` shifts which output terminal this ends up sending to (terminal
+   * `Base + childindex()`), so a task with several same-shaped "send up to
+   * parent" terminal groups (e.g. compress's optional `p` and `kept` groups)
+   * can reuse this same helper for each group instead of hand-writing the
+   * childindex dispatch per group. Defaulted to 0 so existing call sites are
+   * unaffected.
+   */
+  template<std::size_t Base = 0, mra::Dimension NDIM, typename Value, std::size_t I, std::size_t... Is>
   static auto select_send_up(const mra::Key<NDIM>& key, Value&& value,
                             std::index_sequence<I, Is...>, const char *name = "select_send_up") {
     if (key.childindex() == I) {
-      //std::cout << name << "-select_send_up " << key << " sending to " << key.parent() << " on " << I << std::endl;
+      //std::cout << name << "-select_send_up " << key << " sending to " << key.parent() << " on " << (Base+I) << std::endl;
 #ifndef MRA_ENABLE_HOST
-      return ttg::device::send<I>(key.parent(), std::forward<Value>(value));
+      return ttg::device::send<Base + I>(key.parent(), std::forward<Value>(value));
 #else
-      return ttg::send<I>(key.parent(), std::forward<Value>(value));
+      return ttg::send<Base + I>(key.parent(), std::forward<Value>(value));
 #endif
     } else if constexpr (sizeof...(Is) > 0){
-      return select_send_up(key, std::forward<Value>(value), std::index_sequence<Is...>{}, name);
+      return select_send_up<Base>(key, std::forward<Value>(value), std::index_sequence<Is...>{}, name);
     }
     /* if we get here we messed up */
     throw std::runtime_error("Mismatching number of children!");

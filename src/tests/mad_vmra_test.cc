@@ -127,7 +127,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     std::map<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> cmap;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> compress_result, recompress_result,
-                                                                     truncate_result, convolution_result;
+                                                                     convolution_result;
     ttg::Edge<mra::Key<NDIM>, void> load_control;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> load_vmra;
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_result, reconstruct_trunc_result;
@@ -148,13 +148,15 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     auto extract          = mra::vmra::make_vmra_store(madfunc_mra, compress_result, true, madness::TreeState::nonstandard, "store_func");
     auto convolve         = make_convolution(gaussians, K, compress_result, convolution_result, op, precision, 0, 1.0, "convolution");
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
-    auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress");
-    //auto extract_recompress = make_extract(recompress_result, cmap, "extract_recompress");
-    auto truncate         = make_truncate(gaussians, K, precision,
+    // truncation folded directly into recompress (screens out negligible
+    // wavelet coefficients as they are produced, instead of a second
+    // make_truncate pass over the fully compressed tree)
+    auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress",
+                                          ttg::Void{}, ttg::Void{}, /*enable_truncate=*/true, precision,
                                           madness::FunctionDefaults<NDIM>::get_truncate_mode(),
-                                          madness::FunctionDefaults<NDIM>::get_cell_min_width(),
-                                          recompress_result, truncate_result, "truncate");
-    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, false, madness::TreeState::compressed, "store_conv");
+                                          madness::FunctionDefaults<NDIM>::get_cell_min_width());
+    //auto extract_recompress = make_extract(recompress_result, cmap, "extract_recompress");
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, recompress_result, false, madness::TreeState::compressed, "store_conv");
     all_tts.push_back(start.get());
     all_tts.push_back(load_tt.get());
     all_tts.push_back(compress.get());
@@ -162,7 +164,6 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     all_tts.push_back(convolve.get());
     all_tts.push_back(reconstruct_conv.get());
     all_tts.push_back(recompress.get());
-    all_tts.push_back(truncate.get());
     all_tts.push_back(store_tt.get());
     auto connected        = make_graph_executable(start.get());
     assert(connected);
@@ -203,7 +204,7 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> load_vmra;
 
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> reconstruct_conv_result, reconstruct_result, reconstruct_trunc_result;
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result, compress_result, recompress_result, truncate_result;
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> convolution_result, compress_result, recompress_result;
     std::vector<real_function_t> madconv_mra(N);
     for (size_type i = 0; i < N; ++i) {
       madconv_mra[i].set_impl(madfunc[i], false);
@@ -225,14 +226,15 @@ void test_convolution(int num_batches, std::size_t N, size_type K, T precision, 
     all_tts.push_back(convolve.get());
     auto reconstruct_conv = make_reconstruct(gaussians, K, true, functiondata, convolution_result, reconstruct_conv_result, "reconstruct_convolution");
     all_tts.push_back(reconstruct_conv.get());
-    auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress");
-    all_tts.push_back(recompress.get());
-    auto truncate         = make_truncate(gaussians, K, precision,
+    // truncation folded directly into recompress (screens out negligible
+    // wavelet coefficients as they are produced, instead of a second
+    // make_truncate pass over the fully compressed tree)
+    auto recompress       = make_compress(gaussians, K, false, functiondata, reconstruct_conv_result, recompress_result, "recompress",
+                                          ttg::Void{}, ttg::Void{}, /*enable_truncate=*/true, precision,
                                           madness::FunctionDefaults<NDIM>::get_truncate_mode(),
-                                          madness::FunctionDefaults<NDIM>::get_cell_min_width(),
-                                          recompress_result, truncate_result, "truncate");
-    all_tts.push_back(truncate.get());
-    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, truncate_result, false, madness::TreeState::compressed, "store_vmra");
+                                          madness::FunctionDefaults<NDIM>::get_cell_min_width());
+    all_tts.push_back(recompress.get());
+    auto store_tt         = mra::vmra::make_vmra_store(madconv_mra, recompress_result, false, madness::TreeState::compressed, "store_vmra");
     all_tts.push_back(store_tt.get());
     auto connected        = make_graph_executable(start.get());
     assert(connected);

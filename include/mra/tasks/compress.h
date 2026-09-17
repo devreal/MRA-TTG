@@ -40,9 +40,24 @@ namespace mra
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
     const std::string name = "compress",
     ProcMap&& procmap = {},
-    DeviceMap&& devicemap = {})
+    DeviceMap&& devicemap = {},
+    const bool enable_truncate = false,
+    const T thresh = T{},
+    const int truncate_mode = 0,
+    const T cell_min_width = T{})
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
+    /**
+     * Companion tensor type used to carry, for each function, whether a
+     * node's own wavelet coefficients survived truncation (mirrors
+     * tasks/truncate.h's kept_tensor_type) -- flows up alongside `p` so a
+     * parent's own truncation decision can see whether any child still has
+     * live wavelet mass below it. Always wired (like `is_ns` below, cost is
+     * small and independent of whether truncation is actually enabled) so
+     * there is a single implementation to maintain; `enable_truncate` only
+     * gates whether coefficients actually get dropped.
+     */
+    using kept_tensor_type = mra::DenseTensor<T, 1>;
 
     // Batching is controlled process-wide via mra::set_batch_size(), not per
     // call here -- see mra/misc/batch_size.h. Read once, at graph-construction
@@ -93,20 +108,29 @@ namespace mra
     };
 
     constexpr const std::size_t num_children = mra::Key<NDIM>::num_children();
-    // creates the right number of edges for nodes to flow from send_leafs_up to compress
+    // "kept" in/out terminals sit at num_children..2*num_children-1, right
+    // after the p terminals at 0..num_children-1 (see out_terminal_id below).
+    // creates the right number of edges for nodes ("p") to flow from send_leafs_up/compress up to the parent's compress
     // send_leafs_up will select the right input for compress
-    auto send_to_compress_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-        return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})..., filter_in);
+    auto p_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})...);
       }(std::make_index_sequence<num_children>{});
-    // output edges for the send_leafs_up tasks, one for each child
-    auto send_leaves_up_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-      return ttg::edges((std::get<Is>(send_to_compress_edges))...);
-    }(std::make_index_sequence<num_children>{});
-    /* append out edge to set of edges */
-    auto compress_out_edges = std::tuple_cat(send_leaves_up_edges, std::make_tuple(out));
+    // companion "kept" edges: whether a child's own wavelet coefficients survived truncation
+    // (see kept_tensor_type above); flow alongside p_edges, one per child.
+    auto kept_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, kept_tensor_type>{})...);
+      }(std::make_index_sequence<num_children>{});
+    // do_compress's full set of "from below" inputs: p0..p7, kept0..kept7, then the self/prior edge
+    auto send_to_compress_edges = std::tuple_cat(p_edges, kept_edges, std::make_tuple(filter_in));
+    // output edges for the send_leafs_up / send_leafs_kept_up tasks, one set per child
+    auto send_leaves_up_edges = p_edges;
+    auto send_leaves_kept_up_edges = kept_edges;
+    /* append out edge to set of edges: p0..p7 (up to parent), kept0..kept7 (up to parent), out */
+    auto compress_out_edges = std::tuple_cat(p_edges, kept_edges, std::make_tuple(out));
     /* use the tuple variant to handle variable number of inputs while suppressing the output tuple */
     auto do_compress =
-      [&, fns, K, is_ns, name, enable_compress_batching, compress_pool, total_functions](
+      [&, fns, K, is_ns, name, enable_compress_batching, compress_pool, total_functions,
+       enable_truncate, thresh, truncate_mode, cell_min_width](
                           const mra::Key<NDIM>& key,
                           //const std::tuple<const FunctionsReconstructedNodeTypes&...>& input_frns
                           const mra::FunctionsReconstructedNode<T,NDIM> &in0,
@@ -117,18 +141,67 @@ namespace mra
                           const mra::FunctionsReconstructedNode<T,NDIM> &in5,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in6,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in7,
+                          const kept_tensor_type &kept0, const kept_tensor_type &kept1,
+                          const kept_tensor_type &kept2, const kept_tensor_type &kept3,
+                          const kept_tensor_type &kept4, const kept_tensor_type &kept5,
+                          const kept_tensor_type &kept6, const kept_tensor_type &kept7,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in // the node from the prior op
                           ) -> TASKTYPE {
       //const typename ::detail::tree_types<T,K,NDIM>::compress_in_type& in,
       //typename ::detail::tree_types<T,K,NDIM>::compress_out_type& out) {
         size_type N = fns->num_functions(key);
         constexpr const auto num_children = mra::Key<NDIM>::num_children();
-        constexpr const auto out_terminal_id = num_children;
+        constexpr const auto out_terminal_id = 2*num_children;
         mra::FunctionsCompressedNode<T,NDIM> result(key, N); // The eventual result
         // create empty, may be reset if needed
         mra::FunctionsReconstructedNode<T, NDIM> p(key, N);
+        // this node's own "kept" contribution to send up to our parent;
+        // stays default-constructed (empty, i.e. "nothing here") unless we
+        // actually allocate a result below (mirrors do_send_leafs_kept_up's
+        // leaf placeholder in tasks/common.h)
+        kept_tensor_type kept;
 
-
+        /**
+         * Optional in-line truncation bookkeeping: figure out, per function,
+         * whether each child still has any live wavelet mass below it. Used
+         * two ways below: (1) any_child_kept feeds the norm-threshold drop
+         * decision further down (gated by enable_truncate), and (2) after
+         * each apply_leaf_info() call below, mark_truncated_children_leaf()
+         * additionally flags a child as leaf whenever it reports "not kept"
+         * -- exactly what make_truncate's own dispatch/merge tasks do (see
+         * tasks/truncate.h) -- purely additively (only ever flips a child
+         * leaf-or-not from false to true), so it must run *after*
+         * apply_leaf_info, not before, or apply_leaf_info's own (structural,
+         * reconstructed-tree-based) decision would clobber it. This always
+         * runs (cheap, and correct regardless of enable_truncate: a child
+         * that reports "not kept" genuinely has no wavelet coefficients
+         * there, whether because it's a true tree leaf or because truncation
+         * dropped it); only the norm-threshold drop decision itself is
+         * gated by enable_truncate.
+         */
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::wait(kept0.buffer(), kept1.buffer(), kept2.buffer(), kept3.buffer(),
+                                    kept4.buffer(), kept5.buffer(), kept6.buffer(), kept7.buffer());
+#endif // MRA_ENABLE_HOST
+        std::array<const kept_tensor_type*, num_children> kept_children =
+              {&kept0, &kept1, &kept2, &kept3, &kept4, &kept5, &kept6, &kept7};
+        auto child_kept = [&](size_type i, size_type c) -> bool {
+          const auto& ck = *kept_children[c];
+          return !ck.empty() && (ck.buffer().host_ptr()[i] != T(0));
+        };
+        std::vector<bool> any_child_kept(N, false);
+        for (size_type i = 0; i < N; ++i) {
+          for (size_type c = 0; c < num_children; ++c) {
+            if (child_kept(i, c)) any_child_kept[i] = true;
+          }
+        }
+        auto mark_truncated_children_leaf = [&]() {
+          for (size_type i = 0; i < N; ++i) {
+            for (size_type c = 0; c < num_children; ++c) {
+              if (!child_kept(i, c)) result.set_child_leaf(i, c, true);
+            }
+          }
+        };
 
         /* check if all inputs are empty */
         bool all_empty = in.empty() && in0.empty() && in1.empty() && in2.empty() && in3.empty() &&
@@ -137,6 +210,7 @@ namespace mra
         if (all_empty) {
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
+          mark_truncated_children_leaf();
           //mra::apply_leaf_info(p, in, in0, in1, in2, in3, in4, in5, in6, in7);
           /* all data is still on the host so the coefficients are zero */
           for (std::size_t i = 0; i < N; ++i) {
@@ -166,6 +240,7 @@ namespace mra
 
           // Collect child leaf info
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
+          mark_truncated_children_leaf();
           //std::cout << name << " " << key << " result after apply_leaf_info " << result << " " << std::endl;
 
           /**
@@ -318,6 +393,16 @@ namespace mra
           // O(#ranges + n_nonzero), same set find_nth_nonzero scanned
           // on-device).
           auto* d_sumsq_arr = d_sumsq.host_ptr();
+          // d_sumsq[pos] is this node's own per-function wavelet norm^2 at
+          // this level (not the running total accumulated into p.sum below)
+          // -- exactly what truncate_process_one (tasks/truncate.h) compares
+          // against tol^2. Only meaningful for standard-form (is_ns==false)
+          // compression at level > 1, where compress_kernel_impl has zeroed
+          // out the scaling (child_slice) sub-block of d before computing
+          // this sum -- truncation is exempt below level 2 anyway (see the
+          // key.level() > 1 guard below), so is_ns's level==0/1 exception to
+          // that zeroing never affects the truncation test.
+          const T trunc_tol = enable_truncate ? mra::truncate_tol(key, thresh, cell_min_width, truncate_mode) : T{};
           size_type pos = 0;
           for (auto it = sparsity.begin_nonzero(); it != sparsity.end_nonzero(); ++it, ++pos) {
             const size_type i = *it;
@@ -327,6 +412,40 @@ namespace mra
             p.sum(i) = d_sumsq_arr[pos] + child_sumsq; // result sumsq is last element in sumsqs
             //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[pos]
             //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
+
+            // Optional in-line truncation: drop this node's own wavelet
+            // coefficients for function i if none of our children still have
+            // live wavelet mass below them and our own wavelet norm falls
+            // below tol (mirrors truncate_process_one exactly; level <= 1 is
+            // never truncated, matching MADNESS's truncate_op).
+            if (enable_truncate && key.level() > 1 && !result.is_zero(i) &&
+                !any_child_kept[i] && d_sumsq_arr[pos] < trunc_tol*trunc_tol) {
+              result.set_zero(i);
+            }
+          }
+
+          if (enable_truncate) {
+            // result's host sparsity may have just been mutated above
+            // (result.set_zero); the device-resident copy pushed via
+            // sparseman/the batch leader before the kernel ran reflects the
+            // pre-truncation state, so push the corrected bytes down before
+            // `result` is forwarded on -- mirrors truncate.h's own kernel
+            // writing the decision directly to the device view, just done as
+            // a second small H2D copy here instead of inside the kernel.
+            auto trunc_sparseman = make_sparsity_manager(d);
+            trunc_sparseman.populate_device_sparsity();
+          }
+
+          // This node's own contribution to send up to the parent: for every
+          // function, did we end up keeping any wavelet coefficients here?
+          // (Independent of enable_truncate: relays result's real sparsity
+          // either way, since a parent always needs to know a child's true
+          // nonzero set to make its own decision once truncation is enabled
+          // higher up the tree.)
+          kept = kept_tensor_type(N);
+          auto* kept_arr = kept.buffer().host_ptr();
+          for (size_type i = 0; i < N; ++i) {
+            kept_arr[i] = result.is_zero(i) ? T(0) : T(1);
           }
         }
 
@@ -340,10 +459,14 @@ namespace mra
           co_await ttg::device::forward(
             // select to which child of our parent we send
             select_send_up(key, std::move(p), std::make_index_sequence<num_children>{}, "compress"),
+            // and forward our own "kept" contribution the same way, offset
+            // to the parent's kept0..kept7 terminal group
+            select_send_up<num_children>(key, std::move(kept), std::make_index_sequence<num_children>{}, "compress-kept"),
             // Send result to output tree
             ttg::device::send<out_terminal_id>(key, std::move(result)));
 #else
             select_send_up(key, std::move(p), std::make_index_sequence<num_children>{}, "compress");
+            select_send_up<num_children>(key, std::move(kept), std::make_index_sequence<num_children>{}, "compress-kept");
             ttg::send<out_terminal_id>(key, std::move(result));
 #endif
         } else {
@@ -368,6 +491,7 @@ namespace mra
     };
 
     auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_leaves_up_edges, "send_leaves_up"),
+                               ttg::make_tt<Space>(&do_send_leafs_kept_up<T,NDIM>, edges(in), send_leaves_kept_up_edges, "send_leaves_kept_up"),
                                ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, "compress"),
                                ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), "filter"));
 
@@ -376,11 +500,13 @@ namespace mra
       std::get<0>(ttt)->set_keymap(procmap);
       std::get<1>(ttt)->set_keymap(procmap);
       std::get<2>(ttt)->set_keymap(procmap);
+      std::get<3>(ttt)->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       std::get<0>(ttt)->set_devicemap(devicemap);
       std::get<1>(ttt)->set_devicemap(devicemap);
       std::get<2>(ttt)->set_devicemap(devicemap);
+      std::get<3>(ttt)->set_devicemap(devicemap);
     }
 
 #ifndef MRA_ENABLE_HOST
@@ -390,18 +516,19 @@ namespace mra
       // compress's only shared operator data (hgT) never varies by level or
       // position to begin with (see kernels/compress.h's batching-support
       // comment), unlike convolution which needed a similar relaxation.
-      std::get<1>(ttt)->set_batch_matcher(
+      std::get<2>(ttt)->set_batch_matcher(
           [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
           max_batch_size);
     }
 #endif // MRA_ENABLE_HOST
 
-    auto ins = std::make_tuple(std::get<2>(ttt)->template in<0>());
-    auto outs = std::make_tuple(std::get<1>(ttt)->template out<8>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(3);
+    auto ins = std::make_tuple(std::get<3>(ttt)->template in<0>());
+    auto outs = std::make_tuple(std::get<2>(ttt)->template out<2*num_children>());
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(4);
     ops[0] = std::move(std::get<0>(ttt));
     ops[1] = std::move(std::get<1>(ttt));
     ops[2] = std::move(std::get<2>(ttt));
+    ops[3] = std::move(std::get<3>(ttt));
 
     return make_ttg(std::move(ops), ins, outs, name);
   }
