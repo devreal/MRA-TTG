@@ -13,6 +13,9 @@
 #include <madness/mra/convolution1d.h>
 #include "mra/misc/types.h"
 #include "mra/misc/key.h"
+#ifndef MRA_ENABLE_HOST
+#include "mra/kernels/generate_op1d.h"
+#endif // !MRA_ENABLE_HOST
 
 namespace mra {
 
@@ -41,11 +44,30 @@ namespace mra {
      */
     tensor_type R, S;
 
+    /**
+     * [count, rank, 5] -- Rnorm,Snorm,Rnormf,Snormf,NSnormf per (count-index, term),
+     * for this dimension only. On the MADNESS/host path these are read straight off
+     * cd_mad; on the device path they are computed once, alongside R/S, by the
+     * on-device generator (mra/kernels/generate_op1d.h) and copied into the
+     * aggregate ConvolutionData<T,NDIM>::norms tensor when assembling it -- see
+     * GaussianConvolutionOperator::try_get_op. Unused (default-constructed, empty)
+     * on the host path.
+     */
+    DenseTensor<T, 3> norms1d;
+
     ConvolutionData1D() : R(), S(){}
     ConvolutionData1D(size_type count, size_type rank, size_type K)
     : R(std::array{count, rank, 2*K, 2*K}, ttg::scope::SyncIn)
     , S(std::array{count, rank, K, K}, ttg::scope::SyncIn)
     { }
+#ifndef MRA_ENABLE_HOST
+    /// Device-path constructor: R/S allocated device-resident (no host fill), plus norms1d.
+    ConvolutionData1D(size_type count, size_type rank, size_type K, ttg::scope scope)
+    : R(std::array{count, rank, 2*K, 2*K}, scope)
+    , S(std::array{count, rank, K, K}, scope)
+    , norms1d(std::array{count, rank, (size_type)5}, scope)
+    { }
+#endif // !MRA_ENABLE_HOST
     ConvolutionData1D(tensor_type&& R_,
                       tensor_type&& S_)
     : R(std::move(R_))
@@ -391,6 +413,102 @@ namespace mra {
       }
     };
 
+#ifndef MRA_ENABLE_HOST
+    enum class AsyncCacheStatus { Available, Owned, Pending };
+
+    /**
+     * Non-blocking, tri-state, memoizing cache -- the device-path replacement for
+     * SharedComputeCache/Op1DCache's claim()+acquire() above. There is no acquire()
+     * at all: try_get() always returns immediately with one of:
+     *   Available -- value is ready, here it is.
+     *   Owned     -- the caller just became responsible for producing the value
+     *                (allocating the destination tensor(s), submitting the
+     *                generation kernel, and calling publish() once that kernel has
+     *                been awaited to completion -- see GaussianConvolutionOperator::
+     *                try_get_op1d/try_get_op). Ownership, once granted, cannot be
+     *                un-claimed; the caller must follow through.
+     *   Pending   -- someone else already owns it. The caller must yield --
+     *                co_await ttg::device::wait() with NO arguments (a pure
+     *                reschedule point; passing a buffer would force an unwanted
+     *                device->host transfer) -- and call try_get() again on resume.
+     *
+     * This intentionally does NOT try to synchronize with whichever task's kernel
+     * is filling a Pending entry -- PaRSEC's per-buffer version tracking exists to
+     * pick which device holds the newest copy for data movement, not to order
+     * kernels/tasks that share a buffer outside a normal TTG edge or a
+     * ttg::device::coop() batch, and there is currently no cheaper TTG primitive
+     * for that than a full stream-to-stream event (rejected here as too heavy for
+     * a per-entry cost -- see the design discussion this class grew out of).
+     * Instead: the OWNER is the only one who ever waits for the real GPU
+     * completion (via co_await ttg::device::wait(), the plain "wait for kernels
+     * this task itself submitted" form), and only calls publish() afterwards -- so
+     * "Available" is only ever observed once the value is genuinely, fully
+     * computed, at which point ordinary buffer placement (select()) is all a
+     * later, unrelated consumer needs.
+     */
+    template <typename KeyT, typename ValueT>
+    class AsyncCache {
+    public:
+      using pointer_type = std::shared_ptr<const ValueT>;
+
+      struct Result {
+        AsyncCacheStatus status;
+        pointer_type value; // valid iff status == Available
+      };
+
+    private:
+      struct Cell {
+        std::atomic<CacheEntryState> state{CacheEntryState::Empty}; // Empty/Requested/Ready reused from above
+        atomic_shared_ptr<pointer_type> value;
+      };
+      using cellptr_type = std::shared_ptr<Cell>;
+      using map_type = madness::ConcurrentHashMap<KeyT, cellptr_type, HashFunctor<KeyT>>;
+
+      mutable map_type m_map;
+
+      cellptr_type get_or_create_cell(const KeyT& key) const {
+        {
+          typename map_type::const_accessor cacc;
+          if (m_map.find(cacc, key)) {
+            return cacc->second;
+          }
+        }
+        typename map_type::accessor acc;
+        if (m_map.insert(acc, key)) {
+          acc->second = std::make_shared<Cell>();
+        }
+        return acc->second;
+      }
+
+    public:
+      Result try_get(const KeyT& key) const {
+        cellptr_type cell = get_or_create_cell(key);
+        auto st = cell->state.load(std::memory_order_acquire);
+        if (st == CacheEntryState::Ready) {
+          return {AsyncCacheStatus::Available, cell->value.load(std::memory_order_acquire)};
+        }
+        CacheEntryState expected = CacheEntryState::Empty;
+        if (cell->state.compare_exchange_strong(expected, CacheEntryState::Requested,
+                                                 std::memory_order_acq_rel, std::memory_order_acquire)) {
+          return {AsyncCacheStatus::Owned, nullptr};
+        }
+        if (expected == CacheEntryState::Ready) {
+          return {AsyncCacheStatus::Available, cell->value.load(std::memory_order_acquire)};
+        }
+        return {AsyncCacheStatus::Pending, nullptr};
+      }
+
+      /// Called by whoever try_get() told Owned == true, once the value has been
+      /// fully, genuinely computed (i.e. after co_await ttg::device::wait() on the
+      /// generation kernel this task itself submitted) -- never before.
+      void publish(const KeyT& key, pointer_type data) const {
+        cellptr_type cell = get_or_create_cell(key);
+        cell->value.store(std::move(data), std::memory_order_release);
+        cell->state.store(CacheEntryState::Ready, std::memory_order_release);
+      }
+    };
+#endif // !MRA_ENABLE_HOST
+
   } // namespace detail
 
   template<typename T, size_type NDIM>
@@ -426,7 +544,11 @@ namespace mra {
     GaussianConvolutionOperator(std::shared_ptr<madness::SeparatedConvolution<T, NDIM>> mad_conv_sep)
     : m_mad_conv_sep_vec(std::move(std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>(1, mad_conv_sep)))
     , m_max_rank(mad_conv_sep->get_rank())
-    { }
+    {
+#ifndef MRA_ENABLE_HOST
+      extract_gaussian_terms_for_device();
+#endif // !MRA_ENABLE_HOST
+    }
 
     /**
      * Construct a convolution operator
@@ -438,6 +560,9 @@ namespace mra {
       for (auto& mad_conv : m_mad_conv_sep_vec) {
         m_max_rank = std::max(m_max_rank, mad_conv->get_rank());
       }
+#ifndef MRA_ENABLE_HOST
+      extract_gaussian_terms_for_device();
+#endif // !MRA_ENABLE_HOST
     }
 
     /**
@@ -458,6 +583,19 @@ namespace mra {
     const auto& get_mad_op(int c) const {
       return m_mad_conv_sep_vec[c];
     }
+
+#ifndef MRA_ENABLE_HOST
+    /// Shared (not per-item) tensors needed by submit_generate_op1d_kernel --
+    /// see try_get_op1d()'s Op1DGenerateWork comment for the sequence the
+    /// caller must run these through (select() before reading their views).
+    auto& shared_c_tensor() const { return m_shared_c; }
+    auto& shared_hgT_tensor() const { return m_shared_hgT; }
+    auto& shared_hgT2k_tensor() const { return m_shared_hgT2k; }
+    auto& shared_quadx_tensor() const { return m_shared_quadx; }
+    auto& shared_quadw_tensor() const { return m_shared_quadw; }
+    size_type K() const { return m_K; }
+    size_type npt() const { return m_npt; }
+#endif // !MRA_ENABLE_HOST
 
     /**
      * Assembles ConvolutionData for the level and displacement.
@@ -554,6 +692,332 @@ namespace mra {
       return data;
     }
 
+#ifndef MRA_ENABLE_HOST
+    using op1d_pointer_type = std::shared_ptr<const ConvolutionData1D<T>>;
+    using agg_pointer_type = std::shared_ptr<const ConvolutionData<T, NDIM>>;
+
+    enum class Status { Available, Owned, Pending };
+
+    /// What try_get_op1d() hands back when it returns Owned: the freshly
+    /// allocated (device-resident, uninitialized -- ttg::scope::Allocate)
+    /// tensor, plus enough to later build its generation work items. The
+    /// tensor's R/S/norms1d buffers have no valid current_view() yet (Allocate
+    /// scope defers actual device allocation to the runtime's own callback,
+    /// triggered by select()), so building the per-(count-index,term) views
+    /// happens separately, in build_op1d_items(), AFTER select() -- not here.
+    /// The caller must, in its OWN device-task coroutine (this can't be
+    /// hidden in a helper coroutine of its own -- ttg::device::Task is driven
+    /// directly by the backend, not composable via nested co_await; see this
+    /// class's header comment):
+    ///   1. co_await ttg::device::select(work.tensor->R.buffer(),
+    ///      work.tensor->S.buffer(), work.tensor->norms1d.buffer()) (plus
+    ///      whatever else it's already selecting) to get them resident on the
+    ///      current device,
+    ///   2. build_op1d_items(work) (now current_view() is valid), batched
+    ///      together with any other dimensions' items this same call also
+    ///      owns (see try_get_op) into one submit_generate_op1d_kernel call,
+    ///   3. co_await ttg::device::wait() (NO buffer argument -- this only
+    ///      needs to know the kernel *this task* just submitted has finished,
+    ///      not to force an unwanted device->host transfer),
+    ///   4. publish_op1d(work, std::move(work.tensor)).
+    struct Op1DGenerateWork {
+      std::shared_ptr<ConvolutionData1D<T>> tensor;
+      Dimension d = 0;
+      Level n = 0;
+      Translation lx = 0;
+    };
+
+    struct Op1DResult {
+      Status status;
+      op1d_pointer_type value; // valid iff Available
+      Op1DGenerateWork work;   // valid iff Owned
+    };
+
+    /**
+     * Non-blocking query for the (n,d,l) 1D transition-matrix tensor -- the
+     * device-path replacement for the claim()+acquire() pair inside get_op()
+     * above. See detail::AsyncCache's class comment for what each of the
+     * three outcomes means and what the caller must do about it. Safe to call
+     * from ordinary (non-coroutine) code.
+     */
+    Op1DResult try_get_op1d(Level n, Dimension d, Translation l) const {
+      auto res = _op1d_cache_async.try_get(detail::Op1DKey(n, d, l));
+      if (res.status == detail::AsyncCacheStatus::Available) {
+        return {Status::Available, res.value, {}};
+      }
+      if (res.status == detail::AsyncCacheStatus::Pending) {
+        return {Status::Pending, nullptr, {}};
+      }
+      // Owned: just allocate the destination tensor (host-side bookkeeping
+      // only -- Allocate scope does not touch the device here). Building the
+      // per-item views happens later, in build_op1d_items(), after select().
+      auto tensor = std::make_shared<ConvolutionData1D<T>>(m_mad_conv_sep_vec.size(), m_max_rank, m_K,
+                                                             ttg::scope::Allocate);
+      Op1DResult out;
+      out.status = Status::Owned;
+      out.work.tensor = std::move(tensor);
+      out.work.d = d;
+      out.work.n = n;
+      out.work.lx = l;
+      return out;
+    }
+
+    /// Builds the flat (count-index, term) work-item list for `work.tensor`.
+    /// Call ONLY after co_await ttg::device::select()-ing work.tensor's
+    /// R/S/norms1d buffers -- see Op1DGenerateWork's comment; current_view()
+    /// has no valid data pointer before that. Padding entries (i beyond a
+    /// given count-index's real rank) get a default-constructed (coeff==0)
+    /// GaussianTermParams -- generate_op1d_one's own coeff==0 sentinel check
+    /// zero-fills them on-device, so unlike make_op1d_shell there is no
+    /// separate host-side zero-fill loop needed here.
+    std::vector<GenerateOp1DItem<T>> build_op1d_items(const Op1DGenerateWork& work) const {
+      auto rv = work.tensor->R.current_view();
+      auto sv = work.tensor->S.current_view();
+      auto nv = work.tensor->norms1d.current_view();
+      std::vector<GenerateOp1DItem<T>> items;
+      items.reserve(m_mad_conv_sep_vec.size() * (size_type)m_max_rank);
+      for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
+        for (size_type i = 0; i < (size_type)m_max_rank; ++i) {
+          GenerateOp1DItem<T> item;
+          item.params = m_term_params[(c * (size_type)m_max_rank + i) * NDIM + work.d];
+          item.n = work.n;
+          item.lx = work.lx;
+          item.R_dst = rv(c, i);
+          item.S_dst = sv(c, i);
+          item.norms_dst = nv(c, i);
+          items.push_back(std::move(item));
+        }
+      }
+      return items;
+    }
+
+    /// Publishes the tensor generated for work's (n,d,l) -- call only after
+    /// the generation kernel submitted over build_op1d_items(work) has been
+    /// co_await-ed to completion (co_await ttg::device::wait(), no argument).
+    /// See Op1DGenerateWork's comment for the full sequence.
+    void publish_op1d(const Op1DGenerateWork& work) const {
+      _op1d_cache_async.publish(detail::Op1DKey(work.n, work.d, work.lx),
+                                 op1d_pointer_type(work.tensor));
+    }
+
+    struct OpResult {
+      Status status; // Available: value is ready.
+                      // Owned: all NDIM dims were already Available; caller
+                      //   now owns the AGGREGATE itself -- call
+                      //   finish_op_assembly() then publish_op().
+                      // Pending: at least one dim is not yet ready this round
+                      //   (either genuinely owned by an unrelated task, or
+                      //   just claimed by THIS call -- dim_work entries below
+                      //   cover the latter). Caller must submit whatever
+                      //   dim_work entries are present regardless of status,
+                      //   then (if status == Pending) co_await
+                      //   ttg::device::wait() once and call try_get_op()
+                      //   again. This may yield once even when every
+                      //   outstanding dim was actually owned by this same
+                      //   call (no unrelated task involved) rather than
+                      //   re-checking inline -- a deliberate simplification,
+                      //   not a correctness issue: generation is fast, so one
+                      //   extra reschedule round-trip is cheap, and it avoids
+                      //   the caller needing to distinguish "why" a dim
+                      //   wasn't ready.
+      agg_pointer_type value;                        // valid iff Available
+      std::array<Op1DGenerateWork, NDIM> dim_work{};  // non-null .tensor for dims THIS call just claimed
+      std::array<op1d_pointer_type, NDIM> dims{};     // populated iff status != Pending
+    };
+
+    /// Non-blocking query for the full (n, displacement) aggregate operator
+    /// data. See OpResult's comment for the contract.
+    OpResult try_get_op(Level n, Key<NDIM> disp) const {
+      OpResult out;
+      bool any_not_ready = false;
+      for (Dimension d = 0; d < NDIM; ++d) {
+        auto r1 = try_get_op1d(n, d, disp.translation()[d]);
+        if (r1.status == Status::Available) {
+          out.dims[d] = r1.value;
+        } else if (r1.status == Status::Owned) {
+          out.dim_work[d] = std::move(r1.work);
+          any_not_ready = true;
+        } else {
+          any_not_ready = true;
+        }
+      }
+      if (any_not_ready) {
+        out.status = Status::Pending;
+        return out;
+      }
+      auto key = Key<NDIM>(0, n, disp.translation());
+      auto agg = _datacache_async.try_get(key);
+      if (agg.status == detail::AsyncCacheStatus::Available) {
+        out.status = Status::Available;
+        out.value = agg.value;
+        return out;
+      }
+      if (agg.status == detail::AsyncCacheStatus::Pending) {
+        out.status = Status::Pending;
+        return out;
+      }
+      out.status = Status::Owned;
+      return out;
+    }
+
+    /**
+     * Assembles the aggregate ConvolutionData once every dimension is
+     * Available (i.e. after a try_get_op() call returned Owned). Caller must
+     * have already done co_await ttg::device::wait(dims[d]->norms1d.buffer())
+     * for every d (a small device->host transfer of the 5-float-per-(c,i)
+     * norms1d tensor) before calling this, so the host view read below is
+     * valid -- this stays a plain (non-coroutine) function since only the
+     * caller's own device-task body can co_await (see this class's header
+     * comment).
+     *
+     * Mirrors get_op()'s norms-assembly loop above, but sources
+     * Rnorm/Snorm/Rnormf/Snormf/NSnormf from each dimension's own norms1d
+     * (already computed once, on-device, by the generation kernel) instead
+     * of a second, redundant MADNESS nonstandard() call. Fac is likewise
+     * already known (mad_ops[i].getfac(), extracted once at construction --
+     * see extract_gaussian_terms()) rather than re-read here; kept as the
+     * mad_ops[i].getfac() call below only to stay obviously-identical to
+     * get_op()'s existing padding-loop structure.
+     *
+     * Opnorm/Rank still call into MADNESS's SeparatedConvolution::norm() --
+     * a genuinely different, much smaller (one scalar per (c, displacement))
+     * computation than the R/S/Rnorm/Snorm/Rnormf/Snormf/NSnormf generation
+     * this file moved off the CPU; porting it is out of scope here.
+     */
+    agg_pointer_type finish_op_assembly(Level n, Key<NDIM> disp,
+                                         const std::array<op1d_pointer_type, NDIM>& dims) const {
+      auto data = std::make_shared<ConvolutionData<T, NDIM>>(m_mad_conv_sep_vec.size(), m_max_rank);
+      for (Dimension d = 0; d < NDIM; ++d) data->data[d] = dims[d];
+      auto norms_view = data->norms.view_on(ttg::device::Device::host());
+      for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
+        auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+        size_type i = 0;
+        for (; i < (size_type)mad_ops.size(); ++i) {
+          for (Dimension d = 0; d < NDIM; ++d) {
+            auto n1d = data->data[d]->norms1d.view_on(ttg::device::Device::host());
+            norms_view(c, i, d, (int)NormId::Rnorm) = n1d(c, i, 0);
+            norms_view(c, i, d, (int)NormId::Snorm) = n1d(c, i, 1);
+            norms_view(c, i, d, (int)NormId::Rnormf) = n1d(c, i, 2);
+            norms_view(c, i, d, (int)NormId::Snormf) = n1d(c, i, 3);
+            norms_view(c, i, d, (int)NormId::NSnormf) = n1d(c, i, 4);
+          }
+          auto fac = mad_ops[i].getfac();
+          norms_view(c, i, 0, (int)NormId::Fac) = fac;
+          norms_view(c, i, 0, (int)NormId::MUnorm) = munorm2_ns(c, n, i, data) * std::abs(fac);
+        }
+        for (; i < (size_type)m_max_rank; ++i) {
+          for (Dimension d = 0; d < NDIM; ++d) {
+            norms_view(c, i, d, (int)NormId::Rnorm) = 0.0;
+            norms_view(c, i, d, (int)NormId::Snorm) = 0.0;
+            norms_view(c, i, d, (int)NormId::Rnormf) = 0.0;
+            norms_view(c, i, d, (int)NormId::Snormf) = 0.0;
+            norms_view(c, i, d, (int)NormId::NSnormf) = 0.0;
+          }
+          norms_view(c, i, 0, (int)NormId::Fac) = 0.0;
+          norms_view(c, i, 0, (int)NormId::MUnorm) = 0.0;
+        }
+        T norm = m_mad_conv_sep_vec[c]->norm(n, disp.to_madness_key(), disp.to_madness_key());
+        norms_view(c, 0, 0, (int)NormId::Opnorm) = norm;
+        norms_view(c, 0, 0, (int)NormId::Rank) = mad_ops.size();
+      }
+      return data;
+    }
+
+    /// Publishes the aggregate assembled by finish_op_assembly() for (n, disp).
+    void publish_op(Level n, Key<NDIM> disp, agg_pointer_type data) const {
+      auto key = Key<NDIM>(0, n, disp.translation());
+      _datacache_async.publish(key, std::move(data));
+    }
+
+    /**
+     * The non-coroutine steps every call site's generation round needs,
+     * factored here so tasks/convolution.h's three call sites only have to
+     * interleave co_await calls around them, not duplicate the bookkeeping.
+     * Typical call-site sequence (see e.g. shell0_tt):
+     *   if (op.has_generation_work(res)) {
+     *     auto input = op.make_generation_input(res);
+     *     co_await ttg::device::select(input);
+     *     auto items = op.collect_generation_items(res);
+     *     auto items_buf = make_generate_op1d_items_buffer(items);
+     *     auto ws_buf = op.make_generation_workspace(items.size());
+     *     co_await ttg::device::select(items_buf, ws_buf);
+     *     op.submit_generation_kernel(items, items_buf, ws_buf);
+     *     co_await ttg::device::wait();
+     *     op.publish_generation_work(res);
+     *   }
+     */
+    bool has_generation_work(const OpResult& res) const {
+      for (Dimension d = 0; d < NDIM; ++d) {
+        if (res.dim_work[d].tensor) return true;
+      }
+      return false;
+    }
+
+    /// Buffers to co_await ttg::device::select() before reading any view into
+    /// a newly-owned dimension's tensor or the shared generator tables.
+    ttg::device::Input make_generation_input(const OpResult& res) const {
+      ttg::device::Input input;
+      input.add(m_shared_c.buffer());
+      input.add(m_shared_hgT.buffer());
+      input.add(m_shared_hgT2k.buffer());
+      input.add(m_shared_quadx.buffer());
+      input.add(m_shared_quadw.buffer());
+      for (Dimension d = 0; d < NDIM; ++d) {
+        if (res.dim_work[d].tensor) {
+          input.add(res.dim_work[d].tensor->R.buffer());
+          input.add(res.dim_work[d].tensor->S.buffer());
+          input.add(res.dim_work[d].tensor->norms1d.buffer());
+        }
+      }
+      return input;
+    }
+
+    /// Call only after co_await-ing make_generation_input()'s select().
+    std::vector<GenerateOp1DItem<T>> collect_generation_items(const OpResult& res) const {
+      std::vector<GenerateOp1DItem<T>> all_items;
+      for (Dimension d = 0; d < NDIM; ++d) {
+        if (res.dim_work[d].tensor) {
+          auto items = build_op1d_items(res.dim_work[d]);
+          all_items.insert(all_items.end(), items.begin(), items.end());
+        }
+      }
+      return all_items;
+    }
+
+    /// Allocates (Allocate scope -- device-resident, no host fill needed) the
+    /// per-item cooperative scratch the generation kernel's threads share
+    /// (see generate_op1d.h's Op1DWorkspaceOffsets/generate_op1d_workspace_size).
+    /// Must be co_await ttg::device::select()-ed (alongside items_buf) before
+    /// submit_generation_kernel reads its device pointer.
+    ttg::Buffer<T> make_generation_workspace(size_type n_items) const {
+      return ttg::Buffer<T>(generate_op1d_workspace_size(m_K) * n_items, ttg::scope::Allocate);
+    }
+
+    /// Call only after co_await-ing items_buf's and workspace's own select();
+    /// `items` must be the exact list items_buf was built from
+    /// (make_generate_op1d_items_buffer), and `workspace` must be sized by
+    /// make_generation_workspace(items.size()).
+    void submit_generation_kernel(const std::vector<GenerateOp1DItem<T>>& items,
+                                   ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
+                                   ttg::Buffer<T>& workspace) const {
+      if (items.empty()) return;
+      submit_generate_op1d_kernel<T>(
+          items_buf.current_device_ptr(), items.size(), m_K,
+          m_shared_c.current_view(), m_shared_hgT.current_view(), m_shared_hgT2k.current_view(),
+          m_shared_quadx.current_view().data(), m_shared_quadw.current_view().data(), m_npt,
+          workspace.current_device_ptr(),
+          ttg::device::current_stream());
+    }
+
+    /// Call only after co_await-ing the generation kernel to completion
+    /// (co_await ttg::device::wait(), no argument).
+    void publish_generation_work(const OpResult& res) const {
+      for (Dimension d = 0; d < NDIM; ++d) {
+        if (res.dim_work[d].tensor) publish_op1d(res.dim_work[d]);
+      }
+    }
+#endif // !MRA_ENABLE_HOST
+
   private:
     using op1d_cache_type = detail::Op1DCache<T>;
     using data_cache_type = detail::SharedComputeCache<Key<NDIM>, ConvolutionData<T, NDIM>>;
@@ -574,6 +1038,111 @@ namespace mra {
         tv[i] = m.ptr()[i];
       }
     }
+
+#ifndef MRA_ENABLE_HOST
+    // Device-path caches: try_get()/publish() only, no acquire()/MutexWaiter --
+    // see detail::AsyncCache's class comment and try_get_op1d()/try_get_op() above.
+    mutable detail::AsyncCache<detail::Op1DKey, ConvolutionData1D<T>> _op1d_cache_async;
+    mutable detail::AsyncCache<Key<NDIM>, ConvolutionData<T, NDIM>> _datacache_async;
+
+    // Shared (not per-term) tensors extracted once, at construction, from
+    // MADNESS's Convolution1D base -- identical for every term/dimension of
+    // this operator since they depend only on K and npt, never on
+    // (coeff, expnt). See extract_gaussian_terms_for_device().
+    size_type m_K = 0;
+    size_type m_npt = 0;
+    DenseTensor<T, 3> m_shared_c;      // K x K x 4K autocorrelation tensor
+    DenseTensor<T, 2> m_shared_hgT;    // 2K x 2K two-scale filter (transpose)
+    DenseTensor<T, 2> m_shared_hgT2k;  // 4K x 4K two-scale filter for order-2K
+    DenseTensor<T, 1> m_shared_quadx;  // npt Gauss-Legendre quadrature points
+    DenseTensor<T, 1> m_shared_quadw;  // npt Gauss-Legendre quadrature weights
+
+    // Per-(count-index c, term i, dimension d) Gaussian parameters, extracted
+    // once. Flattened as m_term_params[(c*m_max_rank + i)*NDIM + d]; padding
+    // slots (i beyond count-index c's real rank) are left default-constructed
+    // (coeff==0), which generate_op1d_one's own sentinel check zero-fills.
+    std::vector<GaussianTermParams<T>> m_term_params;
+
+    /**
+     * Extracts everything the on-device generator (mra/kernels/generate_op1d.h)
+     * needs from MADNESS's already-built GaussianConvolution1D term objects --
+     * called once, from both constructors, guarded to device builds only. This
+     * still touches MADNESS, but it is a one-time, per-run setup cost, not the
+     * per-(level,translation)-key cost that motivated moving generation to the
+     * GPU in the first place (see this file's header comment).
+     *
+     * Requires every term/dimension to actually be a GaussianConvolution1D --
+     * true for the Gaussian-separated-expansion operators this codebase
+     * constructs (see misc/convolutiondata.h's from-scratch reference, which
+     * assumes the same), but not guaranteed by SeparatedConvolution's API in
+     * general (e.g. a non-Gaussian Convolution1D subclass would fail the
+     * dynamic_pointer_cast below). Throws rather than silently mis-generating
+     * if that assumption doesn't hold.
+     */
+    void extract_gaussian_terms_for_device() {
+      m_K = (size_type)m_mad_conv_sep_vec.front()->get_k();
+      const size_type K = m_K;
+
+      auto first_ops = m_mad_conv_sep_vec.front()->get_ops();
+      auto first = std::dynamic_pointer_cast<const madness::GaussianConvolution1D<T>>(first_ops[0].getop(0));
+      if (!first) {
+        throw std::runtime_error(
+            "GaussianConvolutionOperator: operator terms are not GaussianConvolution1D -- "
+            "on-device transition-matrix generation only supports Gaussian-based "
+            "separated expansions.");
+      }
+      m_npt = (size_type)first->npt;
+
+      m_shared_c = DenseTensor<T, 3>(std::array{K, K, 4 * K}, ttg::scope::SyncIn);
+      m_shared_hgT = DenseTensor<T, 2>(std::array{2 * K, 2 * K}, ttg::scope::SyncIn);
+      m_shared_hgT2k = DenseTensor<T, 2>(std::array{4 * K, 4 * K}, ttg::scope::SyncIn);
+      m_shared_quadx = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
+      m_shared_quadw = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
+      auto c_view = m_shared_c.current_view();
+      auto hgT_view = m_shared_hgT.current_view();
+      auto hgT2k_view = m_shared_hgT2k.current_view();
+      auto qx_view = m_shared_quadx.current_view();
+      auto qw_view = m_shared_quadw.current_view();
+      for (size_type i = 0; i < K; ++i)
+        for (size_type j = 0; j < K; ++j)
+          for (size_type k = 0; k < 4 * K; ++k)
+            c_view(i, j, k) = static_cast<T>(first->c(i, j, k));
+      for (size_type i = 0; i < 2 * K; ++i)
+        for (size_type j = 0; j < 2 * K; ++j)
+          hgT_view(i, j) = static_cast<T>(first->hgT(i, j));
+      for (size_type i = 0; i < 4 * K; ++i)
+        for (size_type j = 0; j < 4 * K; ++j)
+          hgT2k_view(i, j) = static_cast<T>(first->hgT2k(i, j));
+      for (size_type i = 0; i < m_npt; ++i) {
+        qx_view(i) = static_cast<T>(first->quad_x(i));
+        qw_view(i) = static_cast<T>(first->quad_w(i));
+      }
+
+      m_term_params.assign(m_mad_conv_sep_vec.size() * (size_type)m_max_rank * NDIM, GaussianTermParams<T>{});
+      for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
+        auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+        for (size_type i = 0; i < (size_type)mad_ops.size(); ++i) {
+          T fac = static_cast<T>(mad_ops[i].getfac());
+          for (Dimension d = 0; d < NDIM; ++d) {
+            auto term = std::dynamic_pointer_cast<const madness::GaussianConvolution1D<T>>(mad_ops[i].getop(d));
+            if (!term) {
+              throw std::runtime_error(
+                  "GaussianConvolutionOperator: operator terms are not GaussianConvolution1D");
+            }
+            GaussianTermParams<T> p;
+            p.coeff = static_cast<T>(term->coeff);
+            p.expnt = static_cast<T>(term->expnt);
+            p.natlev = static_cast<Level>(term->natlev);
+            p.m = static_cast<int>(term->m);
+            p.fac = fac;
+            m_term_params[(c * (size_type)m_max_rank + i) * NDIM + d] = p;
+          }
+        }
+        // padding entries (i >= mad_ops.size(), up to m_max_rank) are left
+        // default-constructed (coeff==0) -- see this function's header comment.
+      }
+    }
+#endif // !MRA_ENABLE_HOST
 
     /**
      * Allocates a fresh ConvolutionData1D tensor and returns it together with the flat
