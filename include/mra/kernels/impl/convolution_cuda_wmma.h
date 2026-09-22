@@ -3,6 +3,7 @@
 
 #include "mra/misc/types.h"
 #include "mra/tensor/tensorview.h"
+#include "mra/misc/conv_mad.h" // for NormId, used as a template parameter below
 
 
 /* Device-side availability: only true while compiling for sm_80 or newer. */
