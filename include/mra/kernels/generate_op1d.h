@@ -110,11 +110,13 @@ namespace mra {
       T z = T(2) * x - T(1);
       p[0] = T(1);
       if (k > 1) p[1] = z;
-      for (size_type n = 1; n + 1 < k; ++n) {
-        T nn1 = T(n) / T(n + 1);
-        p[n + 1] = (z * p[n] - p[n - 1]) * nn1 + z * p[n];
+      if (thread_id() > 0) {
+        for (size_type n = thread_id(); n + 1 < k; n += block_size()) {
+          T nn1 = T(n) / T(n + 1);
+          p[n + 1] = (z * p[n] - p[n - 1]) * nn1 + z * p[n];
+        }
       }
-      for (size_type n = 0; n < k; ++n) {
+      for (size_type n = thread_id(); n < k; n += block_size()) {
         p[n] *= sqrt(T(2) * T(n) + T(1));
       }
     }
@@ -152,26 +154,30 @@ namespace mra {
       size_type smat;        // [K*K]
       size_type ns_scratch;  // [2K*2K]
       size_type total;
+
+      Op1DWorkspaceOffsets(auto K)
+      {
+        size_type p = 0;
+        leftbuf = p; p += MRA_OP1D_MAX_RECURSION_DEPTH * 2 * K;
+        retbuf = p; p += 2 * K;
+        combine_out = p; p += 2 * K;
+        rnlp1 = p; p += 2 * K;
+        rnlp2 = p; p += 2 * K;
+        Rvec = p; p += 4 * K;
+        rm = p; p += K * K;
+        r0 = p; p += K * K;
+        rp = p; p += K * K;
+        tmp = p; p += 2 * K * 2 * K;
+        t0 = p; p += 2 * K * 2 * K;
+        rmat = p; p += 2 * K * 2 * K;
+        smat = p; p += K * K;
+        ns_scratch = p; p += 2 * K * 2 * K;
+        total = p;
+      }
     };
 
     SCOPE Op1DWorkspaceOffsets op1d_workspace_offsets(size_type K) {
-      Op1DWorkspaceOffsets o{};
-      size_type p = 0;
-      o.leftbuf = p; p += MRA_OP1D_MAX_RECURSION_DEPTH * 2 * K;
-      o.retbuf = p; p += 2 * K;
-      o.combine_out = p; p += 2 * K;
-      o.rnlp1 = p; p += 2 * K;
-      o.rnlp2 = p; p += 2 * K;
-      o.Rvec = p; p += 4 * K;
-      o.rm = p; p += K * K;
-      o.r0 = p; p += K * K;
-      o.rp = p; p += K * K;
-      o.tmp = p; p += 2 * K * 2 * K;
-      o.t0 = p; p += 2 * K * 2 * K;
-      o.rmat = p; p += 2 * K * 2 * K;
-      o.smat = p; p += K * K;
-      o.ns_scratch = p; p += 2 * K * 2 * K;
-      o.total = p;
+      Op1DWorkspaceOffsets o{K};
       return o;
     }
 
@@ -202,17 +208,17 @@ namespace mra {
       T sch = fabs(scaledcoeff * h);
       T argmax = fabs(log(T(1e-22) / sch));
 
-      T acc[2 * MRA_MAX_K_SIZET];
-      for (size_type p = 0; p < 2 * K; ++p) acc[p] = T(0);
+      SHARED T acc[2 * MRA_MAX_K_SIZET];
+      SHARED T phix[2 * MRA_MAX_K_SIZET];
+      for (size_type p = thread_id(); p < 2 * K; p += block_size()) acc[p] = T(0);
       for (size_type box = 0; box < nbox; ++box) {
         T xlo = T(box) * h + T(lxx);
         if (beta * xlo * xlo > argmax) break; // same decision on every thread -- no divergence
         for (size_type i = 0; i < (size_type)npt; ++i) {
           T xx = xlo + h * quad_x[i];
           T ee = scaledcoeff * exp(-beta * xx * xx) * quad_w[i] * h;
-          T phix[2 * MRA_MAX_K_SIZET];
           legendre_scaling_device(xx - T(lxx), 2 * K, phix);
-          for (size_type p = 0; p < 2 * K; ++p) acc[p] += ee * phix[p];
+          for (size_type p = thread_id(); p < 2 * K; p += block_size()) acc[p] += ee * phix[p];
         }
       }
       if (lkeep < 0) {
@@ -280,11 +286,14 @@ namespace mra {
         FrameState state;
       };
 
-      Frame stack[MRA_OP1D_MAX_RECURSION_DEPTH]; // per-thread private; see header comment
+      SHARED Frame stack[MRA_OP1D_MAX_RECURSION_DEPTH]; // per-thread private; see header comment
       size_type sp = 0;
-      stack[sp].n = n0;
-      stack[sp].lx = lx0;
-      stack[sp].state = ENTER;
+      if (is_team_lead()) {
+        stack[sp].n = n0;
+        stack[sp].lx = lx0;
+        stack[sp].state = ENTER;
+      }
+      SYNCTHREADS();
       ++sp;
 
       while (sp > 0) {
@@ -299,7 +308,10 @@ namespace mra {
             continue;
           }
           if (f.n < p.natlev) {
-            f.state = WAIT_LEFT;
+            if (is_team_lead()) {
+              f.state = WAIT_LEFT;
+            }
+            SYNCTHREADS();
             if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
               if (is_team_lead()) {
                 THROWF("get_rnlp_device: recursion depth exceeded MRA_OP1D_MAX_RECURSION_DEPTH (%d)\n",
@@ -307,9 +319,12 @@ namespace mra {
               }
               return;
             }
-            stack[sp].n = f.n + 1;
-            stack[sp].lx = 2 * f.lx;
-            stack[sp].state = ENTER;
+            if (is_team_lead()) {
+              stack[sp].n = f.n + 1;
+              stack[sp].lx = 2 * f.lx;
+              stack[sp].state = ENTER;
+            }
+            SYNCTHREADS();
             ++sp;
             continue;
           }
@@ -321,8 +336,10 @@ namespace mra {
         if (f.state == WAIT_LEFT) {
           for (size_type i = thread_id(); i < 2 * K; i += block_size())
             leftbuf[top * 2 * K + i] = retbuf[i];
+          if (is_team_lead()) {
+            f.state = WAIT_RIGHT;
+          }
           SYNCTHREADS();
-          f.state = WAIT_RIGHT;
           if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
             if (is_team_lead()) {
               THROWF("get_rnlp_device: recursion depth exceeded MRA_OP1D_MAX_RECURSION_DEPTH (%d)\n",
@@ -330,9 +347,12 @@ namespace mra {
             }
             return;
           }
-          stack[sp].n = f.n + 1;
-          stack[sp].lx = 2 * f.lx + 1;
-          stack[sp].state = ENTER;
+          if (is_team_lead()) {
+            stack[sp].n = f.n + 1;
+            stack[sp].lx = 2 * f.lx + 1;
+            stack[sp].state = ENTER;
+          }
+          SYNCTHREADS();
           ++sp;
           continue;
         }
