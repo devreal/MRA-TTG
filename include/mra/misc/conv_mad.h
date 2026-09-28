@@ -1358,7 +1358,7 @@ namespace mra {
       }
 
       m_term_params.assign(m_mad_conv_sep_vec.size() * (size_type)m_max_rank * NDIM, GaussianTermParams<T>{});
-      m_shared_fac = DenseTensor<T, 2>(std::array<size_type, 2>{m_mad_conv_sep_vec.size(), (size_type)m_max_rank},
+      m_shared_fac = DenseTensor<T, 2>(std::array<size_type, 2>{(size_type)m_mad_conv_sep_vec.size(), (size_type)m_max_rank},
                                        ttg::scope::SyncIn);
       {
         auto fac_view = m_shared_fac.current_view();
@@ -1390,7 +1390,7 @@ namespace mra {
         // default-constructed (coeff==0) -- see this function's header comment.
       }
 
-      m_shared_rank = DenseTensor<T, 1>(m_mad_conv_sep_vec.size(), ttg::scope::SyncIn);
+      m_shared_rank = DenseTensor<T, 1>((size_type)m_mad_conv_sep_vec.size(), ttg::scope::SyncIn);
       {
         auto rank_view = m_shared_rank.current_view();
         for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
