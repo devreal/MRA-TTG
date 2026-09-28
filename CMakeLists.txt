@@ -4,6 +4,10 @@ project(MRA-TTG VERSION 0.1.0 LANGUAGES CXX)
 option(MRA_ENABLE_DEBUG "Whether to enable debug mode" OFF)
 option(MRA_ENABLE_EXPLICIT_INSTANTIATION "Whether to explicitly instantiate kernels in src/kernels/*.cc (some CUDA compilers fail on this)" ON)
 
+option(MRA_CUDA_SPLIT_COMPILE "Whether to pass nvcc --split-compile to parallelize optimization of CUDA translation units" ON)
+set(MRA_CUDA_SPLIT_COMPILE_THREADS "8" CACHE STRING "Thread count passed to nvcc --split-compile (0 = use all CPUs, default 8)")
+option(MRA_CUDA_SPLIT_COMPILE_JOBSERVER "Have nvcc acquire --split-compile worker slots from GNU Make's jobserver instead of spawning them unconditionally (requires GNU Make >= 4.3, Linux, and building with 'make -jN'/'cmake --build -- -jN', N>1)" ON)
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules/")
 
 include(GNUInstallDirs)

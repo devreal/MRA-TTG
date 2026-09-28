@@ -40,9 +40,49 @@ if (HAVE_CUDA)
     MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES}
     MRA_ENABLE_CUDA=1
   )
+  set(_mra_cuda_compile_options --expt-relaxed-constexpr --extended-lambda)
+
+  if (MRA_CUDA_SPLIT_COMPILE)
+    list(APPEND _mra_cuda_compile_options --split-compile=${MRA_CUDA_SPLIT_COMPILE_THREADS})
+
+    if (MRA_CUDA_SPLIT_COMPILE_JOBSERVER)
+      # nvcc's --jobserver flag was added in CUDA 13.0, requires GNU Make >= 4.3,
+      # and is Linux-only; see
+      # https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html
+      set(_mra_jobserver_supported FALSE)
+      if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13.0"
+          AND CMAKE_GENERATOR MATCHES "Makefiles"
+          AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        execute_process(
+          COMMAND ${CMAKE_MAKE_PROGRAM} --version
+          OUTPUT_VARIABLE _mra_make_version_output
+          ERROR_QUIET
+        )
+        if (_mra_make_version_output MATCHES "GNU Make ([0-9]+)\\.([0-9]+)")
+          if (CMAKE_MATCH_1 GREATER 4 OR (CMAKE_MATCH_1 EQUAL 4 AND CMAKE_MATCH_2 GREATER_EQUAL 3))
+            set(_mra_jobserver_supported TRUE)
+          endif()
+        endif()
+        unset(_mra_make_version_output)
+      endif()
+
+      if (_mra_jobserver_supported)
+        list(APPEND _mra_cuda_compile_options --jobserver)
+        message(STATUS "nvcc --split-compile will coordinate with GNU Make's jobserver (build with e.g. 'cmake --build ${CMAKE_BINARY_DIR} -- -j$(nproc)')")
+      else()
+        message(STATUS "MRA_CUDA_SPLIT_COMPILE_JOBSERVER requested but unsupported here "
+          "(needs nvcc >= 13.0 and GNU Make >= 4.3 on Linux with the Makefiles generator; "
+          "nvcc=${CMAKE_CUDA_COMPILER_VERSION}, generator=${CMAKE_GENERATOR}, host=${CMAKE_HOST_SYSTEM_NAME}); "
+          "nvcc will use --split-compile=${MRA_CUDA_SPLIT_COMPILE_THREADS} without jobserver coordination")
+      endif()
+      unset(_mra_jobserver_supported)
+    endif()
+  endif()
+
   target_compile_options(mra-cuda-base INTERFACE
-    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --extended-lambda>
+    $<$<COMPILE_LANGUAGE:CUDA>:${_mra_cuda_compile_options}>
   )
+  unset(_mra_cuda_compile_options)
   target_link_libraries(mra-cuda-base INTERFACE
     mra-base
     $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
