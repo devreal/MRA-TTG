@@ -574,6 +574,7 @@ namespace mra {
 
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
+          assert(cnorms.buffer().is_valid() && "cnorms buffer should be valid at this point");
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
 
           const auto real_distance_squared = [&](const auto& mad_op, const auto &displacement)
@@ -654,6 +655,7 @@ namespace mra {
                 }
                 co_await ttg::device::suspend();
               }
+              assert(op_norms->buffer().is_valid() && "op_norms buffer should be valid at this point");
               auto opnorm_view = op_norms->view_on(ttg::device::Device::host());
 #endif // MRA_ENABLE_HOST
 
@@ -789,7 +791,7 @@ namespace mra {
           // Wait for our own submitted kernel(s) to actually finish before
           // publishing -- publish() must only ever advertise genuinely
           // complete data to other (possibly different-device) tasks.
-          co_await ttg::device::wait();
+          co_await ttg::device::wait(res.level_work->norms1d.buffer());
           if (need_generate) {
             op.publish_generation_work(res);
           }
@@ -1091,7 +1093,7 @@ namespace mra {
         // Wait for our own submitted kernel(s) to actually finish before
         // publishing -- publish() must only ever advertise genuinely
         // complete data to other (possibly different-device) tasks.
-        co_await ttg::device::wait();
+        co_await ttg::device::wait(res.level_work->norms1d.buffer());
         if (need_generate) {
           op.publish_generation_work(res);
         }
