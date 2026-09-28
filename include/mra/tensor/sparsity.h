@@ -1,7 +1,9 @@
 #ifndef MRA_TENSOR_SPARSITY_H
 #define MRA_TENSOR_SPARSITY_H
 
+#include <algorithm>
 #include <utility>
+#include <vector>
 #include "mra/misc/types.h"
 #include "mra/tensor/dimensions.h"
 
@@ -53,13 +55,21 @@ namespace mra {
      * Used to avoid detouring through a MockTensor when the destination buffer
      * is already known (the tensor's own host buffer, or a pooled staging
      * buffer aggregating a whole device-kernel-launch batch).
+     *
+     * Sparsity types providing their own to_bytes() (e.g. RangeSparsityBase,
+     * whose is_nonzero()/is_allocated() are linear scans over its ranges,
+     * making the generic per-index loop quadratic) are dispatched to it.
      */
     template<typename SparsityT>
     void sparsity_to_bytes(const SparsityT& s, SparsityState* dest, size_type n) {
-      for (size_type i = 0; i < n; ++i) {
-        dest[i] = s.is_nonzero(i) ? SparsityState::NONZERO_ALLOCATED
-                : s.is_allocated(i) ? SparsityState::ALLOCATED
-                : SparsityState::SPARSE;
+      if constexpr (requires { s.to_bytes(dest, n); }) {
+        s.to_bytes(dest, n);
+      } else {
+        for (size_type i = 0; i < n; ++i) {
+          dest[i] = s.is_nonzero(i) ? SparsityState::NONZERO_ALLOCATED
+                  : s.is_allocated(i) ? SparsityState::ALLOCATED
+                  : SparsityState::SPARSE;
+        }
       }
     }
 
@@ -1041,6 +1051,26 @@ namespace mra {
     void apply_sparsity(const RangeSparsityBase<Derived_, Value_>& s) {
       m_non_zero_ranges = s.m_non_zero_ranges;
       m_allocated_ranges = s.m_allocated_ranges;
+    }
+
+    /**
+     * Writes the SparseArrayBase byte encoding of the first n entries into dest
+     * in O(n + #ranges), walking the ranges directly instead of querying
+     * is_nonzero()/is_allocated() per index. Used by detail::sparsity_to_bytes.
+     * Relies on every non-zero entry also being allocated.
+     */
+    void to_bytes(detail::SparsityState* dest, size_type n) const {
+      std::fill(dest, dest + n, detail::SparsityState::SPARSE);
+      auto fill_ranges = [&](const std::vector<detail::Range>& ranges, detail::SparsityState state) {
+        for (const auto& r : ranges) {
+          assert(r.from >= 0 && r.from <= r.to);
+          if (static_cast<size_type>(r.from) >= n) continue;
+          const size_type to = std::min(static_cast<size_type>(r.to) + 1, n);
+          std::fill(dest + r.from, dest + to, state);
+        }
+      };
+      fill_ranges(m_allocated_ranges, detail::SparsityState::ALLOCATED);
+      fill_ranges(m_non_zero_ranges,  detail::SparsityState::NONZERO_ALLOCATED);
     }
 
 
