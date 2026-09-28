@@ -665,8 +665,8 @@ namespace mra{
       DenseTensorView<T, 1>,                   // resnorms_view
       T*,                                      // tmp
       size_type,                               // n: number of blocks (functions) this member contributes
-      std::array<DenseTensorView<T, 4>, NDIM>, // transr (this member's own operator data)
-      std::array<DenseTensorView<T, 4>, NDIM>, // transs
+      std::array<DenseTensorView<const T, 4>, NDIM>, // transr (this member's own operator data)
+      std::array<DenseTensorView<const T, 4>, NDIM>, // transs
       DenseTensorView<T, 4>,                   // opnorms
       T,                                       // tol: this member's own truncate_tol(...)
       std::array<bool, 2>                      // at: this member's own apply-terms flags
