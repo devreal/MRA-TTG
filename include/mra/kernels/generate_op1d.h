@@ -41,12 +41,12 @@
 /**
  * Upper bound on get_rnlp_device's tree depth (natlev - n). MADNESS itself
  * never uses tree levels beyond MAX_LEVEL == 31 (see the KeyPair::hash()
- * comment in mra/tasks/convolution.h), so no legitimate (n, natlev) pair can
- * need to descend further than that -- this is a real, meaningful bound, not
- * an arbitrary guess. Overridable like MRA_MAX_K for the same reason.
+ * comment in mra/tasks/convolution.h).
+ * However, in practice we are seeing higher natlev values,
+ * so we increase the maximum recursion depth to accommodate these higher natlev values.
  */
 #ifndef MRA_OP1D_MAX_RECURSION_DEPTH
-#define MRA_OP1D_MAX_RECURSION_DEPTH 32
+#define MRA_OP1D_MAX_RECURSION_DEPTH 64
 #endif // MRA_OP1D_MAX_RECURSION_DEPTH
 
 namespace mra {
