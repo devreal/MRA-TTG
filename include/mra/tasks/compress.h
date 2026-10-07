@@ -161,6 +161,9 @@ namespace mra
         // leaf placeholder in tasks/common.h)
         kept_tensor_type kept;
 
+        std::array<const kept_tensor_type*, num_children> kept_children =
+              {&kept0, &kept1, &kept2, &kept3, &kept4, &kept5, &kept6, &kept7};
+
         /**
          * Optional in-line truncation bookkeeping: figure out, per function,
          * whether each child still has any live wavelet mass below it. Used
@@ -178,23 +181,42 @@ namespace mra
          * there, whether because it's a true tree leaf or because truncation
          * dropped it); only the norm-threshold drop decision itself is
          * gated by enable_truncate.
+         *
+         * child_kept() is a non-blocking, best-effort read -- NOT a device
+         * wait: an empty kept buffer is a true leaf (do_send_leafs_kept_up's
+         * placeholder) and a definite "not kept"; a non-empty buffer whose
+         * data has already landed on the host -- the common case, since the
+         * child's own do_compress already brings its `kept` back to host via
+         * its own post-kernel device wait (see the extended wait() below)
+         * before ever sending it up -- gives a definite real answer too.
+         * Only a non-empty buffer whose transfer is still in flight when we
+         * happen to be invoked is ambiguous; rather than block on
+         * co_await ttg::device::wait() here (only valid right after *this*
+         * task's own select() has resumed -- an earlier, misplaced wait()
+         * here previously segfaulted the batching machinery -- and blocking
+         * this early would defeat batching regardless), we conservatively
+         * assume "kept" for it. That can only cost a missed truncation /
+         * leaf-marking opportunity this round -- never wrongly drop live
+         * wavelet coefficients, i.e. it may leave a node (and its `kept`
+         * contribution to the parent) holding more than the tightest
+         * possible pruning would, but never less. Any such still-unresolved
+         * buffer is folded into this task's own batch-select below (see
+         * select_kept_in), so it is fully resolved -- and the decisions
+         * below corrected -- before `result`/`kept` are ever forwarded on.
          */
-#ifndef MRA_ENABLE_HOST
-        co_await ttg::device::wait(kept0.buffer(), kept1.buffer(), kept2.buffer(), kept3.buffer(),
-                                    kept4.buffer(), kept5.buffer(), kept6.buffer(), kept7.buffer());
-#endif // MRA_ENABLE_HOST
-        std::array<const kept_tensor_type*, num_children> kept_children =
-              {&kept0, &kept1, &kept2, &kept3, &kept4, &kept5, &kept6, &kept7};
         auto child_kept = [&](size_type i, size_type c) -> bool {
           const auto& ck = *kept_children[c];
-          return !ck.empty() && (ck.buffer().host_ptr()[i] != T(0));
-        };
-        std::vector<bool> any_child_kept(N, false);
-        for (size_type i = 0; i < N; ++i) {
-          for (size_type c = 0; c < num_children; ++c) {
-            if (child_kept(i, c)) any_child_kept[i] = true;
+          if (ck.empty()) return false;
+          // is_current_on(), not is_valid_on(): the latter only checks that a
+          // host-side allocation exists, not that its content has actually
+          // landed yet -- every other non-blocking "can I read this now"
+          // check in this codebase (e.g. tensor.h's own host_view()) uses
+          // is_current_on() for exactly that reason.
+          if (ck.buffer().is_current_on(ttg::device::Device::host())) {
+            return ck.buffer().host_ptr()[i] != T(0);
           }
-        }
+          return true; // unresolved for now -- resolved and corrected below
+        };
         auto mark_truncated_children_leaf = [&]() {
           for (size_type i = 0; i < N; ++i) {
             for (size_type c = 0; c < num_children; ++c) {
@@ -294,6 +316,19 @@ namespace mra
           select_in(in6); select_in(in7);
           input.add(norms.buffer());
 
+          // Fold every non-empty "kept" buffer into this task's own
+          // batch-select, exactly like select_in() above does for in0..in7 --
+          // whichever of them child_kept() above couldn't yet resolve
+          // (rare: still in flight) is guaranteed resolved once the wait()
+          // below resumes, so the corrected pass further down always has
+          // definite data to work with. Already-resident ones are a no-op
+          // here, so there is no need to distinguish them.
+          auto select_kept_in = [&](const kept_tensor_type& k) {
+            if (!k.empty()) input.add(k.buffer());
+          };
+          select_kept_in(kept0); select_kept_in(kept1); select_kept_in(kept2); select_kept_in(kept3);
+          select_kept_in(kept4); select_kept_in(kept5); select_kept_in(kept6); select_kept_in(kept7);
+
           co_await ttg::device::select(input);
 #endif
 
@@ -348,9 +383,33 @@ namespace mra
           norms.compute();
           /* wait for kernel and transfer sums back */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(d_sumsq, norms.buffer());
+          // Also wait on every "kept" buffer here (mark_device_out no-ops on
+          // an empty/never-staged/already-host buffer, so it is always safe
+          // to list all eight unconditionally -- see the comment on
+          // child_kept() above): this is the corresponding wait for the
+          // select_kept_in() calls above, and is what turns child_kept()'s
+          // conservative "assume kept" guess into a definite answer for
+          // every child by the time execution reaches the corrected pass
+          // below.
+          co_await ttg::device::wait(d_sumsq, norms.buffer(),
+                                      kept0.buffer(), kept1.buffer(), kept2.buffer(), kept3.buffer(),
+                                      kept4.buffer(), kept5.buffer(), kept6.buffer(), kept7.buffer());
 #endif
           norms.verify();
+
+          // Every "kept" buffer is now fully resolved (see the wait() just
+          // above), so child_kept() no longer needs to guess for any of
+          // them -- redo the leaf marking (idempotent: set_child_leaf only
+          // ever flips false->true, so this only adds bits the earlier,
+          // possibly-guessed pass above may have missed) and recompute
+          // any_child_kept from scratch for the truncation decision below.
+          mark_truncated_children_leaf();
+          std::vector<bool> any_child_kept(N, false);
+          for (size_type i = 0; i < N; ++i) {
+            for (size_type c = 0; c < num_children; ++c) {
+              if (child_kept(i, c)) any_child_kept[i] = true;
+            }
+          }
 
 #if defined(MRA_CHECK_NORMS)
           // DEBUG: right after the compress kernel (+ its sparsity scatter,
