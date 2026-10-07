@@ -543,25 +543,30 @@ namespace mra::detail {
                             int device_id, ttg::device::Stream stream)
   {
     const std::size_t num_extra = slot.extra_dsts.size();
-    const std::size_t total = 2 + num_extra;
 #if defined(MRA_ENABLE_CUDA) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
     std::vector<const void*> dsts;
     std::vector<const void*> srcs;
     std::vector<std::size_t> sizes;
-    dsts.reserve(total);
-    srcs.reserve(total);
-    sizes.reserve(total);
-    dsts.push_back(static_cast<void*>(slot.dev_args));
-    srcs.push_back(static_cast<void*>(slot.args.data()));
-    sizes.push_back(num_args*sizeof(Arg));
-    dsts.push_back(static_cast<void*>(slot.dev_offsets));
-    srcs.push_back(static_cast<void*>(slot.offsets.data()));
-    sizes.push_back(num_offsets*sizeof(size_type));
+    dsts.reserve(2 + num_extra);
+    srcs.reserve(2 + num_extra);
+    sizes.reserve(2 + num_extra);
+    // cudaMemcpyBatchAsync rejects zero-sized entries with
+    // cudaErrorInvalidValue (unlike cudaMemcpyAsync, for which they are a
+    // no-op), and extra copies for a member with no functions are exactly
+    // that -- so drop them here.
+    auto add_copy = [&](const void* dst, const void* src, std::size_t size) {
+      if (size == 0) return;
+      dsts.push_back(dst);
+      srcs.push_back(src);
+      sizes.push_back(size);
+    };
+    add_copy(slot.dev_args, slot.args.data(), num_args*sizeof(Arg));
+    add_copy(slot.dev_offsets, slot.offsets.data(), num_offsets*sizeof(size_type));
     for (std::size_t k = 0; k < num_extra; ++k) {
-      dsts.push_back(slot.extra_dsts[k]);
-      srcs.push_back(slot.extra_srcs[k]);
-      sizes.push_back(slot.extra_sizes[k]);
+      add_copy(slot.extra_dsts[k], slot.extra_srcs[k], slot.extra_sizes[k]);
     }
+    const std::size_t total = dsts.size();
+    if (total == 0) return;
     cudaMemcpyAttributes attrs{};
     attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
     attrs.srcLocHint = cudaMemLocation{cudaMemLocationTypeHost, 0};
