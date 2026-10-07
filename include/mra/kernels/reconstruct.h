@@ -638,7 +638,10 @@ namespace mra {
       // above.
       size_type total_sparsity_bytes = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        total_sparsity_bytes += (num_children + 1) * static_cast<size_type>(batch[m].template get<1>().dim(0));
+        // structural N from the result, which is always allocated with N
+        // functions (unlike the node, which is empty if it only exists via
+        // from_parent) -- see below
+        total_sparsity_bytes += (num_children + 1) * static_cast<size_type>(batch[m].template get<7>().coeffs().dim(0));
       }
       slot.sparsity.resize(total_sparsity_bytes);
 
@@ -653,7 +656,11 @@ namespace mra {
         auto& m_r_arr_tensor    = batch[m].template get<6>(); // real array of 8 r Tensors, for their sparsity
         auto& m_result_tensor   = batch[m].template get<7>(); // real result Tensor
         const size_type m_n_nonzero = batch[m].template get<8>();
-        const size_type n = static_cast<size_type>(m_node_view.dim(0)); // structural N
+        // structural N: taken from the result, not m_node_view -- the node is
+        // empty (dim(0) == 0) whenever it only exists via from_parent, which
+        // would size this member's sparsity copies and kernel scan to zero
+        // while m_n_nonzero (the union incl. from_parent) is not
+        const size_type n = static_cast<size_type>(m_result_tensor.coeffs().dim(0));
 
 #if defined(MRA_CHECK_NORMS)
         // DEBUG: recompute the true device-side union (node_view OR
