@@ -246,12 +246,8 @@ namespace mra {
       return view_on(ttg::device::Device::host());
     }
 
-    /**
-     * Returns true if the tensor is invalid (i.e., not allocated) or has zero number of elements.
-     * Otherwise returns false.
-     */
     bool empty() const {
-      return !m_buffer.is_valid() || size() == 0;
+      return m_buffer.empty();
     }
 
     void clear() {
