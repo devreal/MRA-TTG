@@ -41,9 +41,9 @@
 /**
  * Upper bound on get_rnlp_device's tree depth (natlev - n). MADNESS itself
  * never uses tree levels beyond MAX_LEVEL == 31 (see the KeyPair::hash()
- * comment in mra/tasks/convolution.h).
- * However, in practice we are seeing higher natlev values,
- * so we increase the maximum recursion depth to accommodate these higher natlev values.
+ * comment in mra/tasks/convolution.h), so no legitimate (n, natlev) pair can
+ * need to descend further than that -- this is a real, meaningful bound, not
+ * an arbitrary guess. Overridable like MRA_MAX_K for the same reason.
  */
 #ifndef MRA_OP1D_MAX_RECURSION_DEPTH
 #define MRA_OP1D_MAX_RECURSION_DEPTH 64
@@ -108,18 +108,21 @@ namespace mra {
     /// device-portable equivalent, computed directly instead of from a table
     /// since the recurrence coefficients (n/(n+1), sqrt(2n+1)) are cheap to
     /// evaluate inline. p must have room for k elements.
+    ///
+    /// Sequential and thread-private: the three-term recurrence makes p[n+1]
+    /// depend on p[n] and p[n-1], so it cannot be split across threads, and k
+    /// (at most 2*MRA_MAX_K) is small enough for every thread to evaluate it
+    /// redundantly into its own `p`.
     template <typename T>
     DEVSCOPE void legendre_scaling_device(T x, size_type k, T* p) {
       T z = T(2) * x - T(1);
       p[0] = T(1);
       if (k > 1) p[1] = z;
-      if (thread_id() > 0) {
-        for (size_type n = thread_id(); n + 1 < k; n += block_size()) {
-          T nn1 = T(n) / T(n + 1);
-          p[n + 1] = (z * p[n] - p[n - 1]) * nn1 + z * p[n];
-        }
+      for (size_type n = 1; n + 1 < k; ++n) {
+        T nn1 = T(n) / T(n + 1);
+        p[n + 1] = (z * p[n] - p[n - 1]) * nn1 + z * p[n];
       }
-      for (size_type n = thread_id(); n < k; n += block_size()) {
+      for (size_type n = 0; n < k; ++n) {
         p[n] *= sqrt(T(2) * T(n) + T(1));
       }
     }
@@ -212,7 +215,7 @@ namespace mra {
       T argmax = fabs(log(T(1e-22) / sch));
 
       SHARED T acc[2 * MRA_MAX_K_SIZET];
-      SHARED T phix[2 * MRA_MAX_K_SIZET];
+      T phix[2 * MRA_MAX_K_SIZET]; // thread-private, see legendre_scaling_device
       for (size_type p = thread_id(); p < 2 * K; p += block_size()) acc[p] = T(0);
       for (size_type box = 0; box < nbox; ++box) {
         T xlo = T(box) * h + T(lxx);
@@ -225,7 +228,10 @@ namespace mra {
         }
       }
       if (lkeep < 0) {
-        for (size_type p = 1; p < 2 * K; p += 2) acc[p] = -acc[p];
+        // each thread flips only the odd coefficients it owns
+        for (size_type p = thread_id(); p < 2 * K; p += block_size()) {
+          if (p & 1) acc[p] = -acc[p];
+        }
       }
       for (size_type p = thread_id(); p < 2 * K; p += block_size()) out[p] = acc[p];
       SYNCTHREADS();
@@ -301,7 +307,12 @@ namespace mra {
 
       while (sp > 0) {
         const size_type top = sp - 1;
-        Frame& f = stack[top];
+        // Snapshot the frame, then synchronize: the team lead updates
+        // stack[top].state below, and a thread that had not read it yet would
+        // otherwise see the new state and take a different branch (and a
+        // different SYNCTHREADS()) than the rest of the block.
+        const Frame f = stack[top];
+        SYNCTHREADS();
 
         if (f.state == ENTER) {
           if (op1d_issmall(p.expnt, f.n, f.lx)) {
@@ -312,7 +323,7 @@ namespace mra {
           }
           if (f.n < p.natlev) {
             if (is_team_lead()) {
-              f.state = WAIT_LEFT;
+              stack[top].state = WAIT_LEFT;
             }
             SYNCTHREADS();
             if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
@@ -340,7 +351,7 @@ namespace mra {
           for (size_type i = thread_id(); i < 2 * K; i += block_size())
             leftbuf[top * 2 * K + i] = retbuf[i];
           if (is_team_lead()) {
-            f.state = WAIT_RIGHT;
+            stack[top].state = WAIT_RIGHT;
           }
           SYNCTHREADS();
           if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
