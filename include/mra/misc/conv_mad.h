@@ -2,6 +2,14 @@
 #define CONV_MAD_H
 
 #include <atomic>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <mutex>
+#include <sstream>
+#include <iomanip>
+#include <cstdlib>
 #include <memory>
 #include <array>
 #include <utility>
@@ -861,17 +869,10 @@ namespace mra {
      * it is a hard error rather than a fallback path.
      */
     OpResult try_get_op(Level n, Key<NDIM> disp) const {
-      for (Dimension d = 0; d < NDIM; ++d) {
-        Translation l = disp.translation()[d];
-        if (l < -MRA_OP1D_MAX_DISPLACEMENT || l > MRA_OP1D_MAX_DISPLACEMENT) {
-          throw std::runtime_error(
-              "GaussianConvolutionOperator::try_get_op: translation out of the "
-              "level-wide generation range [-MRA_OP1D_MAX_DISPLACEMENT, MRA_OP1D_MAX_DISPLACEMENT]");
-        }
-      }
+      check_op_displacement(disp);
 
       OpResult out;
-      std::shared_ptr<const detail::LevelOp1DTable<T, NDIM>> table;
+      table_pointer_type table;
       auto level_res = _level_table_cache_async.try_get(detail::LevelKey(n));
       if (level_res.status == detail::AsyncCacheStatus::Pending) {
         out.status = Status::Pending;
@@ -884,21 +885,22 @@ namespace mra {
       } else {
         table = level_res.value; // Available
       }
-      for (Dimension d = 0; d < NDIM; ++d) {
-        out.dims[d] = detail::Op1DSliceView<T, NDIM>(table, d, disp.translation()[d]);
-      }
-      auto key = Key<NDIM>(0, n, disp.translation());
-      auto norms_res = _norms_cache_async.try_get(key);
-      if (norms_res.status == detail::AsyncCacheStatus::Available) {
-        out.status = Status::Available;
-        out.norms = norms_res.value;
-        return out;
-      }
-      if (norms_res.status == detail::AsyncCacheStatus::Pending) {
-        out.status = Status::Pending;
-        return out;
-      }
-      out.status = Status::Owned;
+      lookup_op_norms(out, std::move(table), n, disp);
+      return out;
+    }
+
+    /**
+     * Same as try_get_op(n, disp), but for a caller that already holds the
+     * level's table -- e.g. one it generated itself and whose publication
+     * (publish_generation_work()) is deferred until its task completes, so
+     * the level table cache would still report it as Pending. Never sets
+     * level_work.
+     */
+    OpResult try_get_op(Level n, Key<NDIM> disp, table_pointer_type table) const {
+      check_op_displacement(disp);
+      assert(table && table->n == n);
+      OpResult out;
+      lookup_op_norms(out, std::move(table), n, disp);
       return out;
     }
 
@@ -993,6 +995,7 @@ namespace mra {
     /// Publishes the norms tensor assembled by finish_op_assembly() (host
     /// path) or submit_assemble_norms_kernel() (device path) for (n, disp).
     void publish_op(Level n, Key<NDIM> disp, norms_pointer_type data) const {
+      if (validate_ops_enabled()) validate_op_norms(n, disp, *data); // DEBUG
       auto key = Key<NDIM>(0, n, disp.translation());
       _norms_cache_async.publish(key, std::move(data));
     }
@@ -1012,18 +1015,24 @@ namespace mra {
      * -- see that function's comment, which takes the analogous host-side
      * shortcut). R/S for the kernel come straight from res.dims -- no
      * separate "assembling" object needed for those, see OpResult's
-     * comment. Call sequence (see e.g. shell0_tt/accumulate_tt):
+     * comment. Call sequence (see shell0_tt/accumulate_tt) -- the operator
+     * buffers ride along in the task's ONE select() together with the
+     * convolution's own buffers (see add_convolution_op_buffers()):
+     *   // loop on try_get_op() + ttg::device::suspend() while Pending
      *   bool need_assemble = (res.status == Status::Owned);
      *   std::shared_ptr<DenseTensor<T,4>> norms;
      *   if (need_assemble) {
      *     norms = op.make_norms_tensor();
      *   }
-     *   auto input = op.make_generation_input(res, items_buf, ws_buf);
-     *   if (need_assemble) op.add_assembly_buffers(input, *norms);
+     *   ttg::device::Input input(...convolution buffers...);
+     *   op.add_convolution_op_buffers(input, res, items_buf, ws_buf, norms.get());
      *   co_await ttg::device::select(input);
      *   if (op.has_generation_work(res)) op.submit_generation_kernel(res, items, items_buf, ws_buf);
      *   if (need_assemble) op.submit_assemble_norms_kernel(res, n, disp, *norms);
-     *   co_await ttg::device::wait(); // wait for OUR OWN submitted kernels before publishing
+     *   ... submit the convolution kernel ...
+     *   // pull norms (and norms1d, if generated) back to the host before
+     *   // publishing -- screener_tt reads both there
+     *   co_await ttg::device::wait(norms->buffer(), ...);
      *   if (op.has_generation_work(res)) op.publish_generation_work(res);
      *   if (need_assemble) op.publish_op(n, disp, norms);
      */
@@ -1056,6 +1065,43 @@ namespace mra {
       input.add(m_shared_fac.buffer());
       input.add(m_shared_rank.buffer());
       input.add(norms.buffer());
+    }
+
+    /// Adds every operator buffer a device convolution task (shell0_tt/
+    /// accumulate_tt) needs to `input`, for the task's ONE select():
+    ///  - the R/S tables backing res.dims, each exactly once (all dimensions
+    ///    slice the same level table, so adding them per dimension would
+    ///    register the same data as several flows);
+    ///  - if this task owns the level's table: everything
+    ///    submit_generation_kernel() needs (see make_generation_input());
+    ///  - if res is Owned: everything submit_assemble_norms_kernel() needs,
+    ///    including the table's norms1d (see add_assembly_buffers());
+    ///    `norms` must then be the tensor from make_norms_tensor();
+    ///  - if res is Available: the cached norms tensor.
+    /// res must not be Pending -- loop on try_get_op() and
+    /// ttg::device::suspend() until it isn't, before calling this.
+    void add_convolution_op_buffers(ttg::device::Input& input, const OpResult& res,
+                                    ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
+                                    ttg::Buffer<T>& workspace,
+                                    DenseTensor<T, 4>* norms) const {
+      assert(res.status != Status::Pending);
+      if (res.level_work) {
+        // includes the table's R/S/norms1d
+        add_generation_buffers(input, res, items_buf, workspace);
+      } else {
+        const auto& table = *res.dims[0].table;
+        input.add(table.R.buffer());
+        input.add(table.S.buffer());
+        if (res.status == Status::Owned) {
+          input.add(table.norms1d.buffer());
+        }
+      }
+      if (res.status == Status::Owned) {
+        assert(nullptr != norms);
+        add_assembly_buffers(input, *norms);
+      } else {
+        input.add(res.norms->buffer());
+      }
     }
 
     /// Call only after co_await-ing the select() that add_assembly_buffers()
@@ -1143,19 +1189,26 @@ namespace mra {
     ttg::device::Input make_generation_input(const OpResult& res, ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
                                               ttg::Buffer<T>& workspace) const {
       ttg::device::Input input;
+      add_generation_buffers(input, res, items_buf, workspace);
+      return input;
+    }
+
+    /// Same buffers as make_generation_input(), appended to an existing
+    /// `input`. Adds nothing unless res.level_work is set.
+    void add_generation_buffers(ttg::device::Input& input, const OpResult& res,
+                                ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
+                                ttg::Buffer<T>& workspace) const {
+      if (!res.level_work) return;
       input.add(m_shared_c.buffer());
       input.add(m_shared_hgT.buffer());
       input.add(m_shared_hgT2k.buffer());
       input.add(m_shared_quadx.buffer());
       input.add(m_shared_quadw.buffer());
-      if (res.level_work) {
-        input.add(res.level_work->R.buffer());
-        input.add(res.level_work->S.buffer());
-        input.add(res.level_work->norms1d.buffer());
-        input.add(items_buf);
-        input.add(workspace);
-      }
-      return input;
+      input.add(res.level_work->R.buffer());
+      input.add(res.level_work->S.buffer());
+      input.add(res.level_work->norms1d.buffer());
+      input.add(items_buf);
+      input.add(workspace);
     }
 
     /// Builds the flat (dimension, count-index, term) work-item list
@@ -1229,18 +1282,219 @@ namespace mra {
           ttg::device::current_stream());
     }
 
-    /// Call only after co_await-ing the generation kernel to completion
-    /// (co_await ttg::device::wait(), no argument). Publishes the whole
+    /// Call only once the generating task has completed (e.g. via
+    /// ttg::device::on_complete()), after pulling the table back to the host
+    /// (co_await ttg::device::wait() on its R/S/norms1d): until the task
+    /// completes the runtime still holds its written device copies, which
+    /// other tasks must not stage in. Publishes the whole
     /// table as Available so every other task at this level -- any
     /// dimension, any translation -- finds it immediately.
     void publish_generation_work(const OpResult& res) const {
       if (!res.level_work) return;
+      if (validate_ops_enabled()) validate_level_table(*res.level_work); // DEBUG
       _level_table_cache_async.publish(detail::LevelKey(res.level_work->n),
                                         table_pointer_type(res.level_work));
     }
 #endif // !MRA_ENABLE_HOST
 
   private:
+#ifndef MRA_ENABLE_HOST
+    static void check_op_displacement(const Key<NDIM>& disp) {
+      for (Dimension d = 0; d < NDIM; ++d) {
+        Translation l = disp.translation()[d];
+        if (l < -MRA_OP1D_MAX_DISPLACEMENT || l > MRA_OP1D_MAX_DISPLACEMENT) {
+          throw std::runtime_error(
+              "GaussianConvolutionOperator::try_get_op: translation out of the "
+              "level-wide generation range [-MRA_OP1D_MAX_DISPLACEMENT, MRA_OP1D_MAX_DISPLACEMENT]");
+        }
+      }
+    }
+
+    /**
+     * DEBUG (MRA_VALIDATE_OPS=1): compare device-generated operator data
+     * against MADNESS's own Convolution1D::nonstandard() / SeparatedConvolution
+     * data, i.e., what the host path (get_op()) would have produced. Called at
+     * publish time, when the data is current on the host. Prints the largest
+     * absolute and relative deviation per level (table) or per (level,
+     * displacement) (norms). Expensive -- forces MADNESS to build its own
+     * nonstandard ops.
+     */
+    static bool validate_ops_enabled() {
+      static const bool enabled = [] {
+        const char* v = std::getenv("MRA_VALIDATE_OPS");
+        return v != nullptr && *v != '\0' && std::string(v) != "0";
+      }();
+      return enabled;
+    }
+
+    struct ValidationError {
+      double max_abs = 0.0, max_rel = 0.0, ref_at_max = 0.0;
+      std::size_t nbad = 0, ntotal = 0;
+      std::string where;
+      static bool is_bad(double val, double ref) {
+        return !(std::abs(val - ref) <= 1e-10 + 1e-8 * std::abs(ref)); // also catches NaN
+      }
+      template <typename Loc>
+      bool update(double val, double ref, Loc&& loc) {
+        const double abs = std::abs(val - ref);
+        const double rel = abs / std::max(std::abs(ref), 1e-300);
+        ++ntotal;
+        const bool bad = is_bad(val, ref);
+        if (bad) ++nbad;
+        if (abs > max_abs || std::isnan(abs)) { max_abs = abs; ref_at_max = ref; where = loc(); }
+        if (std::abs(ref) > 1e-12) max_rel = std::max(max_rel, rel);
+        return bad;
+      }
+    };
+
+    void validate_level_table(const detail::LevelOp1DTable<T, NDIM>& table) const {
+      const Level n = table.n;
+      const size_type count = m_mad_conv_sep_vec.size();
+      const size_type rank = (size_type)m_max_rank;
+      const size_type K = m_K, K2 = 2 * m_K;
+      const T* R  = table.R.view_on(ttg::device::Device::host()).data();
+      const T* S  = table.S.view_on(ttg::device::Device::host()).data();
+      const T* N1 = table.norms1d.view_on(ttg::device::Device::host()).data();
+      ValidationError eR, eS, eN;
+      // per (c,i): number of bad entries over all d, l and fields, and how many
+      // of the generated values are exactly zero
+      std::vector<std::size_t> bad_ci(count * rank, 0), zero_ci(count * rank, 0), total_ci(count * rank, 0);
+      for (Dimension d = 0; d < NDIM; ++d) {
+        for (size_type li = 0; li < MRA_OP1D_NUM_DISPLACEMENTS; ++li) {
+          const Translation l = (Translation)li - MRA_OP1D_MAX_DISPLACEMENT;
+          for (size_type c = 0; c < count; ++c) {
+            auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+            for (size_type i = 0; i < rank; ++i) {
+              const size_type entry = ((d * MRA_OP1D_NUM_DISPLACEMENTS + li) * count + c) * rank + i;
+              const T* r = R + entry * K2 * K2;
+              const T* s = S + entry * K * K;
+              const T* nn = N1 + entry * 5;
+              const madness::ConvolutionData1D<T>* cd = nullptr;
+              if (i < mad_ops.size()) cd = mad_ops[i].getop(d)->nonstandard(n, l);
+              auto loc = [&](const char* what, size_type k) {
+                return [=]() {
+                  std::ostringstream oss;
+                  oss << what << "(d=" << d << ",l=" << l << ",c=" << c << ",i=" << i << ",k=" << k << ")";
+                  return oss.str();
+                };
+              };
+              const bool haveR = cd && cd->R.size() != 0;
+              const bool haveT = cd && cd->T.size() != 0;
+              auto& nbad = bad_ci[c * rank + i];
+              auto& nzero = zero_ci[c * rank + i];
+              auto& ntot = total_ci[c * rank + i];
+              for (size_type k = 0; k < K2 * K2; ++k) {
+                nbad += eR.update(r[k], haveR ? cd->R.ptr()[k] : T(0), loc("R", k));
+                nzero += (r[k] == T(0)); ++ntot;
+              }
+              for (size_type k = 0; k < K * K; ++k) {
+                nbad += eS.update(s[k], haveT ? cd->T.ptr()[k] : T(0), loc("S", k));
+                nzero += (s[k] == T(0)); ++ntot;
+              }
+              const T refn[5] = {cd ? cd->Rnorm : T(0), cd ? cd->Tnorm : T(0), cd ? cd->Rnormf : T(0),
+                                 cd ? cd->Tnormf : T(0), cd ? cd->NSnormf : T(0)};
+              for (size_type k = 0; k < 5; ++k) {
+                nbad += eN.update(nn[k], refn[k], loc("norms1d", k));
+                nzero += (nn[k] == T(0)); ++ntot;
+              }
+            }
+          }
+        }
+      }
+      static std::mutex mtx;
+      std::lock_guard<std::mutex> lg(mtx);
+      std::cout << "MRA_VALIDATE_OPS table n=" << n << std::scientific << std::setprecision(3)
+                << " | R bad " << eR.nbad << "/" << eR.ntotal << " max_abs " << eR.max_abs << " at " << eR.where << " (ref " << eR.ref_at_max << ")"
+                << " | S bad " << eS.nbad << "/" << eS.ntotal << " max_abs " << eS.max_abs << " at " << eS.where << " (ref " << eS.ref_at_max << ")"
+                << " | norms1d bad " << eN.nbad << "/" << eN.ntotal << " max_abs " << eN.max_abs << " at " << eN.where << " (ref " << eN.ref_at_max << ")"
+                << std::defaultfloat << std::endl;
+      // list the (c,i) terms with any bad entry: c:i(bad/zero/total)
+      std::cout << "MRA_VALIDATE_OPS table n=" << n << " bad terms (c:i bad/zero/total):";
+      std::size_t nlisted = 0;
+      for (size_type c = 0; c < count; ++c) {
+        for (size_type i = 0; i < rank; ++i) {
+          const auto idx = c * rank + i;
+          if (bad_ci[idx] == 0) continue;
+          if (nlisted++ < 40) {
+            std::cout << " " << c << ":" << i << "(" << bad_ci[idx] << "/" << zero_ci[idx] << "/" << total_ci[idx] << ")";
+          }
+        }
+      }
+      std::cout << " [" << nlisted << " terms of " << count * rank << "]" << std::endl;
+    }
+
+    void validate_op_norms(Level n, const Key<NDIM>& disp, const DenseTensor<T, 4>& norms) const {
+      auto nv = norms.view_on(ttg::device::Device::host());
+      const T* got = nv.data();
+      const size_type count = m_mad_conv_sep_vec.size();
+      const size_type rank = (size_type)m_max_rank;
+      const size_type nk = (size_type)NormId::Count;
+      auto at = [&](size_type c, size_type i, size_type d, NormId id) {
+        return got[((c * rank + i) * NDIM + d) * nk + (size_type)id];
+      };
+      const char* names[] = {"Rnorm", "Snorm", "Rnormf", "Snormf", "NSnormf", "Fac", "MUnorm", "Opnorm", "Rank"};
+      std::array<ValidationError, (size_type)NormId::Count> err;
+      const madness::Key<NDIM> mkey = Key<NDIM>(0, n, disp.translation()).to_madness_key();
+      for (size_type c = 0; c < count; ++c) {
+        auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+        for (size_type i = 0; i < mad_ops.size(); ++i) {
+          // reference 1D norms, and MUnorm via munorm2_ns's formula on them
+          double prod = 1.0, sum = 0.0;
+          for (Dimension d = 0; d < NDIM; ++d) {
+            auto cd = mad_ops[i].getop(d)->nonstandard(n, disp.translation()[d]);
+            const T ref[5] = {cd->Rnorm, cd->Tnorm, cd->Rnormf, cd->Tnormf, cd->NSnormf};
+            for (size_type k = 0; k < 5; ++k) {
+              err[k].update(at(c, i, d, (NormId)k), ref[k], [&] {
+                std::ostringstream oss; oss << "(c=" << c << ",i=" << i << ",d=" << d << ")"; return oss.str(); });
+            }
+            const double a = cd->NSnormf, b = cd->Tnormf;
+            const double aa = std::min(a, b), bb = std::max(a, b);
+            prod *= bb;
+            if (bb > 0.0) sum += aa / bb;
+          }
+          if (n) prod *= sum;
+          const double fac = mad_ops[i].getfac();
+          auto ci_loc = [&] { std::ostringstream oss; oss << "(c=" << c << ",i=" << i << ")"; return oss.str(); };
+          err[(size_type)NormId::Fac].update(at(c, i, 0, NormId::Fac), fac, ci_loc);
+          err[(size_type)NormId::MUnorm].update(at(c, i, 0, NormId::MUnorm), prod * std::abs(fac), ci_loc);
+        }
+        auto c_loc = [&] { std::ostringstream oss; oss << "(c=" << c << ")"; return oss.str(); };
+        err[(size_type)NormId::Opnorm].update(at(c, 0, 0, NormId::Opnorm), m_mad_conv_sep_vec[c]->norm(n, mkey, mkey), c_loc);
+        err[(size_type)NormId::Rank].update(at(c, 0, 0, NormId::Rank), (T)mad_ops.size(), c_loc);
+      }
+      static std::mutex mtx;
+      std::lock_guard<std::mutex> lg(mtx);
+      std::cout << "MRA_VALIDATE_OPS norms n=" << n << " disp=[";
+      for (Dimension d = 0; d < NDIM; ++d) std::cout << disp.translation()[d] << (d + 1 < NDIM ? "," : "");
+      std::cout << "]" << std::scientific << std::setprecision(3);
+      for (size_type k = 0; k < nk; ++k) {
+        std::cout << " | " << names[k] << " bad " << err[k].nbad << "/" << err[k].ntotal << " max " << err[k].max_abs << "/" << err[k].max_rel;
+        if (err[k].max_abs > 0) std::cout << " at " << err[k].where << " (ref " << err[k].ref_at_max << ")";
+      }
+      std::cout << std::defaultfloat << std::endl;
+    }
+
+    /// Slices out.dims from `table` and checks/claims the norms cache for
+    /// (n, disp) -- the part of try_get_op() after the level table is known.
+    void lookup_op_norms(OpResult& out, table_pointer_type table, Level n, const Key<NDIM>& disp) const {
+      for (Dimension d = 0; d < NDIM; ++d) {
+        out.dims[d] = detail::Op1DSliceView<T, NDIM>(table, d, disp.translation()[d]);
+      }
+      auto key = Key<NDIM>(0, n, disp.translation());
+      auto norms_res = _norms_cache_async.try_get(key);
+      if (norms_res.status == detail::AsyncCacheStatus::Available) {
+        out.status = Status::Available;
+        out.norms = norms_res.value;
+        return;
+      }
+      if (norms_res.status == detail::AsyncCacheStatus::Pending) {
+        out.status = Status::Pending;
+        return;
+      }
+      out.status = Status::Owned;
+    }
+#endif // !MRA_ENABLE_HOST
+
     using op1d_cache_type = detail::Op1DCache<T>;
     using data_cache_type = detail::SharedComputeCache<Key<NDIM>, ConvolutionData<T, NDIM>>;
 

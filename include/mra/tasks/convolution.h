@@ -535,8 +535,13 @@ namespace mra {
            * per-displacement loop below never needs another select().
            */
           mra::Key<NDIM> op_disp(key.batch(), key.level(), {0, 0, 0});
+          // The level's table once known. If we generate it ourselves, its
+          // publication is deferred until this task completes (see below),
+          // so we have to look up norms against it directly.
+          typename mra::GaussianConvolutionOperator<T, NDIM>::table_pointer_type level_table;
           for (;;) {
-            auto res = op.try_get_op(key.level(), op_disp);
+            auto res = level_table ? op.try_get_op(key.level(), op_disp, level_table)
+                                   : op.try_get_op(key.level(), op_disp);
             if (op.has_generation_work(res)) {
               /**
                * We need to generate the transition matrices for this level's operator.
@@ -547,9 +552,19 @@ namespace mra {
               auto gen_input = op.make_generation_input(res, items_buf, ws_buf);
               co_await ttg::device::select(gen_input);
               op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
-              // wait for the kernel and pull the norms back to the host
-              co_await ttg::device::wait(res.level_work->norms1d.buffer());
-              op.publish_generation_work(res);
+              // wait for the kernel and pull the table back to the host: the
+              // norms for finish_op_assembly(), R/S so that tasks on other
+              // devices can stage them in (published tables are shared by all
+              // devices, and D2D may not be available)
+              co_await ttg::device::wait(res.level_work->norms1d.buffer(), res.level_work->R.buffer(),
+                                         res.level_work->S.buffer());
+              // Publish only once this task has completed: until then the
+              // runtime still holds our (written) device copies of the table,
+              // and other tasks must not stage them in.
+              sends.push_back(ttg::device::on_complete([opp = &op, res]() { opp->publish_generation_work(res); }));
+            }
+            if (res.status != mra::GaussianConvolutionOperator<T, NDIM>::Status::Pending) {
+              level_table = res.dims[0].table;
             }
             if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
               break;
@@ -574,7 +589,6 @@ namespace mra {
 
           assert(cnorms.buffer().is_current_on(ttg::device::Device::host()) && "cnorms should be on host at this point");
 
-          assert(cnorms.buffer().is_valid() && "cnorms buffer should be valid at this point");
           auto cnorm_view = cnorms.view_on(ttg::device::Device::host());
 
           const auto real_distance_squared = [&](const auto& mad_op, const auto &displacement)
@@ -642,7 +656,7 @@ namespace mra {
               // for why R/S (unused by screener_tt anyway) aren't cached.
               std::shared_ptr<const DenseTensor<T, 4>> op_norms;
               for (;;) {
-                auto res2 = op.try_get_op(key.level(), disp_key);
+                auto res2 = op.try_get_op(key.level(), disp_key, level_table);
                 if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
                   op_norms = res2.norms;
                   break;
@@ -655,6 +669,7 @@ namespace mra {
                 }
                 co_await ttg::device::suspend();
               }
+
               assert(op_norms->buffer().is_valid() && "op_norms buffer should be valid at this point");
               auto opnorm_view = op_norms->view_on(ttg::device::Device::host());
 #endif // MRA_ENABLE_HOST
@@ -750,59 +765,36 @@ namespace mra {
         // try_get_op() call that there's no separate cached "aggregate" to
         // hold onto; only the norms tensor is cached (see OpResult's comment
         // in conv_mad.h), and res.norms carries that once assembled/found.
-        mra::GaussianConvolutionOperator<T, NDIM>::OpResult res;
+        //
+        // A device task may co_await ttg::device::select() only ONCE, so we
+        // spin here (host-only, before that select()) until the operator is
+        // either Available or ours to build. In the latter case the
+        // generation/assembly buffers ride along in the convolution's own
+        // select() below and their kernels are queued ahead of it.
+        using OpResult = typename mra::GaussianConvolutionOperator<T, NDIM>::OpResult;
+        using OpStatus = typename mra::GaussianConvolutionOperator<T, NDIM>::Status;
+        OpResult res;
         for (;;) {
           res = op.try_get_op(key.level(), op_disp);
-          const bool need_generate = op.has_generation_work(res);
-          const bool need_assemble = (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned);
-          if (!need_generate && !need_assemble) {
-            if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
-              break;
-            }
-            // Pending: nothing for us to do this round -- yield and retry.
-            co_await ttg::device::suspend();
-            continue;
+          if (res.status != OpStatus::Pending) break;
+          if (op.has_generation_work(res)) {
+            // Owning the level table implies nobody else could have claimed
+            // this displacement's norms yet (claiming requires the table to
+            // be owned or available) -- see try_get_op().
+            throw std::runtime_error("Shell0: own level table generation but norms assembly is pending elsewhere");
           }
-          // Build everything host-side first (safe before the round's one
-          // select() -- see has_generation_work()/make_norms_tensor()'s
-          // comments in conv_mad.h), fold every buffer this round needs into
-          // ONE combined select(), then submit whichever kernel(s) apply.
-          auto gen_items = op.collect_generation_items(res); // empty if !need_generate
-          auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-          auto ws_buf = op.make_generation_workspace(gen_items.size());
-          std::shared_ptr<mra::DenseTensor<T, 4>> norms;
-          if (need_assemble) {
-            norms = op.make_norms_tensor();
-          }
-          auto input = op.make_generation_input(res, items_buf, ws_buf);
-          if (need_assemble) {
-            op.add_assembly_buffers(input, *norms);
-          }
-          co_await ttg::device::select(input);
-          if (need_generate) {
-            op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
-          }
-          if (need_assemble) {
-            // Same stream as submit_generation_kernel (if it ran) -- CUDA
-            // stream ordering guarantees this sees norms1d's freshly-written
-            // values with no explicit wait() needed in between.
-            op.submit_assemble_norms_kernel(res, key.level(), op_disp, *norms);
-          }
-          // Wait for our own submitted kernel(s) to actually finish before
-          // publishing -- publish() must only ever advertise genuinely
-          // complete data to other (possibly different-device) tasks.
-          co_await ttg::device::wait(res.level_work->norms1d.buffer());
-          if (need_generate) {
-            op.publish_generation_work(res);
-          }
-          if (need_assemble) {
-            op.publish_op(key.level(), op_disp, norms);
-            res.norms = norms;
-            break;
-          }
-          // Only the level table was generated (the aggregate is owned by,
-          // or still pending on, some other task) -- loop back to reassess
-          // the aggregate now that the table exists.
+          co_await ttg::device::suspend();
+        }
+        const bool need_generate = op.has_generation_work(res);
+        const bool need_assemble = (res.status == OpStatus::Owned);
+        // All host-side (safe before the select(), see has_generation_work()/
+        // make_norms_tensor()'s comments in conv_mad.h).
+        auto gen_items = op.collect_generation_items(res); // empty if !need_generate
+        auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
+        auto ws_buf = op.make_generation_workspace(gen_items.size());
+        std::shared_ptr<mra::DenseTensor<T, 4>> norms;
+        if (need_assemble) {
+          norms = op.make_norms_tensor();
         }
 #endif // MRA_ENABLE_HOST
 
@@ -838,12 +830,18 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
                                         out.coeffs().buffer(), tmp);
-        input.add(res.norms->buffer());
-        for (Dimension d = 0; d < NDIM; ++d) {
-          input.add(res.dims[d]->R.buffer());
-          input.add(res.dims[d]->S.buffer());
-        }
+        op.add_convolution_op_buffers(input, res, items_buf, ws_buf, norms.get());
         co_await ttg::device::select(input);
+        if (need_generate) {
+          op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
+        }
+        if (need_assemble) {
+          // Same stream as submit_generation_kernel (if it ran) and the
+          // convolution kernel below -- CUDA stream ordering guarantees each
+          // sees its predecessor's writes with no wait() in between.
+          op.submit_assemble_norms_kernel(res, key.level(), op_disp, *norms);
+          res.norms = norms;
+        }
 #endif // MRA_ENABLE_HOST
 
         auto in_node_view = in_node.coeffs().current_view();
@@ -904,8 +902,30 @@ namespace mra {
         }
 
 #ifndef MRA_ENABLE_HOST
-        // wait for the norms to come back
-        co_await ttg::device::wait(resnorms.buffer());
+        // wait for the norms to come back. If we built the operator, also
+        // pull its norms (and the level table, if we generated it) back to
+        // the host before publishing: screener_tt reads the norms there
+        // (finish_op_assembly() / opnorm lookup), and tasks on other devices
+        // stage R/S in from the host copy (D2D may not be available).
+        // need_generate implies need_assemble (see the try_get_op() loop above).
+        if (need_generate) {
+          co_await ttg::device::wait(resnorms.buffer(), norms->buffer(), res.level_work->norms1d.buffer(),
+                                     res.level_work->R.buffer(), res.level_work->S.buffer());
+        } else if (need_assemble) {
+          co_await ttg::device::wait(resnorms.buffer(), norms->buffer());
+        } else {
+          co_await ttg::device::wait(resnorms.buffer());
+        }
+        if (need_assemble) {
+          // Publish only once this task has completed: until then the
+          // runtime still holds our (written) device copies of the table and
+          // norms, and other tasks must not stage them in.
+          sends.push_back(ttg::device::on_complete(
+            [opp = &op, res, level = key.level(), op_disp, norms]() {
+              opp->publish_generation_work(res); // no-op unless we generated the table
+              opp->publish_op(level, op_disp, norms);
+            }));
+        }
 #endif // MRA_ENABLE_HOST
 
         /* check if the result norms are >0.0 and send an empty node otherwise */
@@ -1051,60 +1071,29 @@ namespace mra {
 #else
       // Survives the loop so res.dims/res.norms are usable afterward -- see
       // shell0_tt's identical pattern for why there's no separate cached
-      // "aggregate" object on this path (conv_mad.h's OpResult comment).
-      mra::GaussianConvolutionOperator<T, NDIM>::OpResult res;
+      // "aggregate" object on this path (conv_mad.h's OpResult comment), and
+      // for why we only spin on Pending here: the operator buffers ride along
+      // in the convolution's one select() below.
+      using OpResult = typename mra::GaussianConvolutionOperator<T, NDIM>::OpResult;
+      using OpStatus = typename mra::GaussianConvolutionOperator<T, NDIM>::Status;
+      OpResult res;
       for (;;) {
         res = op.try_get_op(key.level(), displacement);
-        const bool need_generate = op.has_generation_work(res);
-        const bool need_assemble = (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned);
-        if (!need_generate && !need_assemble) {
-          if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
-            break;
-          }
-          // Pending: nothing for us to do this round -- yield and retry.
-          co_await ttg::device::suspend();
-          continue;
+        if (res.status != OpStatus::Pending) break;
+        if (op.has_generation_work(res)) {
+          // see shell0_tt
+          throw std::runtime_error("Accumulate: own level table generation but norms assembly is pending elsewhere");
         }
-        // Build everything host-side first (safe before the round's one
-        // select() -- see has_generation_work()/make_norms_tensor()'s
-        // comments in conv_mad.h), fold every buffer this round needs into
-        // ONE combined select(), then submit whichever kernel(s) apply.
-        auto gen_items = op.collect_generation_items(res); // empty if !need_generate
-        auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-        auto ws_buf = op.make_generation_workspace(gen_items.size());
-        std::shared_ptr<mra::DenseTensor<T, 4>> norms;
-        if (need_assemble) {
-          norms = op.make_norms_tensor();
-        }
-        auto input = op.make_generation_input(res, items_buf, ws_buf);
-        if (need_assemble) {
-          op.add_assembly_buffers(input, *norms);
-        }
-        co_await ttg::device::select(input);
-        if (need_generate) {
-          op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
-        }
-        if (need_assemble) {
-          // Same stream as submit_generation_kernel (if it ran) -- CUDA
-          // stream ordering guarantees this sees norms1d's freshly-written
-          // values with no explicit wait() needed in between.
-          op.submit_assemble_norms_kernel(res, key.level(), displacement, *norms);
-        }
-        // Wait for our own submitted kernel(s) to actually finish before
-        // publishing -- publish() must only ever advertise genuinely
-        // complete data to other (possibly different-device) tasks.
-        co_await ttg::device::wait(res.level_work->norms1d.buffer());
-        if (need_generate) {
-          op.publish_generation_work(res);
-        }
-        if (need_assemble) {
-          op.publish_op(key.level(), displacement, norms);
-          res.norms = norms;
-          break;
-        }
-        // Only the level table was generated (the aggregate is owned by, or
-        // still pending on, some other task) -- loop back to reassess the
-        // aggregate now that the table exists.
+        co_await ttg::device::suspend();
+      }
+      const bool need_generate = op.has_generation_work(res);
+      const bool need_assemble = (res.status == OpStatus::Owned);
+      auto gen_items = op.collect_generation_items(res); // empty if !need_generate
+      auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
+      auto ws_buf = op.make_generation_workspace(gen_items.size());
+      std::shared_ptr<mra::DenseTensor<T, 4>> norms;
+      if (need_assemble) {
+        norms = op.make_norms_tensor();
       }
 #endif // MRA_ENABLE_HOST
 
@@ -1131,16 +1120,20 @@ namespace mra {
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
-      input.add(res.norms->buffer());
-      for (Dimension d = 0; d < NDIM; ++d) {
-        input.add(res.dims[d]->R.buffer());
-        input.add(res.dims[d]->S.buffer());
-      }
+      op.add_convolution_op_buffers(input, res, items_buf, ws_buf, norms.get());
       if (last_key) {
         // if this is the last we want to get the norms of the result back
         input.add(resnorms.buffer());
       }
       co_await ttg::device::select(input);
+      if (need_generate) {
+        op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
+      }
+      if (need_assemble) {
+        // same stream as the generation and convolution kernels, see shell0_tt
+        op.submit_assemble_norms_kernel(res, key.level(), displacement, *norms);
+        res.norms = norms;
+      }
 #endif // MRA_ENABLE_HOST
 
 #ifdef MRA_ENABLE_HOST
@@ -1200,6 +1193,23 @@ namespace mra {
       }
 
 #ifndef MRA_ENABLE_HOST
+      if (need_assemble) {
+        // Pull the operator norms (and the level table, if we generated it)
+        // back to the host before publishing -- see shell0_tt.
+        // need_generate implies need_assemble.
+        if (need_generate) {
+          co_await ttg::device::wait(norms->buffer(), res.level_work->norms1d.buffer(),
+                                     res.level_work->R.buffer(), res.level_work->S.buffer());
+        } else {
+          co_await ttg::device::wait(norms->buffer());
+        }
+        // publish once this task has completed -- see shell0_tt
+        sends.push_back(ttg::device::on_complete(
+          [opp = &op, res, level = key.level(), displacement, norms]() {
+            opp->publish_generation_work(res); // no-op unless we generated the table
+            opp->publish_op(level, displacement, norms);
+          }));
+      }
       // wait for norms to come back
       if (last_key) {
         co_await ttg::device::wait(resnorms.buffer());
