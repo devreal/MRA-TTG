@@ -192,13 +192,24 @@ namespace mra {
     /// double-order polynomials. `out` is block-wide (shared) scratch with
     /// room for 2*K elements.
     ///
-    /// Cooperative, but not by distributing the (box, quadrature-point)
-    /// summation itself: every thread redundantly walks the full loop (all
-    /// its inputs -- coeff/expnt/n/lx -- are scalars identical across the
-    /// block, so this is cheap and, critically, avoids needing a reduction
-    /// or atomics over `out`) into a private accumulator, then each thread
-    /// publishes only the output coefficients it owns (thread_id()-strided)
-    /// to the shared `out` -- no two threads ever write the same index.
+    /// Cooperative along two axes: threadIdx.x owns an output coefficient p
+    /// (blockDim.x == 2*K exactly, see max_thread_dims(2*K) in
+    /// submit_generate_op1d_kernel, so this needs no stride on device -- the
+    /// stride is still there for the host build, where blockDim.x == 1 and
+    /// one "thread" must walk all 2*K of them), while threadIdx.y owns a
+    /// strided slice of the (box, quadrature-point) work -- previously that
+    /// whole double loop was walked redundantly by every one of the up to
+    /// 2*K*2*K threads in the block, yet only the 2*K threads with
+    /// threadIdx.y == 0 ever contributed (the rest fell outside `out`'s
+    /// thread_id()-strided publication range and did nothing useful).
+    /// Flattening (box, i) into one index lets every row stride over it
+    /// independently; box is non-decreasing in that flattened index, so a
+    /// row's own early-exit once beta*xlo*xlo crosses argmax is still exact,
+    /// just evaluated per row instead of once globally. Each (p, row) thread
+    /// accumulates its own private partial sum (still redundantly computing
+    /// the full `phix` vector per point, same as before, to avoid a
+    /// reduction/atomics over that intermediate); rows are then reduced into
+    /// `out[p]` after a sync, via the per-row partial sums held in `acc`.
     template <typename T>
     DEVSCOPE void make_rnlp_leaf(T coeff, T expnt, size_type K, size_type npt,
                                   const T* quad_x, const T* quad_w,
@@ -208,32 +219,45 @@ namespace mra {
       T scaledcoeff = coeff * exp2(T(-0.5) * T(n));
       T beta = expnt * exp2(T(-2) * T(n));
       T h = T(1) / sqrt(beta);
-      size_type nbox = size_type(T(1) / h);
-      if (nbox < 1) nbox = 1;
+      size_type nbox = std::max(size_type(1), size_type(T(1) / h));
       h = T(1) / T(nbox);
       T sch = fabs(scaledcoeff * h);
       T argmax = fabs(log(T(1e-22) / sch));
 
-      SHARED T acc[2 * MRA_MAX_K_SIZET];
+      // acc[row][p]: one partial sum per (row, output coefficient), reduced
+      // across rows below. Bounded by 2*MRA_MAX_K in both dimensions, same
+      // as the 2K x 2K scratch (tmp/t0/rmat/ns_scratch) used elsewhere in
+      // this file -- blockDim.y <= 2*K <= 2*MRA_MAX_K always.
+      SHARED T acc[2 * MRA_MAX_K_SIZET][2 * MRA_MAX_K_SIZET];
       T phix[2 * MRA_MAX_K_SIZET]; // thread-private, see legendre_scaling_device
-      for (size_type p = thread_id(); p < 2 * K; p += block_size()) acc[p] = T(0);
-      for (size_type box = 0; box < nbox; ++box) {
-        T xlo = T(box) * h + T(lxx);
-        if (beta * xlo * xlo > argmax) break; // same decision on every thread -- no divergence
-        for (size_type i = 0; i < (size_type)npt; ++i) {
+
+      const size_type row = (size_type)threadIdx.y;
+      const size_type nrows = (size_type)blockDim.y;
+      const size_type total_work = nbox * npt;
+
+      for (size_type p = threadIdx.x; p < 2 * K; p += blockDim.x) {
+        T a = T(0);
+        for (size_type w = row; w < total_work; w += nrows) {
+          size_type box = w / npt, i = w % npt;
+          T xlo = T(box) * h + T(lxx);
+          if (beta * xlo * xlo > argmax) break; // box is non-decreasing in w -- safe early exit for this row
           T xx = xlo + h * quad_x[i];
           T ee = scaledcoeff * exp(-beta * xx * xx) * quad_w[i] * h;
           legendre_scaling_device(xx - T(lxx), 2 * K, phix);
-          for (size_type p = thread_id(); p < 2 * K; p += block_size()) acc[p] += ee * phix[p];
+          a += ee * phix[p];
+        }
+        acc[row][p] = a;
+      }
+      SYNCTHREADS();
+
+      if (row == 0) {
+        for (size_type p = threadIdx.x; p < 2 * K; p += blockDim.x) {
+          T s = T(0);
+          for (size_type r = 0; r < nrows; ++r) s += acc[r][p];
+          if (lkeep < 0 && (p & 1)) s = -s; // odd coefficients flip sign for negative translations
+          out[p] = s;
         }
       }
-      if (lkeep < 0) {
-        // each thread flips only the odd coefficients it owns
-        for (size_type p = thread_id(); p < 2 * K; p += block_size()) {
-          if (p & 1) acc[p] = -acc[p];
-        }
-      }
-      for (size_type p = thread_id(); p < 2 * K; p += block_size()) out[p] = acc[p];
       SYNCTHREADS();
     }
 
