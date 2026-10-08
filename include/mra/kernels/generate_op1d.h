@@ -503,20 +503,39 @@ namespace mra {
       }
 
       auto off = op1d_workspace_offsets(K);
-      T* leftbuf = workspace + off.leftbuf;
-      T* retbuf = workspace + off.retbuf;
-      T* combine_out = workspace + off.combine_out;
-      T* rnlp1 = workspace + off.rnlp1;
-      T* rnlp2 = workspace + off.rnlp2;
-      T* Rvec = workspace + off.Rvec;
-      T* rm = workspace + off.rm;
-      T* r0 = workspace + off.r0;
-      T* rp = workspace + off.rp;
-      T* tmp = workspace + off.tmp;
-      T* t0 = workspace + off.t0;
-      T* rmat = workspace + off.rmat;
-      T* smat = workspace + off.smat;
-      T* ns_scratch = workspace + off.ns_scratch;
+      //T* leftbuf = workspace + off.leftbuf;
+      //T* retbuf = workspace + off.retbuf;
+      //T* combine_out = workspace + off.combine_out;
+      //T* rnlp1 = workspace + off.rnlp1;
+      //T* rnlp2 = workspace + off.rnlp2;
+      //T* Rvec = workspace + off.Rvec;
+      //T* rm = workspace + off.rm;
+      //T* r0 = workspace + off.r0;
+      //T* rp = workspace + off.rp;
+      //T* tmp = workspace + off.tmp;
+      //T* t0 = workspace + off.t0;
+      //T* rmat = workspace + off.rmat;
+      //T* smat = workspace + off.smat;
+      //T* ns_scratch = workspace + off.ns_scratch;
+
+      // shared memory for the operation
+      SHARED T leftbuf[MRA_OP1D_MAX_RECURSION_DEPTH * 2 * MRA_MAX_K];     // [MRA_OP1D_MAX_RECURSION_DEPTH][2K]
+      SHARED T retbuf[2 * MRA_MAX_K];      // [2K]
+      SHARED T combine_out[2 * MRA_MAX_K]; // [2K] -- see get_rnlp_device's WAIT_RIGHT comment for why this must be distinct from retbuf/leftbuf, not an in-place combine target
+      SHARED T rnlp1[2 * MRA_MAX_K];       // [2K]
+      SHARED T rnlp2[2 * MRA_MAX_K];       // [2K]
+      SHARED T Rvec[4 * MRA_MAX_K];        // [4K]
+      SHARED T rm[MRA_MAX_K * MRA_MAX_K];          // [K*K]
+      SHARED T r0[MRA_MAX_K * MRA_MAX_K];          // [K*K]
+      SHARED T rp[MRA_MAX_K * MRA_MAX_K];          // [K*K]
+
+      SHARED T tmp[2 * MRA_MAX_K * 2 * MRA_MAX_K]; // [2K x 2K]
+      SHARED T t0[2 * MRA_MAX_K * 2 * MRA_MAX_K];  // [2K x 2K]
+      // we can reuse tmp as rmat
+      T* rmat = tmp; // [2K x 2K]
+      SHARED T smat[MRA_MAX_K * MRA_MAX_K];         // [K x K]
+      // we can reuse t0 as ns_scratch
+      T* ns_scratch = t0; // [2K x 2K]
 
       if (op1d_issmall(p.expnt, item.n, lx)) {
         for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size())
