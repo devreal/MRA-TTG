@@ -49,6 +49,26 @@ namespace mra{
       }
     }
 
+    /**
+     * Thread block for the convolution kernels: max_thread_dims(2*K), with
+     * the y dimension raised if needed so that the block holds at least
+     * mra::accel::apply_conv_min_threads(K) threads (the WMMA path in
+     * apply_conv relies on it).
+     */
+    inline Dim3 conv_thread_dims(size_type K) {
+      Dim3 dims = max_thread_dims(2*K);
+      const unsigned min_threads = mra::accel::apply_conv_min_threads(K);
+      const unsigned xz = dims.x * dims.z;
+      if (dims.y * xz < min_threads) {
+        dims.y = (min_threads + xz - 1) / xz;
+      }
+      if (dims.x * dims.y * dims.z > MAX_THREADS_PER_BLOCK) {
+        throw std::runtime_error("convolution: MAX_THREADS_PER_BLOCK is too small for the "
+                                 "WMMA convolution (needs " + std::to_string(min_threads) + " threads)");
+      }
+      return dims;
+    }
+
 
     template <typename T, Dimension NDIM,
               concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
@@ -601,7 +621,7 @@ namespace mra{
     checkSubmit();
 #endif // MRA_CHECK_NORMS
 
-    Dim3 thread_dims = max_thread_dims(2*K);
+    Dim3 thread_dims = detail::conv_thread_dims(K);
     auto smem_size = detail::apply_conv_shmem_size<T>(K);
 
     // At least one block even when n_nonzero == 0, but only when resnorms is
@@ -841,7 +861,7 @@ namespace mra{
     checkSubmit();
 #endif // MRA_CHECK_NORMS
 
-    Dim3 thread_dims = max_thread_dims(2*K);
+    Dim3 thread_dims = detail::conv_thread_dims(K);
     auto smem_size = detail::apply_conv_shmem_size<T>(K);
 
     // Sparsity demotion for a member position whose computed norm turns out

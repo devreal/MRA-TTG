@@ -17,6 +17,30 @@
 namespace mra {
   namespace accel {
 
+    /**
+     * apply_conv_k keeps each warp's share of the row tiles in registers, so
+     * it is compiled for at least this many warps per block (see
+     * MAX_WARP_TILES there); kernels calling apply_conv must be launched with
+     * at least apply_conv_min_threads(K) threads (see
+     * detail::conv_thread_dims in kernels/convolution.h).
+     */
+    inline constexpr int apply_conv_min_warps = 8;
+
+    /**
+     * Minimum number of threads per block for kernels calling apply_conv
+     * with this K: apply_conv_min_warps whole warps if the WMMA path is used
+     * for K (mirrors the condition in apply_conv_shmem_size), 0 otherwise.
+     */
+    SCOPE constexpr int apply_conv_min_threads(auto K) {
+#ifdef MRA_ENABLE_CUDA
+      if (K == 8) {
+        // CUDA warps are 32 threads (MRA_WARP_SIZE is only defined in device code)
+        return apply_conv_min_warps * 32;
+      }
+#endif // MRA_ENABLE_CUDA
+      return 0;
+    }
+
     template<typename T>
     struct mma_traits;
 
@@ -29,7 +53,9 @@ namespace mra {
       static constexpr int M = 8;
       static constexpr int N = 8;
       static constexpr int K = 4;
-      static constexpr int NumWarps = MAX_THREADS_PER_BLOCK/WarpSize;
+      /* Per-warp register capacity (see apply_conv_k) is sized for at least
+       * this many warps per block (see apply_conv_min_warps). */
+      static constexpr int MinWarps = apply_conv_min_warps;
 
       using FragA = nvcuda::wmma::fragment<nvcuda::wmma::matrix_a,
                                           M, N, K,
@@ -90,10 +116,15 @@ namespace mra {
       constexpr int M             = K2;
       constexpr int N             = K;
 
-      // we distribute among warps along the M dimension, not along K or N
+      // we distribute among warps along the M dimension, not along K or N:
+      // each warp owns tiles_per_warp consecutive row tiles, based on the
+      // actual number of warps in the block. The fragments for a warp's tiles
+      // stay in registers across all mu, so their count is bounded at compile
+      // time by MAX_WARP_TILES -- kernels are launched with at least
+      // mma::MinWarps warps (see apply_conv_min_threads), which guarantees
+      // tiles_per_warp <= MAX_WARP_TILES.
       constexpr int M_TILES            = (M + mma::M - 1) / mma::M;
-      constexpr int ROWS_PER_WARP      = (M_TILES + mma::NumWarps-1) / mma::NumWarps * mma::M;
-      constexpr int M_WARP_TILES       = ROWS_PER_WARP / mma::M;
+      constexpr int MAX_WARP_TILES     = (M_TILES + mma::MinWarps - 1) / mma::MinWarps;
       constexpr int N_WARP_TILES       = N / mma::N;
       constexpr int K_WARP_TILES       = K / mma::K;
 
@@ -104,10 +135,17 @@ namespace mra {
         if (Term == NormId::Rnorm) return 1.e-20; else return 0.0;
       };
 
+      const int num_warps       = block_size() / mma::WarpSize;
       const int warp_id         = thread_id() / mma::WarpSize;
-      const int warp_row_offset = warp_id * ROWS_PER_WARP;
+      const int tiles_per_warp  = (M_TILES + num_warps - 1) / num_warps;
+      const int warp_tile0      = warp_id * tiles_per_warp;
+      assert(tiles_per_warp <= MAX_WARP_TILES);
+      // whether the i'th of this warp's tiles exists; i is a compile-time
+      // index in the unrolled loops below so the fragments stay in registers
+      auto tile_active = [&](int i) { return i < tiles_per_warp && warp_tile0 + i < M_TILES; };
+      auto tile_row    = [&](int i) { return (warp_tile0 + i) * mma::M; };
 
-      const bool has_work = (warp_row_offset < K2);
+      const bool has_work = tile_active(0);
 
       /**
        * Allocate shared memory for the intermediates results to rotate.
@@ -120,20 +158,21 @@ namespace mra {
        * The fragments will remain in registers for the entire convolution,
        * and will be reused for every mu.
        */
-      FragA f_frags[M_WARP_TILES][K_WARP_TILES];
+      FragA f_frags[MAX_WARP_TILES][K_WARP_TILES];
       /**
        * We accumulate the entire result in registers, and only write back
        * to memory at the end.
        */
-      FragC c_frags[M_WARP_TILES][N_WARP_TILES];
+      FragC c_frags[MAX_WARP_TILES][N_WARP_TILES];
       if (has_work) {
         #pragma unroll
-        for (int i = 0; i < M_WARP_TILES; ++i) {
+        for (int i = 0; i < MAX_WARP_TILES; ++i) {
+          if (!tile_active(i)) continue;
           #pragma unroll
           for (int j = 0; j < K_WARP_TILES; ++j) {
             mma::load_a(f_frags[i][j], f.data(),
                         j * mma::K,                            /* contraction offset */
-                        warp_row_offset + i * mma::M,          /* row in A^T         */
+                        tile_row(i),                           /* row in A^T         */
                         K2);                                   /* col-major ldm      */
           }
           // zero out result fragments
@@ -151,11 +190,12 @@ namespace mra {
         if (munorm > optol && dnorm > thresh()) {
           T mufac = opnorms(opid, mu, 0, (size_type)NormId::Fac);
           if (NormId::Snorm == Term) mufac *= -1.0; // sign flip for Snorm
-          FragA a_frags[M_WARP_TILES][K_WARP_TILES];
+          FragA a_frags[MAX_WARP_TILES][K_WARP_TILES];
           // fill the a_frags from the loaded f_frags
           if (has_work) {
             #pragma unroll
-            for (int i = 0; i < M_WARP_TILES; ++i) {
+            for (int i = 0; i < MAX_WARP_TILES; ++i) {
+              if (!tile_active(i)) continue;
               #pragma unroll
               for (int k = 0; k < K_WARP_TILES; ++k) {
                 #pragma unroll
@@ -192,7 +232,8 @@ namespace mra {
             /* --- Accumulate and store ---------------------------------------------- */
             if (has_work) {
               #pragma unroll
-              for (int i = 0; i < M_WARP_TILES; ++i) {
+              for (int i = 0; i < MAX_WARP_TILES; ++i) {
+                if (!tile_active(i)) continue;
                 #pragma unroll
                 for (int j = 0; j < N_WARP_TILES; ++j) {
                   FragC acc;
@@ -204,7 +245,7 @@ namespace mra {
                   if (d < NDIM-1) {
                     // store back to SMEM for the next dimension's convolution
                     mma::store_c(c_smem, acc,
-                                warp_row_offset + i * mma::M,   /* row in C   */
+                                tile_row(i),                    /* row in C   */
                                 j * mma::N,                    /* col in C   */
                                 K);                             /* row-major ldm */
                   } else {
@@ -221,12 +262,13 @@ namespace mra {
             if (has_work && d < NDIM-1) {
               // rotate the result in SMEM for the next dimension's convolution
               #pragma unroll
-              for (int i = 0; i < M_WARP_TILES; ++i) {
+              for (int i = 0; i < MAX_WARP_TILES; ++i) {
+                if (!tile_active(i)) continue;
                 #pragma unroll
                 for (int j = 0; j < K_WARP_TILES; ++j) {
                   mma::load_a(a_frags[i][j], c_smem,
                               j * mma::K,                            /* contraction offset */
-                              warp_row_offset + i * mma::M,          /* row in A^T         */
+                              tile_row(i),                           /* row in A^T         */
                               K2);                                   /* col-major ldm      */
                 }
               }
@@ -238,12 +280,13 @@ namespace mra {
       // we're done with all mu, store the result back to global memory
       // TODO: stage through SMEM and use copy_async() to pipeline
       #pragma unroll
-      for (int i = 0; i < M_WARP_TILES; ++i) {
+      for (int i = 0; i < MAX_WARP_TILES; ++i) {
+        if (!tile_active(i)) continue;
         #pragma unroll
         for (int j = 0; j < N_WARP_TILES; ++j) {
           // store to global memory
           mma::store_c(result.data(), c_frags[i][j],
-                      warp_row_offset + i * mma::M,   /* row in C   */
+                      tile_row(i),                    /* row in C   */
                       j * mma::N,                    /* col in C   */
                       K);                             /* row-major ldm */
         }
@@ -283,6 +326,10 @@ namespace mra {
     {
 #ifdef MRA_HAVE_MMA
       if constexpr (mra::is_ct_integral_v<decltype(K)>) {
+        // apply_conv_k's per-warp register capacity needs at least MinWarps
+        // whole warps -- guaranteed by launching with apply_conv_min_threads(K)
+        assert(block_size() % mma_traits<T>::WarpSize == 0 &&
+               block_size() / mma_traits<T>::WarpSize >= mma_traits<T>::MinWarps);
         // get the rank of the operation
         const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
 
