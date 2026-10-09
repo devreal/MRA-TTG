@@ -402,13 +402,40 @@ namespace mra {
         }
 
         // f.state == WAIT_RIGHT: retbuf holds the right child's result,
-        // leftbuf[top] the (already-computed) left child's.
+        // leftbuf[top] the (already-computed) left child's. Parallelized the
+        // same way as make_rnlp_leaf: threadIdx.x owns an output index j
+        // (blockDim.x == 2*K exactly, so this needs no stride on device --
+        // see make_rnlp_leaf's comment), while threadIdx.y splits the 4*K-
+        // term contraction (leftbuf/retbuf concatenated against hgT2k's
+        // matching 4*K rows) across rows, each row's partial sum landing in
+        // tmp (reinterpreted as [row][j] scratch -- safe to reuse: tmp is
+        // otherwise untouched for the whole make_rnlij_device/
+        // get_rnlp_device call chain, see make_rnlp_leaf's own comment),
+        // reduced into combine_out afterward. Safe to sync right after the
+        // j-loop (no per-iteration barrier needed) because j's loop always
+        // takes exactly one trip per thread on device -- its range (2*K)
+        // equals blockDim.x exactly, unlike make_rnlij_device's K*K-sized
+        // contraction below, which needs a wave loop instead.
         {
-          for (size_type j = thread_id(); j < 2 * K; j += block_size()) {
-            T acc = T(0);
-            for (size_type k = 0; k < 2 * K; ++k) acc += leftbuf[top * 2 * K + k] * hgT2k(k, j);
-            for (size_type k = 0; k < 2 * K; ++k) acc += retbuf[k] * hgT2k(2 * K + k, j);
-            combine_out[j] = acc;
+          const size_type row = (size_type)threadIdx.y;
+          const size_type nrows = (size_type)blockDim.y;
+          T (*acc)[2 * MRA_MAX_K_SIZET] = (T (*)[2 * MRA_MAX_K_SIZET])tmp;
+
+          for (size_type j = threadIdx.x; j < 2 * K; j += blockDim.x) {
+            T a = T(0);
+            for (size_type k = row; k < 4 * K; k += nrows) {
+              T src = (k < 2 * K) ? leftbuf[top * 2 * K + k] : retbuf[k - 2 * K];
+              a += src * hgT2k(k, j);
+            }
+            acc[row][j] = a;
+          }
+          SYNCTHREADS();
+          if (row == 0) {
+            for (size_type j = threadIdx.x; j < 2 * K; j += blockDim.x) {
+              T s = T(0);
+              for (size_type r = 0; r < nrows; ++r) s += acc[r][j];
+              combine_out[j] = s;
+            }
           }
           SYNCTHREADS();
           for (size_type j = thread_id(); j < 2 * K; j += block_size()) retbuf[j] = combine_out[j];
@@ -458,13 +485,44 @@ namespace mra {
       }
       SYNCTHREADS();
 
-      for (size_type idx = thread_id(); idx < K * K; idx += block_size()) {
-        size_type qi = idx / K, qj = idx % K;
-        T acc = T(0);
-        for (size_type k = 0; k < 4 * K; ++k) acc += cten(qi, qj, k) * Rvec[k];
-        out[idx] = acc;
+      // Parallelize the 4*K-term reduction too, same idea as get_rnlp_device's
+      // combine step above: threadIdx.x owns an output index, threadIdx.y
+      // splits the reduction over k across rows into tmp-backed scratch
+      // (safe to reuse -- the earlier get_rnlp_device calls that also use
+      // tmp have already returned and been fully synced by this point),
+      // reduced after a sync. Unlike that combine step, K*K generally isn't
+      // a multiple of blockDim.x (==2*K), so threadIdx.x-striding this with
+      // a single SYNCTHREADS() after the loop would give lanes an UNEVEN
+      // number of loop trips -- and a SYNCTHREADS() reached a different
+      // number of times by different threads is a hang, not a wrong answer.
+      // Instead every thread runs exactly nwaves iterations (nwaves depends
+      // only on K and blockDim.x, both uniform across the block), masking
+      // the tail wave's out-of-range lanes with `idx < K*K` around the work
+      // only, never around the syncs.
+      {
+        const size_type row = (size_type)threadIdx.y;
+        const size_type nrows = (size_type)blockDim.y;
+        const size_type ncols = (size_type)blockDim.x; // == 2*K
+        const size_type nwaves = (K * K + ncols - 1) / ncols;
+        T (*acc)[2 * MRA_MAX_K_SIZET] = (T (*)[2 * MRA_MAX_K_SIZET])tmp;
+
+        for (size_type wave = 0; wave < nwaves; ++wave) {
+          const size_type idx = wave * ncols + threadIdx.x;
+          T a = T(0);
+          if (idx < K * K) {
+            size_type qi = idx / K, qj = idx % K;
+            for (size_type k = row; k < 4 * K; k += nrows) a += cten(qi, qj, k) * Rvec[k];
+          }
+          acc[row][threadIdx.x] = a;
+          SYNCTHREADS();
+          if (row == 0 && idx < K * K) {
+            T s = T(0);
+            for (size_type r = 0; r < nrows; ++r) s += acc[r][threadIdx.x];
+            out[idx] = s;
+          }
+          SYNCTHREADS();
+        }
       }
-      SYNCTHREADS();
     }
 
     /**
