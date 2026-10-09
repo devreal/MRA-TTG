@@ -68,6 +68,18 @@ namespace mra {
   };
 
   /**
+   * A frame in the recursive call stack. We cannot rely on recursive calls in the kernel
+   * so we use a manual stack approach instead. The stack is located in shared memory.
+   */
+  enum FrameState : unsigned char { ENTER, WAIT_LEFT, WAIT_RIGHT };
+  struct Frame {
+    Level n;
+    Translation lx;
+    FrameState state;
+  };
+
+
+  /**
    * One (term, dimension, count-index) unit of work: generate R/S and their
    * norms for EVERY translation lx in [lmin, lmax] at level n, writing into
    * this item's own (d, *, c, i) slice of the shared, level-wide R/S/norms1d
@@ -213,7 +225,7 @@ namespace mra {
     template <typename T>
     DEVSCOPE void make_rnlp_leaf(T coeff, T expnt, size_type K, size_type npt,
                                   const T* quad_x, const T* quad_w,
-                                  Level n, Translation lx, T* out) {
+                                  Level n, Translation lx, T* tmp, T* out) {
       Translation lkeep = lx;
       Translation lxx = (lx < 0) ? (-lx - 1) : lx;
       T scaledcoeff = coeff * exp2(T(-0.5) * T(n));
@@ -228,7 +240,8 @@ namespace mra {
       // across rows below. Bounded by 2*MRA_MAX_K in both dimensions, same
       // as the 2K x 2K scratch (tmp/t0/rmat/ns_scratch) used elsewhere in
       // this file -- blockDim.y <= 2*K <= 2*MRA_MAX_K always.
-      SHARED T acc[2 * MRA_MAX_K_SIZET][2 * MRA_MAX_K_SIZET];
+      //SHARED T acc[2 * MRA_MAX_K_SIZET][2 * MRA_MAX_K_SIZET];
+      T (*acc)[2 * MRA_MAX_K_SIZET] = (T (*)[2 * MRA_MAX_K_SIZET])tmp;
       T phix[2 * MRA_MAX_K_SIZET]; // thread-private, see legendre_scaling_device
 
       const size_type row = (size_type)threadIdx.y;
@@ -311,15 +324,8 @@ namespace mra {
                                    const T* quad_x, const T* quad_w,
                                    const ViewHgT2k& hgT2k,
                                    Level n0, Translation lx0,
-                                   T* leftbuf, T* retbuf, T* combine_out) {
-      enum FrameState : unsigned char { ENTER, WAIT_LEFT, WAIT_RIGHT };
-      struct Frame {
-        Level n;
-        Translation lx;
-        FrameState state;
-      };
-
-      SHARED Frame stack[MRA_OP1D_MAX_RECURSION_DEPTH]; // per-thread private; see header comment
+                                   T* leftbuf, T* retbuf, T* combine_out,
+                                   T* tmp, Frame* stack) {
       size_type sp = 0;
       if (is_team_lead()) {
         stack[sp].n = n0;
@@ -366,7 +372,7 @@ namespace mra {
             ++sp;
             continue;
           }
-          make_rnlp_leaf(p.coeff, p.expnt, K, npt, quad_x, quad_w, f.n, f.lx, retbuf); // already synced internally
+          make_rnlp_leaf(p.coeff, p.expnt, K, npt, quad_x, quad_w, f.n, f.lx, tmp, retbuf); // already synced internally
           --sp;
           continue;
         }
@@ -437,11 +443,11 @@ namespace mra {
                                      const ViewC& cten,
                                      Level n, Translation lx,
                                      T* leftbuf, T* retbuf, T* combine_out,
-                                     T* rnlp1, T* rnlp2, T* Rvec, T* out) {
-      get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, n, lx - 1, leftbuf, retbuf, combine_out);
+                                     T* rnlp1, T* rnlp2, T* Rvec, T* out, T* tmp, Frame* stack) {
+      get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, n, lx - 1, leftbuf, retbuf, combine_out, tmp, stack);
       for (size_type i = thread_id(); i < 2 * K; i += block_size()) rnlp1[i] = retbuf[i];
       SYNCTHREADS();
-      get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, n, lx, leftbuf, retbuf, combine_out);
+      get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, n, lx, leftbuf, retbuf, combine_out, tmp, stack);
       for (size_type i = thread_id(); i < 2 * K; i += block_size()) rnlp2[i] = retbuf[i];
       SYNCTHREADS();
 
@@ -553,11 +559,15 @@ namespace mra {
       SHARED T r0[MRA_MAX_K * MRA_MAX_K];          // [K*K]
       SHARED T rp[MRA_MAX_K * MRA_MAX_K];          // [K*K]
 
+      /**
+       * Temporary storage for intermediate results. Is used both for the accumulation buffer
+       * in make_rnlp_leaf and below to assemble the 2k x 2k child blocks.
+       */
       SHARED T tmp[2 * MRA_MAX_K * 2 * MRA_MAX_K]; // [2K x 2K]
       SHARED T t0[2 * MRA_MAX_K * 2 * MRA_MAX_K];  // [2K x 2K]
       // we can reuse tmp as rmat
       T* rmat = tmp; // [2K x 2K]
-      SHARED T smat[MRA_MAX_K * MRA_MAX_K];         // [K x K]
+      SHARED T smat[MRA_MAX_K * MRA_MAX_K];        // [K x K]
       // we can reuse t0 as ns_scratch
       T* ns_scratch = t0; // [2K x 2K]
 
@@ -573,12 +583,14 @@ namespace mra {
         return;
       }
 
+      SHARED Frame stack[MRA_OP1D_MAX_RECURSION_DEPTH]; // per-thread private; see header comment
+
       make_rnlij_device(p, K, npt, quad_x, quad_w, hgT2k, cten, item.n + 1, 2 * lx - 1,
-                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, rm);
+                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, rm, tmp, stack);
       make_rnlij_device(p, K, npt, quad_x, quad_w, hgT2k, cten, item.n + 1, 2 * lx,
-                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, r0);
+                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, r0, tmp, stack);
       make_rnlij_device(p, K, npt, quad_x, quad_w, hgT2k, cten, item.n + 1, 2 * lx + 1,
-                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, rp);
+                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, rp, tmp, stack);
 
       // Assemble the 2Kx2K child block from rm/r0/rp: read-only inputs, tmp
       // the sole (distinct) output -- no in-place-aliasing hazard.
