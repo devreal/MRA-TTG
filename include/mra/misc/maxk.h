@@ -16,4 +16,10 @@
 
 #define MRA_MAX_K_SIZET ((size_type)MRA_MAX_K)
 
+/**
+ * Maximum number of quadrature points.
+ * It appears that MADNESS uses a maximum of K + 11 quadrature points, with a hardcoded 11.
+ */
+#define MRA_MAX_NPT (MRA_MAX_K + 11)
+
 #endif // MRA_MAXK_H

@@ -733,16 +733,29 @@ namespace mra {
   GLOBALSCOPE void generate_op1d_kernel(
       const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, size_type K,
       ViewC c, ViewHgT hgT,
-      ViewHgT2k hgT2k, const T* quad_x, const T* quad_w, size_type npt,
+      ViewHgT2k hgT2k_view, const T* quad_x, const T* quad_w, size_type npt,
       T* workspace, Translation l_offset, ViewR R, ViewS S, ViewNorms norms) {
     const size_type ws_size = generate_op1d_workspace_size(K);
+    // put the hgT2k data into shared memory
+    SHARED T hgT2k_shared[2 * MRA_MAX_K * 2 * MRA_MAX_K];
+    ViewHgT2k hgT2k_shared_view(hgT2k_shared, 2 * K, 2 * K);
+    hgT2k_shared_view = hgT2k_view;
+    // load quad points and weights into shared memory
+    SHARED T quad_x_shared[MRA_MAX_NPT];
+    SHARED T quad_w_shared[MRA_MAX_NPT];
+    for (size_type i = thread_id(); i < npt; i += block_size()) {
+      quad_x_shared[i] = quad_x[i];
+      quad_w_shared[i] = quad_w[i];
+    }
+    SYNCTHREADS();
+
     for (size_type item_idx = blockIdx.x; item_idx < n_items; item_idx += gridDim.x) {
       const auto& item = items[item_idx];
       const size_type range_len = (size_type)(item.lmax - item.lmin + 1);
       for (size_type y = blockIdx.y; y < range_len; y += gridDim.y) {
         const Translation lx = item.lmin + (Translation)y;
         T* item_workspace = workspace + (item_idx * max_range_len + y) * ws_size;
-        detail::generate_op1d_one<T>(item, lx, K, c, hgT, hgT2k, quad_x, quad_w, npt,
+        detail::generate_op1d_one<T>(item, lx, K, c, hgT, hgT2k_shared_view, quad_x_shared, quad_w_shared, npt,
                                       item_workspace, l_offset, R, S, norms);
       }
     }
