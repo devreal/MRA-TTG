@@ -449,16 +449,18 @@ namespace mra {
     /**
      * Ported from mra::Convolution::make_rnlij (misc/convolutiondata.h):
      * projects the Gaussian onto the KxK "rnlij" block via an inner product
-     * against the autocorrelation tensor c (K x K x 4K -- MADNESS's own
-     * Convolution1D::c, see conv_mad.h's extraction code). `out` (block-wide
-     * scratch, K*K elements, row-major out[qi*K+qj]) holds the result on
-     * return.
+     * against the autocorrelation tensor c (4K x K x K here -- MADNESS's own
+     * Convolution1D::c is K x K x 4K; conv_mad.h's extraction transposes it
+     * once, on the host, so the contraction axis k is OUTERMOST and (qi,qj)
+     * are contiguous -- see extract_gaussian_terms_for_device()'s comment --
+     * so that consecutive threads working on consecutive (qi,qj) for the
+     * same k below hit consecutive addresses instead of ones 4K apart).
+     * `out` (block-wide scratch, K*K elements, row-major out[qi*K+qj]) holds
+     * the result on return.
      *
-     * The contraction (out(qi,qj) = sum_k c(qi,qj,k)*Rvec[k]) is verified
-     * directly against mra::detail::inner's documented case
-     * "k0==(left.ndim()-1) && k1==0 -> c[i,j]=a[i,k]*b[k,j]" (mra/ops/inner.h)
-     * with the K*K output flattened back to (qi,qj) -- see this file's
-     * header comment.
+     * The contraction is out(qi,qj) = sum_k c(k,qi,qj)*Rvec[k] -- the same
+     * math as MADNESS's c(qi,qj,k)*Rvec[k], just reading the transposed
+     * layout above.
      *
      * leftbuf/retbuf/combine_out are get_rnlp_device's own scratch (passed
      * through); rnlp1/rnlp2/Rvec are this function's own block-wide scratch.
@@ -511,7 +513,7 @@ namespace mra {
           T a = T(0);
           if (idx < K * K) {
             size_type qi = idx / K, qj = idx % K;
-            for (size_type k = row; k < 4 * K; k += nrows) a += cten(qi, qj, k) * Rvec[k];
+            for (size_type k = row; k < 4 * K; k += nrows) a += cten(k, qi, qj) * Rvec[k];
           }
           acc[row][threadIdx.x] = a;
           SYNCTHREADS();

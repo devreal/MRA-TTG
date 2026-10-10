@@ -1535,7 +1535,7 @@ namespace mra {
     // (coeff, expnt). See extract_gaussian_terms_for_device().
     size_type m_K = 0;
     size_type m_npt = 0;
-    DenseTensor<T, 3> m_shared_c;      // K x K x 4K autocorrelation tensor
+    DenseTensor<T, 3> m_shared_c;      // 4K x K x K autocorrelation tensor (k outermost -- see extract_gaussian_terms_for_device())
     DenseTensor<T, 2> m_shared_hgT;    // 2K x 2K two-scale filter (transpose)
     DenseTensor<T, 2> m_shared_hgT2k;  // 4K x 4K two-scale filter for order-2K
     DenseTensor<T, 1> m_shared_quadx;  // npt Gauss-Legendre quadrature points
@@ -1586,7 +1586,16 @@ namespace mra {
       }
       m_npt = (size_type)first->npt;
 
-      m_shared_c = DenseTensor<T, 3>(std::array{K, K, 4 * K}, ttg::scope::SyncIn);
+      // Stored as (4K, K, K) rather than MADNESS's own (K, K, 4K) -- i.e.
+      // transposed so the contraction axis (k, summed over in
+      // make_rnlij_device's cten(k,qi,qj)*Rvec[k]) is the OUTERMOST/slowest
+      // dimension and (qi,qj) are the fastest-varying/contiguous ones. This
+      // is a one-time, host-side transpose (this whole extraction runs once
+      // per operator construction), done so that on-device, consecutive
+      // threads working on consecutive (qi,qj) output elements for the same
+      // k read consecutive addresses -- coalesced -- instead of addresses
+      // 4K elements apart under MADNESS's native layout.
+      m_shared_c = DenseTensor<T, 3>(std::array{4 * K, K, K}, ttg::scope::SyncIn);
       m_shared_hgT = DenseTensor<T, 2>(std::array{2 * K, 2 * K}, ttg::scope::SyncIn);
       m_shared_hgT2k = DenseTensor<T, 2>(std::array{4 * K, 4 * K}, ttg::scope::SyncIn);
       m_shared_quadx = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
@@ -1599,7 +1608,7 @@ namespace mra {
       for (size_type i = 0; i < K; ++i)
         for (size_type j = 0; j < K; ++j)
           for (size_type k = 0; k < 4 * K; ++k)
-            c_view(i, j, k) = static_cast<T>(first->c(i, j, k));
+            c_view(k, i, j) = static_cast<T>(first->c(i, j, k));
       for (size_type i = 0; i < 2 * K; ++i)
         for (size_type j = 0; j < 2 * K; ++j)
           hgT_view(i, j) = static_cast<T>(first->hgT(i, j));
