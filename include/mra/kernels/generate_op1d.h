@@ -155,6 +155,26 @@ namespace mra {
      * whole effort is trying to keep off (that's MADNESS's CPU-side
      * nonstandard() call; see this file's header comment).
      */
+    /**
+     * Offsets of each named region within generate_op1d_one's single
+     * dynamic-shared-memory allocation (see its own comment), sized by the
+     * RUNTIME K (not MRA_MAX_K) -- generate_op1d_workspace_size(K) below
+     * gives the total element count to request at kernel-launch time.
+     *
+     * [leftbuf..rp] (everything make_rnlij_device/get_rnlp_device/
+     * make_rnlp_leaf touch) is entirely dead by the time t0 is first written
+     * (generate_op1d_one's "assemble the 2Kx2K child block" step writes
+     * fresh into tmp, consuming rm/r0/rp -- the LAST read of anything in
+     * [leftbuf..rp] -- before the hgT two-pass transform first writes t0),
+     * so t0 reuses that whole group's space (t0 = 0) rather than getting its
+     * own. tmp cannot join that reuse: it's live concurrently WITH
+     * [leftbuf..rp] (make_rnlp_leaf and get_rnlp_device's combine step use
+     * it as scratch while retbuf/leftbuf/etc. still hold meaningful values),
+     * so it keeps its own region, as does smat (live alongside both rmat,
+     * which aliases tmp, and ns_scratch, which aliases t0, during the final
+     * transpose/norm steps). rmat/ns_scratch keep aliasing tmp/t0 exactly as
+     * generate_op1d_one's hand-written version already did.
+     */
     struct Op1DWorkspaceOffsets {
       size_type leftbuf;     // [MRA_OP1D_MAX_RECURSION_DEPTH][2K]
       size_type retbuf;      // [2K]
@@ -166,11 +186,11 @@ namespace mra {
       size_type rm;          // [K*K]
       size_type r0;          // [K*K]
       size_type rp;          // [K*K]
-      size_type tmp;         // [2K*2K]
-      size_type t0;          // [2K*2K]
-      size_type rmat;        // [2K*2K]
-      size_type smat;        // [K*K]
-      size_type ns_scratch;  // [2K*2K]
+      size_type tmp;         // [2K*2K] -- own space, live alongside [leftbuf..rp]
+      size_type t0;          // [2K*2K] -- ALIASES [leftbuf..rp] (offset 0), see above
+      size_type rmat;        // aliases tmp
+      size_type smat;        // [K*K] -- own space
+      size_type ns_scratch;  // aliases t0
       size_type total;
 
       SCOPE Op1DWorkspaceOffsets(auto K)
@@ -185,12 +205,21 @@ namespace mra {
         rm = p; p += K * K;
         r0 = p; p += K * K;
         rp = p; p += K * K;
+
         tmp = p; p += 2 * K * 2 * K;
-        t0 = p; p += 2 * K * 2 * K;
-        rmat = p; p += 2 * K * 2 * K;
+
+        t0 = 0; // reuse [leftbuf..rp]'s now-dead space
+        const size_type t0_end = t0 + 2 * K * 2 * K;
+
+        rmat = tmp;
         smat = p; p += K * K;
-        ns_scratch = p; p += 2 * K * 2 * K;
-        total = p;
+        ns_scratch = t0;
+
+        // p already exceeds t0_end for any realistic K (leftbuf's own
+        // MRA_OP1D_MAX_RECURSION_DEPTH*2*K term alone dwarfs 2K*2K), but
+        // take the max explicitly rather than rely on that -- cheap, and
+        // avoids a silent under-allocation if either term's formula changes.
+        total = std::max(p, t0_end);
       }
     };
 
@@ -236,12 +265,13 @@ namespace mra {
       T sch = fabs(scaledcoeff * h);
       T argmax = fabs(log(T(1e-22) / sch));
 
-      // acc[row][p]: one partial sum per (row, output coefficient), reduced
-      // across rows below. Bounded by 2*MRA_MAX_K in both dimensions, same
-      // as the 2K x 2K scratch (tmp/t0/rmat/ns_scratch) used elsewhere in
-      // this file -- blockDim.y <= 2*K <= 2*MRA_MAX_K always.
-      //SHARED T acc[2 * MRA_MAX_K_SIZET][2 * MRA_MAX_K_SIZET];
-      T (*acc)[2 * MRA_MAX_K_SIZET] = (T (*)[2 * MRA_MAX_K_SIZET])tmp;
+      // acc[row*(2*K)+p]: one partial sum per (row, output coefficient),
+      // reduced across rows below, flattened (rather than a T(*)[2*K]
+      // pointer-to-array, which would need 2*K as a compile-time extent) into
+      // tmp -- sized exactly 2*K*2*K by the runtime K (see
+      // Op1DWorkspaceOffsets), which exactly fits blockDim.y <= 2*K rows of
+      // 2*K columns each.
+      T* acc = tmp;
       T phix[2 * MRA_MAX_K_SIZET]; // thread-private, see legendre_scaling_device
 
       const size_type row = (size_type)threadIdx.y;
@@ -259,14 +289,14 @@ namespace mra {
           legendre_scaling_device(xx - T(lxx), 2 * K, phix);
           a += ee * phix[p];
         }
-        acc[row][p] = a;
+        acc[row * (2 * K) + p] = a;
       }
       SYNCTHREADS();
 
       if (row == 0) {
         for (size_type p = threadIdx.x; p < 2 * K; p += blockDim.x) {
           T s = T(0);
-          for (size_type r = 0; r < nrows; ++r) s += acc[r][p];
+          for (size_type r = 0; r < nrows; ++r) s += acc[r * (2 * K) + p];
           if (lkeep < 0 && (p & 1)) s = -s; // odd coefficients flip sign for negative translations
           out[p] = s;
         }
@@ -402,18 +432,21 @@ namespace mra {
         // see make_rnlp_leaf's comment), while threadIdx.y splits the 4*K-
         // term contraction (leftbuf/retbuf concatenated against hgT2k's
         // matching 4*K rows) across rows, each row's partial sum landing in
-        // tmp (reinterpreted as [row][j] scratch -- safe to reuse: tmp is
+        // tmp (flattened as acc[row*(2*K)+j] scratch -- safe to reuse: tmp is
         // otherwise untouched for the whole make_rnlij_device/
-        // get_rnlp_device call chain, see make_rnlp_leaf's own comment),
-        // reduced into combine_out afterward. Safe to sync right after the
-        // j-loop (no per-iteration barrier needed) because j's loop always
-        // takes exactly one trip per thread on device -- its range (2*K)
-        // equals blockDim.x exactly, unlike make_rnlij_device's K*K-sized
-        // contraction below, which needs a wave loop instead.
+        // get_rnlp_device call chain, see make_rnlp_leaf's own comment, and
+        // is sized exactly 2*K*2*K by the runtime K -- see
+        // Op1DWorkspaceOffsets -- which exactly fits blockDim.y <= 2*K rows
+        // of 2*K columns each), reduced into combine_out afterward. Safe to
+        // sync right after the j-loop (no per-iteration barrier needed)
+        // because j's loop always takes exactly one trip per thread on
+        // device -- its range (2*K) equals blockDim.x exactly, unlike
+        // make_rnlij_device's K*K-sized contraction below, which needs a
+        // wave loop instead.
         {
           const size_type row = (size_type)threadIdx.y;
           const size_type nrows = (size_type)blockDim.y;
-          T (*acc)[2 * MRA_MAX_K_SIZET] = (T (*)[2 * MRA_MAX_K_SIZET])tmp;
+          T* acc = tmp;
 
           for (size_type j = threadIdx.x; j < 2 * K; j += blockDim.x) {
             T a = T(0);
@@ -421,13 +454,13 @@ namespace mra {
               T src = (k < 2 * K) ? leftbuf[top * 2 * K + k] : retbuf[k - 2 * K];
               a += src * hgT2k(k, j);
             }
-            acc[row][j] = a;
+            acc[row * (2 * K) + j] = a;
           }
           SYNCTHREADS();
           if (row == 0) {
             for (size_type j = threadIdx.x; j < 2 * K; j += blockDim.x) {
               T s = T(0);
-              for (size_type r = 0; r < nrows; ++r) s += acc[r][j];
+              for (size_type r = 0; r < nrows; ++r) s += acc[r * (2 * K) + j];
               combine_out[j] = s;
             }
           }
@@ -500,7 +533,10 @@ namespace mra {
         const size_type nrows = (size_type)blockDim.y;
         const size_type ncols = (size_type)blockDim.x; // == 2*K
         const size_type nwaves = (K * K + ncols - 1) / ncols;
-        T (*acc)[2 * MRA_MAX_K_SIZET] = (T (*)[2 * MRA_MAX_K_SIZET])tmp;
+        // Flattened as acc[row*ncols+threadIdx.x] -- tmp is sized exactly
+        // 2*K*2*K by the runtime K (see Op1DWorkspaceOffsets), which exactly
+        // fits blockDim.y (<=2*K) rows of blockDim.x (==2*K) columns each.
+        T* acc = tmp;
 
         for (size_type wave = 0; wave < nwaves; ++wave) {
           const size_type idx = wave * ncols + threadIdx.x;
@@ -509,11 +545,11 @@ namespace mra {
             size_type qi = idx / K, qj = idx % K;
             for (size_type k = row; k < 4 * K; k += nrows) a += cten(k, qi, qj) * Rvec[k];
           }
-          acc[row][threadIdx.x] = a;
+          acc[row * ncols + threadIdx.x] = a;
           SYNCTHREADS();
           if (row == 0 && idx < K * K) {
             T s = T(0);
-            for (size_type r = 0; r < nrows; ++r) s += acc[r][threadIdx.x];
+            for (size_type r = 0; r < nrows; ++r) s += acc[r * ncols + threadIdx.x];
             out[idx] = s;
           }
           SYNCTHREADS();
@@ -586,44 +622,44 @@ namespace mra {
         return;
       }
 
+      // Single dynamic-shared-memory allocation, sized by the RUNTIME K (see
+      // Op1DWorkspaceOffsets's comment) rather than nine-plus separate
+      // MRA_MAX_K-sized static SHARED arrays: at small K (the common case)
+      // those static arrays waste most of their footprint, since every one
+      // of them is sized for whatever MRA_MAX_K was compiled in, not the K
+      // this particular operator actually uses. The kernel launch
+      // (submit_generate_op1d_kernel) requests exactly
+      // generate_op1d_workspace_size(K)*sizeof(T) bytes via CALL_KERNEL's
+      // shared-memory argument. Host build has no such concept, so it falls
+      // back to a plain heap allocation, freed before every return below
+      // (mirroring fcube_for_mul.h's identical host/device split).
       auto off = op1d_workspace_offsets(K);
-      //T* leftbuf = workspace + off.leftbuf;
-      //T* retbuf = workspace + off.retbuf;
-      //T* combine_out = workspace + off.combine_out;
-      //T* rnlp1 = workspace + off.rnlp1;
-      //T* rnlp2 = workspace + off.rnlp2;
-      //T* Rvec = workspace + off.Rvec;
-      //T* rm = workspace + off.rm;
-      //T* r0 = workspace + off.r0;
-      //T* rp = workspace + off.rp;
-      //T* tmp = workspace + off.tmp;
-      //T* t0 = workspace + off.t0;
-      //T* rmat = workspace + off.rmat;
-      //T* smat = workspace + off.smat;
-      //T* ns_scratch = workspace + off.ns_scratch;
-
-      // shared memory for the operation
-      SHARED T leftbuf[MRA_OP1D_MAX_RECURSION_DEPTH * 2 * MRA_MAX_K];     // [MRA_OP1D_MAX_RECURSION_DEPTH][2K]
-      SHARED T retbuf[2 * MRA_MAX_K];      // [2K]
-      SHARED T combine_out[2 * MRA_MAX_K]; // [2K] -- see get_rnlp_device's WAIT_RIGHT comment for why this must be distinct from retbuf/leftbuf, not an in-place combine target
-      SHARED T rnlp1[2 * MRA_MAX_K];       // [2K]
-      SHARED T rnlp2[2 * MRA_MAX_K];       // [2K]
-      SHARED T Rvec[4 * MRA_MAX_K];        // [4K]
-      SHARED T rm[MRA_MAX_K * MRA_MAX_K];          // [K*K]
-      SHARED T r0[MRA_MAX_K * MRA_MAX_K];          // [K*K]
-      SHARED T rp[MRA_MAX_K * MRA_MAX_K];          // [K*K]
+#ifdef HAVE_DEVICE_ARCH
+      extern SHARED T op1d_smem[];
+#else
+      T* op1d_smem = new T[off.total];
+#endif
+      T* leftbuf = op1d_smem + off.leftbuf;         // [MRA_OP1D_MAX_RECURSION_DEPTH][2K]
+      T* retbuf = op1d_smem + off.retbuf;           // [2K]
+      T* combine_out = op1d_smem + off.combine_out; // [2K] -- see get_rnlp_device's WAIT_RIGHT comment for why this must be distinct from retbuf/leftbuf, not an in-place combine target
+      T* rnlp1 = op1d_smem + off.rnlp1;             // [2K]
+      T* rnlp2 = op1d_smem + off.rnlp2;             // [2K]
+      T* Rvec = op1d_smem + off.Rvec;               // [4K]
+      T* rm = op1d_smem + off.rm;                   // [K*K]
+      T* r0 = op1d_smem + off.r0;                   // [K*K]
+      T* rp = op1d_smem + off.rp;                   // [K*K]
 
       /**
        * Temporary storage for intermediate results. Is used both for the accumulation buffer
        * in make_rnlp_leaf and below to assemble the 2k x 2k child blocks.
        */
-      SHARED T tmp[2 * MRA_MAX_K * 2 * MRA_MAX_K]; // [2K x 2K]
-      SHARED T t0[2 * MRA_MAX_K * 2 * MRA_MAX_K];  // [2K x 2K]
+      T* tmp = op1d_smem + off.tmp; // [2K x 2K]
+      T* t0 = op1d_smem + off.t0;   // [2K x 2K] -- aliases [leftbuf..rp], see Op1DWorkspaceOffsets
       // we can reuse tmp as rmat
-      T* rmat = tmp; // [2K x 2K]
-      SHARED T smat[MRA_MAX_K * MRA_MAX_K];        // [K x K]
+      T* rmat = op1d_smem + off.rmat; // [2K x 2K]
+      T* smat = op1d_smem + off.smat; // [K x K]
       // we can reuse t0 as ns_scratch
-      T* ns_scratch = t0; // [2K x 2K]
+      T* ns_scratch = op1d_smem + off.ns_scratch; // [2K x 2K]
 
       if (op1d_issmall(p.expnt, item.n, lx)) {
         for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size())
@@ -634,6 +670,9 @@ namespace mra {
           for (size_type f = 0; f < 5; ++f) norms_dst[f] = T(0);
         }
         SYNCTHREADS();
+#ifndef HAVE_DEVICE_ARCH
+        delete[] op1d_smem;
+#endif
         return;
       }
 
@@ -731,6 +770,9 @@ namespace mra {
         norms_dst[4] = nsnormf;
       }
       SYNCTHREADS();
+#ifndef HAVE_DEVICE_ARCH
+      delete[] op1d_smem;
+#endif
     }
 
   } // namespace detail
@@ -848,7 +890,11 @@ namespace mra {
     if (n_items == 0 || max_range_len == 0) return;
     Dim3 thread_dims = max_thread_dims(2 * K);
     Dim3 grid_dims((unsigned)n_items, (unsigned)max_range_len, 1);
-    CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, 0,
+    // generate_op1d_one's own dynamic shared memory (see its comment) --
+    // sized by the runtime K, not MRA_MAX_K.
+    auto smem_size = generate_op1d_workspace_size(K) * sizeof(T);
+    //CONFIGURE_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), smem_size);
+    CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, smem_size,
                 stream, (items, n_items, max_range_len, K, c, hgT, hgT2k, quad_x, quad_w, npt, workspace, l_offset, R, S, norms));
     checkSubmit();
   }
