@@ -352,10 +352,6 @@ namespace mra {
             continue;
           }
           if (f.n < p.natlev) {
-            if (is_team_lead()) {
-              stack[top].state = WAIT_LEFT;
-            }
-            SYNCTHREADS();
             if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
               if (is_team_lead()) {
                 THROWF("get_rnlp_device: recursion depth exceeded MRA_OP1D_MAX_RECURSION_DEPTH (%d)\n",
@@ -364,6 +360,7 @@ namespace mra {
               return;
             }
             if (is_team_lead()) {
+              stack[top].state = WAIT_LEFT;
               stack[sp].n = f.n + 1;
               stack[sp].lx = 2 * f.lx;
               stack[sp].state = ENTER;
@@ -380,10 +377,6 @@ namespace mra {
         if (f.state == WAIT_LEFT) {
           for (size_type i = thread_id(); i < 2 * K; i += block_size())
             leftbuf[top * 2 * K + i] = retbuf[i];
-          if (is_team_lead()) {
-            stack[top].state = WAIT_RIGHT;
-          }
-          SYNCTHREADS();
           if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
             if (is_team_lead()) {
               THROWF("get_rnlp_device: recursion depth exceeded MRA_OP1D_MAX_RECURSION_DEPTH (%d)\n",
@@ -392,6 +385,7 @@ namespace mra {
             return;
           }
           if (is_team_lead()) {
+            stack[top].state = WAIT_RIGHT;
             stack[sp].n = f.n + 1;
             stack[sp].lx = 2 * f.lx + 1;
             stack[sp].state = ENTER;
