@@ -150,6 +150,20 @@ namespace mra {
      * which aliases tmp, and ns_scratch, which aliases t0, during the final
      * transpose/norm steps). rmat/ns_scratch keep aliasing tmp/t0 exactly as
      * generate_op1d_one's hand-written version already did.
+     *
+     * rmat/smat are allocated one element wider per row than their KxK/2Kx2K
+     * logical size (row_stride == cols+1, see generate_op1d_one's "+1
+     * padding" comment): the in-place transpose's write, rmat[qj*stride+qi]
+     * for a thread owning (qi,qj), strides by `stride` between consecutive
+     * threads, and stride==cols (no padding) divides the 32-way shared-
+     * memory bank period whenever cols does (always true for rmat, since
+     * cols==2K is even; true for smat whenever K is even), causing every
+     * thread in the affected half of the warp to hit the same bank. Since
+     * tmp/smat's OWN (unpadded, non-matrix) earlier uses as flat scratch in
+     * make_rnlp_leaf/get_rnlp_device/make_rnlij_device only ever need
+     * 2K*2K/K*K contiguous elements, reserving the padded (larger) size here
+     * costs a few unused elements during those earlier phases but needs no
+     * separate region.
      */
     struct Op1DWorkspaceOffsets {
       size_type leftbuf;     // [MRA_OP1D_MAX_RECURSION_DEPTH][2K]
@@ -162,10 +176,12 @@ namespace mra {
       size_type rm;          // [K*K]
       size_type r0;          // [K*K]
       size_type rp;          // [K*K]
-      size_type tmp;         // [2K*2K] -- own space, live alongside [leftbuf..rp]
+      size_type tmp;         // [2K*(2K+1)] -- own space, live alongside [leftbuf..rp]; sized for
+                              // rmat's +1-padded row stride (see struct comment), though its own
+                              // flat-scratch use only needs 2K*2K of it
       size_type t0;          // [2K*2K] -- ALIASES [leftbuf..rp] (offset 0), see above
-      size_type rmat;        // aliases tmp
-      size_type smat;        // [K*K] -- own space
+      size_type rmat;        // aliases tmp, read/written with row stride 2K+1 (not 2K)
+      size_type smat;        // [K*(K+1)] -- own space, row stride K+1 (not K), same reasoning as rmat
       size_type ns_scratch;  // aliases t0
       size_type total;
 
@@ -182,13 +198,13 @@ namespace mra {
         r0 = p; p += K * K;
         rp = p; p += K * K;
 
-        tmp = p; p += 2 * K * 2 * K;
+        tmp = p; p += 2 * K * (2 * K + 1);
 
         t0 = 0; // reuse [leftbuf..rp]'s now-dead space
         const size_type t0_end = t0 + 2 * K * 2 * K;
 
         rmat = tmp;
-        smat = p; p += K * K;
+        smat = p; p += K * (K + 1);
         ns_scratch = t0;
 
         // p already exceeds t0_end for any realistic K (leftbuf's own
@@ -547,6 +563,33 @@ namespace mra {
       }
     }
 
+    /// Frobenius norm of a row-padded 2D buffer: `rows` x `cols` logical
+    /// elements stored with `row_stride` (> cols) elements per row, the extra
+    /// column(s) being the bank-conflict padding generate_op1d_one applies to
+    /// rmat/smat (see its "+1 padding" comment below) -- summing those pad
+    /// slots in as if they were real contiguous data (what plain
+    /// mra::detail::normf(ptr, n) would do) would both read uninitialized
+    /// values and misalign every element after the first row. Otherwise
+    /// identical to normf(const T*, size_type): a thread_id()-strided partial
+    /// sum of squares, reduced via detail::reduce_block.
+    template <typename T>
+    SCOPE auto normf_padded(const T* a, size_type rows, size_type cols, size_type row_stride) {
+      using accumulatorT = accumulator_type_t<T>;
+      accumulatorT s = 0.0;
+      const size_type n = rows * cols;
+      for (size_type idx = thread_id(); idx < n; idx += block_size()) {
+        size_type qi = idx / cols, qj = idx % cols;
+        accumulatorT x = a[qi * row_stride + qj];
+        s += x * x;
+      }
+      accumulatorT sum = 0.0;
+      reduce_block(s, &sum, std::min(n, static_cast<size_type>(block_size())));
+#ifdef HAVE_DEVICE_ARCH
+      SYNCTHREADS();
+#endif // HAVE_DEVICE_ARCH
+      return std::sqrt(sum);
+    }
+
     /**
      * Ported from mra::Convolution::make_nonstandard (misc/convolutiondata.h):
      * assembles the 2Kx2K child block from three rnlij matrices at the finer
@@ -569,10 +612,12 @@ namespace mra {
      * a DIFFERENT buffer than it writes (never in-place), except the R/S
      * transpose, which is safe in place: each (i,j) with i<j is handled by
      * exactly one thread (the iteration skips i>=j), and that thread is the
-     * only one that ever touches either (i,j) or (j,i). Norms reuse
-     * mra::detail::normf(ptr, n) (mra/ops/functions.h) -- itself already a
-     * cooperative, SYNCTHREADS-ed block reduction -- rather than hand-rolling
-     * another one here.
+     * only one that ever touches either (i,j) or (j,i). ns_scratch's norm
+     * reuses mra::detail::normf(ptr, n) (mra/ops/functions.h) directly; R/S's
+     * norms go through this file's own normf_padded (same cooperative,
+     * SYNCTHREADS-ed block reduction, but skipping rmat/smat's pad column --
+     * see the "+1 padding" comment above where rmat_stride/smat_stride are
+     * defined).
      */
     template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
               concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
@@ -646,10 +691,27 @@ namespace mra {
       T* tmp = op1d_smem + off.tmp; // [2K x 2K]
       T* t0 = op1d_smem + off.t0;   // [2K x 2K] -- aliases [leftbuf..rp], see Op1DWorkspaceOffsets
       // we can reuse tmp as rmat
-      T* rmat = op1d_smem + off.rmat; // [2K x 2K]
-      T* smat = op1d_smem + off.smat; // [K x K]
+      T* rmat = op1d_smem + off.rmat; // [2K x 2K], stored with row stride rmat_stride (see below)
+      T* smat = op1d_smem + off.smat; // [K x K], stored with row stride smat_stride (see below)
       // we can reuse t0 as ns_scratch
       T* ns_scratch = op1d_smem + off.ns_scratch; // [2K x 2K]
+
+      // rmat/smat carry one padding element per row (row stride cols+1
+      // rather than cols) purely to break up the in-place transpose below:
+      // a thread handling (qi,qj) writes its transposed element at
+      // [qj*stride+qi], so consecutive threads (consecutive qj, same qi)
+      // write `stride` elements apart. With no padding that stride equals
+      // the matrix width, which for rmat (2K, always even) divides the
+      // 32-way shared-memory bank period exactly -- e.g. 2K==16 makes every
+      // other thread collide, 2K==32 makes EVERY thread collide, a 32-way
+      // conflict. Adding 1 makes the stride odd, hence coprime with the
+      // (power-of-two) bank count, eliminating the conflict regardless of K.
+      // Every other access to rmat/smat (the hgT contraction's output write,
+      // the S-extraction copy, the final norm/store reads) is updated to use
+      // the same padded stride for consistency, even though most of them
+      // aren't themselves transpose-shaped.
+      const size_type rmat_stride = size_type(2 * K) + 1;
+      const size_type smat_stride = size_type(K) + 1;
 
       if (op1d_issmall(p.expnt, item.n, lx)) {
         for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size())
@@ -701,33 +763,34 @@ namespace mra {
         size_type qi = idx / (2 * K), qj = idx % (2 * K);
         T acc = T(0);
         for (size_type k = 0; k < 2 * K; ++k) acc += t0[k * (2 * K) + qi] * hgT(k, qj);
-        rmat[idx] = acc;
+        rmat[qi * rmat_stride + qj] = acc;
       }
       SYNCTHREADS();
 
       // S = R's pre-transpose top-left KxK block.
       for (size_type idx = thread_id(); idx < K * K; idx += block_size()) {
         size_type qi = idx / K, qj = idx % K;
-        smat[idx] = rmat[qi * (2 * K) + qj];
+        smat[qi * smat_stride + qj] = rmat[qi * rmat_stride + qj];
       }
       SYNCTHREADS();
 
       // Transpose R (2Kx2K) and S (KxK) in place, matching convolutiondata.h
-      // -- safe in place, see this function's header comment.
+      // -- safe in place, see this function's header comment. rmat/smat's
+      // padded row stride (see above) is what keeps this conflict-free.
       for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size()) {
         size_type qi = idx / (2 * K), qj = idx % (2 * K);
         if (qi < qj) {
-          T v = rmat[qi * (2 * K) + qj];
-          rmat[qi * (2 * K) + qj] = rmat[qj * (2 * K) + qi];
-          rmat[qj * (2 * K) + qi] = v;
+          T v = rmat[qi * rmat_stride + qj];
+          rmat[qi * rmat_stride + qj] = rmat[qj * rmat_stride + qi];
+          rmat[qj * rmat_stride + qi] = v;
         }
       }
       for (size_type idx = thread_id(); idx < K * K; idx += block_size()) {
         size_type qi = idx / K, qj = idx % K;
         if (qi < qj) {
-          T v = smat[qi * K + qj];
-          smat[qi * K + qj] = smat[qj * K + qi];
-          smat[qj * K + qi] = v;
+          T v = smat[qi * smat_stride + qj];
+          smat[qi * smat_stride + qj] = smat[qj * smat_stride + qi];
+          smat[qj * smat_stride + qi] = v;
         }
       }
       SYNCTHREADS();
@@ -735,21 +798,30 @@ namespace mra {
       // NSnormf needs R with its top-left KxK block zeroed; build that into
       // its own scratch region rather than mutating rmat (still needed below
       // for R_dst and Rnormf). Zeroing commutes with the transpose above
-      // since that block maps to itself under it.
+      // since that block maps to itself under it. ns_scratch itself is never
+      // transposed, so it stays flat/unpadded (idx, not qi*stride+qj).
       for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size()) {
         size_type qi = idx / (2 * K), qj = idx % (2 * K);
-        ns_scratch[idx] = (qi < K && qj < K) ? T(0) : rmat[idx];
+        ns_scratch[idx] = (qi < K && qj < K) ? T(0) : rmat[qi * rmat_stride + qj];
       }
       SYNCTHREADS();
 
-      T rnormf = normf(rmat, 2 * K * 2 * K);
-      T snormf = normf(smat, K * K);
+      // rmat/smat are padded (row stride > width), so their norms can't use
+      // plain normf(ptr, n) -- that would sum the pad column(s) in as if
+      // they were real contiguous data. ns_scratch is unpadded, so it still
+      // uses normf directly.
+      T rnormf = normf_padded(rmat, 2 * K, 2 * K, rmat_stride);
+      T snormf = normf_padded(smat, K, K, smat_stride);
       T nsnormf = normf(ns_scratch, 2 * K * 2 * K);
 
-      for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size())
-        R_dst(idx / (2 * K), idx % (2 * K)) = rmat[idx];
-      for (size_type idx = thread_id(); idx < K * K; idx += block_size())
-        S_dst(idx / K, idx % K) = smat[idx];
+      for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size()) {
+        size_type qi = idx / (2 * K), qj = idx % (2 * K);
+        R_dst(qi, qj) = rmat[qi * rmat_stride + qj];
+      }
+      for (size_type idx = thread_id(); idx < K * K; idx += block_size()) {
+        size_type qi = idx / K, qj = idx % K;
+        S_dst(qi, qj) = smat[qi * smat_stride + qj];
+      }
 
       if (is_team_lead()) {
         // norms_dst order: Rnorm, Snorm, Rnormf, Snormf, NSnormf (see conv_mad.h's NormId).
