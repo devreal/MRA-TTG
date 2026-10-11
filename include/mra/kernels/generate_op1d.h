@@ -104,15 +104,6 @@ namespace mra {
 
   namespace detail {
 
-    template<typename T>
-    constexpr auto generate_op1d_max_k(T K) {
-      if constexpr (is_ct_integral_v<T>) {
-        return static_cast<size_type>(K);
-      } else {
-        return MRA_MAX_K;
-      }
-    }
-
     /// Ported from mra::Convolution::issmall (misc/convolutiondata.h).
     template <typename T>
     DEVSCOPE bool op1d_issmall(T expnt, Level n, Translation lx) {
@@ -122,30 +113,6 @@ namespace mra {
       else if (lx < 0) l = -lx - 1;
       else l = 0;
       return beta * T(l) * T(l) > T(49.0);
-    }
-
-    /// Ported from legendre_scaling_functions (src/gl.cc), which is host-only
-    /// (backed by a host-resident normalization table) -- this is the
-    /// device-portable equivalent, computed directly instead of from a table
-    /// since the recurrence coefficients (n/(n+1), sqrt(2n+1)) are cheap to
-    /// evaluate inline. p must have room for k elements.
-    ///
-    /// Sequential and thread-private: the three-term recurrence makes p[n+1]
-    /// depend on p[n] and p[n-1], so it cannot be split across threads, and k
-    /// (at most 2*MRA_MAX_K) is small enough for every thread to evaluate it
-    /// redundantly into its own `p`.
-    template <typename T>
-    DEVSCOPE void legendre_scaling_device(T x, size_type k, T* p) {
-      T z = T(2) * x - T(1);
-      p[0] = T(1);
-      if (k > 1) p[1] = z;
-      for (size_type n = 1; n + 1 < k; ++n) {
-        T nn1 = T(n) / T(n + 1);
-        p[n + 1] = (z * p[n] - p[n - 1]) * nn1 + z * p[n];
-      }
-      for (size_type n = 0; n < k; ++n) {
-        p[n] *= sqrt(T(2) * T(n) + T(1));
-      }
     }
 
     /**
@@ -281,7 +248,22 @@ namespace mra {
       // Op1DWorkspaceOffsets), which exactly fits blockDim.y <= 2*K rows of
       // 2*K columns each.
       T* acc = tmp;
-      T phix[2 * generate_op1d_max_k(decltype(K){})]; // thread-private, see legendre_scaling_device
+
+      auto phix = [](T x, size_type p) {
+        T z = T(2) * x - T(1);
+        // tmp[1] holds the result for the current p
+        T tmp[2] = {T(1), T(1)};
+        if (p >= 1) tmp[1] = z;
+        // after this loop, the result for p is in tmp[1]
+        for (size_type n = 1; n < p; ++n) {
+          T nn1 = T(n) / T(n + 1);
+          T v = (z * tmp[1] - tmp[0]) * nn1 + z * tmp[1];
+          // move tmp down
+          tmp[0] = tmp[1];
+          tmp[1] = v;
+        }
+        return tmp[1] * std::sqrt(T(2) * T(p) + T(1));
+      };
 
       const size_type row = (size_type)threadIdx.y;
       const size_type nrows = (size_type)blockDim.y;
@@ -295,8 +277,7 @@ namespace mra {
           if (beta * xlo * xlo > argmax) break; // box is non-decreasing in w -- safe early exit for this row
           T xx = xlo + h * quad_x[i];
           T ee = scaledcoeff * exp(-beta * xx * xx) * quad_w[i] * h;
-          legendre_scaling_device(xx - T(lxx), 2 * K, phix);
-          a += ee * phix[p];
+          a += ee * phix(xx - T(lxx), p);
         }
         acc[row * (2 * K) + p] = a;
       }
@@ -909,10 +890,7 @@ namespace mra {
     //CONFIGURE_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), smem_size);
     // Dispatch to a compile-time K for the common case (K==8), same as
     // submit_convolution_kernel: letting the compiler see K as a real
-    // constant (Int<8>) throughout generate_op1d_one's call tree -- not just
-    // for generate_op1d_max_k's use in sizing make_rnlp_leaf's thread-private
-    // phix array, but for every K-dependent loop bound/index the compiler
-    // can now fold or unroll -- rather than always carrying it as an opaque
+    // constant (Int<8>) throughout generate_op1d_one's call tree rather than always carrying it as an opaque
     // runtime value. Falls back to the plain runtime K (exactly as before)
     // for every other K.
     if (K == 8) {
