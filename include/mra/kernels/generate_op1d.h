@@ -104,6 +104,15 @@ namespace mra {
 
   namespace detail {
 
+    template<typename T>
+    constexpr auto generate_op1d_max_k(T K) {
+      if constexpr (is_ct_integral_v<T>) {
+        return static_cast<size_type>(K);
+      } else {
+        return MRA_MAX_K;
+      }
+    }
+
     /// Ported from mra::Convolution::issmall (misc/convolutiondata.h).
     template <typename T>
     DEVSCOPE bool op1d_issmall(T expnt, Level n, Translation lx) {
@@ -252,7 +261,7 @@ namespace mra {
     /// reduction/atomics over that intermediate); rows are then reduced into
     /// `out[p]` after a sync, via the per-row partial sums held in `acc`.
     template <typename T>
-    DEVSCOPE void make_rnlp_leaf(T coeff, T expnt, size_type K, size_type npt,
+    DEVSCOPE void make_rnlp_leaf(T coeff, T expnt, auto K, size_type npt,
                                   const T* quad_x, const T* quad_w,
                                   Level n, Translation lx, T* tmp, T* out) {
       Translation lkeep = lx;
@@ -272,7 +281,7 @@ namespace mra {
       // Op1DWorkspaceOffsets), which exactly fits blockDim.y <= 2*K rows of
       // 2*K columns each.
       T* acc = tmp;
-      T phix[2 * MRA_MAX_K_SIZET]; // thread-private, see legendre_scaling_device
+      T phix[2 * generate_op1d_max_k(decltype(K){})]; // thread-private, see legendre_scaling_device
 
       const size_type row = (size_type)threadIdx.y;
       const size_type nrows = (size_type)blockDim.y;
@@ -350,7 +359,7 @@ namespace mra {
      * retbuf holds the original (n0, lx0) query's answer.
      */
     template <typename T, concepts::TensorView<2> ViewHgT2k>
-    DEVSCOPE void get_rnlp_device(const GaussianTermParams<T>& p, size_type K, size_type npt,
+    DEVSCOPE void get_rnlp_device(const GaussianTermParams<T>& p, auto K, size_type npt,
                                    const T* quad_x, const T* quad_w,
                                    const ViewHgT2k& hgT2k,
                                    Level n0, Translation lx0,
@@ -493,7 +502,7 @@ namespace mra {
      * through); rnlp1/rnlp2/Rvec are this function's own block-wide scratch.
      */
     template <typename T, concepts::TensorView<2> ViewHgT2k, concepts::TensorView<3> ViewC>
-    DEVSCOPE void make_rnlij_device(const GaussianTermParams<T>& p, size_type K, size_type npt,
+    DEVSCOPE void make_rnlij_device(const GaussianTermParams<T>& p, auto K, size_type npt,
                                      const T* quad_x, const T* quad_w,
                                      const ViewHgT2k& hgT2k,
                                      const ViewC& cten,
@@ -587,7 +596,7 @@ namespace mra {
     template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
               concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
               concepts::TensorView<5> ViewNorms>
-    DEVSCOPE void generate_op1d_one(const GenerateOp1DItem<T>& item, Translation lx, size_type K,
+    DEVSCOPE void generate_op1d_one(const GenerateOp1DItem<T>& item, Translation lx, auto K,
                                      const ViewC& cten,
                                      const ViewHgT& hgT,
                                      const ViewHgT2k& hgT2k,
@@ -827,7 +836,7 @@ namespace mra {
             concepts::TensorView<5> ViewNorms>
   LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
   GLOBALSCOPE void generate_op1d_kernel(
-      const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, size_type K,
+      const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, auto K,
       ViewC c, ViewHgT hgT,
       ViewHgT2k hgT2k, const T* quad_x, const T* quad_w, size_type npt,
       T* workspace, Translation l_offset, ViewR R, ViewS S, ViewNorms norms) {
@@ -891,11 +900,28 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(2 * K);
     Dim3 grid_dims((unsigned)n_items, (unsigned)max_range_len, 1);
     // generate_op1d_one's own dynamic shared memory (see its comment) --
-    // sized by the runtime K, not MRA_MAX_K.
+    // sized by the runtime K, not MRA_MAX_K. Computed once from the plain
+    // runtime K regardless of which branch below actually runs: the byte
+    // count is identical either way (K==8 numerically either way), and
+    // CALL_KERNEL's shared-memory argument must be a runtime value regardless
+    // of whether the kernel itself is instantiated with a compile-time K.
     auto smem_size = generate_op1d_workspace_size(K) * sizeof(T);
     //CONFIGURE_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), smem_size);
-    CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, smem_size,
-                stream, (items, n_items, max_range_len, K, c, hgT, hgT2k, quad_x, quad_w, npt, workspace, l_offset, R, S, norms));
+    // Dispatch to a compile-time K for the common case (K==8), same as
+    // submit_convolution_kernel: letting the compiler see K as a real
+    // constant (Int<8>) throughout generate_op1d_one's call tree -- not just
+    // for generate_op1d_max_k's use in sizing make_rnlp_leaf's thread-private
+    // phix array, but for every K-dependent loop bound/index the compiler
+    // can now fold or unroll -- rather than always carrying it as an opaque
+    // runtime value. Falls back to the plain runtime K (exactly as before)
+    // for every other K.
+    if (K == 8) {
+      CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, smem_size,
+                  stream, (items, n_items, max_range_len, Int<8>{}, c, hgT, hgT2k, quad_x, quad_w, npt, workspace, l_offset, R, S, norms));
+    } else {
+      CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, smem_size,
+                  stream, (items, n_items, max_range_len, K, c, hgT, hgT2k, quad_x, quad_w, npt, workspace, l_offset, R, S, norms));
+    }
     checkSubmit();
   }
 
