@@ -19,6 +19,8 @@ namespace mra {
     double* tmp,
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
+    const std::array<const double*, Key<3>::num_children()>& child_kept,
+    double trunc_tol,
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 

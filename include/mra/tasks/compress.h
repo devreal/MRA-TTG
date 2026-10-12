@@ -299,6 +299,14 @@ namespace mra
           /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
           auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(n_nonzero, TempScope);
 
+          // Computed up front (depends only on key/thresh/cell_min_width/
+          // truncate_mode, all known before the kernel runs) so the kernel
+          // itself can apply the truncation decision on-device -- see
+          // compress_process_one in mra/kernels/compress.h. 0 when
+          // truncation is disabled, which makes that kernel's sumsq
+          // comparison always false (sumsq is never negative).
+          const T trunc_tol = enable_truncate ? mra::truncate_tol(key, thresh, cell_min_width, truncate_mode) : T{};
+
           auto& d = result.coeffs();
 
 #ifndef MRA_ENABLE_HOST
@@ -349,6 +357,18 @@ namespace mra
           auto rcoeffs_view = d.current_view();
           auto hgT_view = hgT.current_view();
 
+          // This node's children's "kept" device pointers, for the in-kernel
+          // truncation decision (mirrors truncate.h's own child_kept array).
+          // Valid right after select()/coop() above stages the kept buffers
+          // onto the device -- nullptr for an empty (true-leaf) child, same
+          // as select_kept_in()/child_kept() above and truncate.h's own use
+          // of current_device_ptr().
+          std::array<const T*, num_children> child_kept_ptrs =
+              {kept0.buffer().current_device_ptr(), kept1.buffer().current_device_ptr(),
+              kept2.buffer().current_device_ptr(), kept3.buffer().current_device_ptr(),
+              kept4.buffer().current_device_ptr(), kept5.buffer().current_device_ptr(),
+              kept6.buffer().current_device_ptr(), kept7.buffer().current_device_ptr()};
+
 #ifndef MRA_ENABLE_HOST
           if (enable_compress_batching) {
             // key travels through coop() since compress_kernel_impl reads
@@ -367,7 +387,8 @@ namespace mra
             // member's real function ids are found on-device.
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
                                                                     tmp_scratch, d_sumsq, input_views,
-                                                                    p.coeffs(), d, n_nonzero);
+                                                                    p.coeffs(), d, n_nonzero,
+                                                                    child_kept_ptrs, trunc_tol);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
             detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view, total_functions);
           } else
@@ -378,6 +399,7 @@ namespace mra
             submit_compress_kernel(key, N, n_nonzero, K, is_ns,
                                   in_view, coeffs_view, rcoeffs_view, hgT_view,
                                   tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
+                                  child_kept_ptrs, trunc_tol,
                                   ttg::device::current_stream());
           }
           norms.compute();
@@ -461,7 +483,6 @@ namespace mra
           // this sum -- truncation is exempt below level 2 anyway (see the
           // key.level() > 1 guard below), so is_ns's level==0/1 exception to
           // that zeroing never affects the truncation test.
-          const T trunc_tol = enable_truncate ? mra::truncate_tol(key, thresh, cell_min_width, truncate_mode) : T{};
           size_type pos = 0;
           for (auto it = sparsity.begin_nonzero(); it != sparsity.end_nonzero(); ++it, ++pos) {
             const size_type i = *it;
@@ -472,27 +493,20 @@ namespace mra
             //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[pos]
             //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
 
-            // Optional in-line truncation: drop this node's own wavelet
-            // coefficients for function i if none of our children still have
-            // live wavelet mass below them and our own wavelet norm falls
-            // below tol (mirrors truncate_process_one exactly; level <= 1 is
-            // never truncated, matching MADNESS's truncate_op).
+            // Optional in-line truncation: mirrors compress_process_one's own
+            // decision (mra/kernels/compress.h), which already dropped this
+            // node's device-resident wavelet coefficients for function i
+            // under the identical condition (same d_sumsq_arr[pos], same
+            // trunc_tol, same any_child_kept[i] -- resolved from the same
+            // kept0..7 buffers, both read only after they're guaranteed
+            // current, see child_kept() above). Re-applied here purely to
+            // keep this host-side `result` object's own sparsity bookkeeping
+            // in sync with the device -- no device transfer needed for this,
+            // since the device bits were already corrected in-kernel.
             if (enable_truncate && key.level() > 1 && !result.is_zero(i) &&
                 !any_child_kept[i] && d_sumsq_arr[pos] < trunc_tol*trunc_tol) {
               result.set_zero(i);
             }
-          }
-
-          if (enable_truncate) {
-            // result's host sparsity may have just been mutated above
-            // (result.set_zero); the device-resident copy pushed via
-            // sparseman/the batch leader before the kernel ran reflects the
-            // pre-truncation state, so push the corrected bytes down before
-            // `result` is forwarded on -- mirrors truncate.h's own kernel
-            // writing the decision directly to the device view, just done as
-            // a second small H2D copy here instead of inside the kernel.
-            auto trunc_sparseman = make_sparsity_manager(d);
-            trunc_sparseman.populate_device_sparsity();
           }
 
           // This node's own contribution to send up to the parent: for every
