@@ -548,10 +548,9 @@ namespace mra {
                */
               auto gen_items = op.collect_generation_items(res);
               auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-              auto ws_buf = op.make_generation_workspace(gen_items.size());
-              auto gen_input = op.make_generation_input(res, items_buf, ws_buf);
+              auto gen_input = op.make_generation_input(res, items_buf);
               co_await ttg::device::select(gen_input);
-              op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
+              op.submit_generation_kernel(res, gen_items, items_buf);
               // wait for the kernel and pull the table back to the host: the
               // norms for finish_op_assembly(), R/S so that tasks on other
               // devices can stage them in (published tables are shared by all
@@ -791,7 +790,6 @@ namespace mra {
         // make_norms_tensor()'s comments in conv_mad.h).
         auto gen_items = op.collect_generation_items(res); // empty if !need_generate
         auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-        auto ws_buf = op.make_generation_workspace(gen_items.size());
         std::shared_ptr<mra::DenseTensor<T, 4>> norms;
         if (need_assemble) {
           norms = op.make_norms_tensor();
@@ -830,10 +828,10 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
                                         out.coeffs().buffer(), tmp);
-        op.add_convolution_op_buffers(input, res, items_buf, ws_buf, norms.get());
+        op.add_convolution_op_buffers(input, res, items_buf, norms.get());
         co_await ttg::device::select(input);
         if (need_generate) {
-          op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
+          op.submit_generation_kernel(res, gen_items, items_buf);
         }
         if (need_assemble) {
           // Same stream as submit_generation_kernel (if it ran) and the
@@ -1090,7 +1088,6 @@ namespace mra {
       const bool need_assemble = (res.status == OpStatus::Owned);
       auto gen_items = op.collect_generation_items(res); // empty if !need_generate
       auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-      auto ws_buf = op.make_generation_workspace(gen_items.size());
       std::shared_ptr<mra::DenseTensor<T, 4>> norms;
       if (need_assemble) {
         norms = op.make_norms_tensor();
@@ -1120,14 +1117,14 @@ namespace mra {
       }
 #ifndef MRA_ENABLE_HOST
       auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
-      op.add_convolution_op_buffers(input, res, items_buf, ws_buf, norms.get());
+      op.add_convolution_op_buffers(input, res, items_buf, norms.get());
       if (last_key) {
         // if this is the last we want to get the norms of the result back
         input.add(resnorms.buffer());
       }
       co_await ttg::device::select(input);
       if (need_generate) {
-        op.submit_generation_kernel(res, gen_items, items_buf, ws_buf);
+        op.submit_generation_kernel(res, gen_items, items_buf);
       }
       if (need_assemble) {
         // same stream as the generation and convolution kernels, see shell0_tt

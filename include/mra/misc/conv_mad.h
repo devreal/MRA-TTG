@@ -1025,9 +1025,9 @@ namespace mra {
      *     norms = op.make_norms_tensor();
      *   }
      *   ttg::device::Input input(...convolution buffers...);
-     *   op.add_convolution_op_buffers(input, res, items_buf, ws_buf, norms.get());
+     *   op.add_convolution_op_buffers(input, res, items_buf, norms.get());
      *   co_await ttg::device::select(input);
-     *   if (op.has_generation_work(res)) op.submit_generation_kernel(res, items, items_buf, ws_buf);
+     *   if (op.has_generation_work(res)) op.submit_generation_kernel(res, items, items_buf);
      *   if (need_assemble) op.submit_assemble_norms_kernel(res, n, disp, *norms);
      *   ... submit the convolution kernel ...
      *   // pull norms (and norms1d, if generated) back to the host before
@@ -1082,12 +1082,11 @@ namespace mra {
     /// ttg::device::suspend() until it isn't, before calling this.
     void add_convolution_op_buffers(ttg::device::Input& input, const OpResult& res,
                                     ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
-                                    ttg::Buffer<T>& workspace,
                                     DenseTensor<T, 4>* norms) const {
       assert(res.status != Status::Pending);
       if (res.level_work) {
         // includes the table's R/S/norms1d
-        add_generation_buffers(input, res, items_buf, workspace);
+        add_generation_buffers(input, res, items_buf);
       } else {
         const auto& table = *res.dims[0].table;
         input.add(table.R.buffer());
@@ -1155,17 +1154,16 @@ namespace mra {
      * callable BEFORE that one select() -- it only reads host-side state
      * (m_term_params, res.level_work->n), never a device view -- letting the
      * caller fold every buffer this generation round needs (the shared
-     * generator tables, the level table's R/S/norms1d, items_buf, and
-     * workspace) into that single select() call alongside it. Typical
-     * call-site sequence when the caller (like screener_tt) needs norms1d
-     * back on the HOST afterward, via finish_op_assembly():
+     * generator tables, the level table's R/S/norms1d, and items_buf) into
+     * that single select() call alongside it. Typical call-site sequence
+     * when the caller (like screener_tt) needs norms1d back on the HOST
+     * afterward, via finish_op_assembly():
      *   if (op.has_generation_work(res)) {
      *     auto items = op.collect_generation_items(res);
      *     auto items_buf = make_generate_op1d_items_buffer(items);
-     *     auto ws_buf = op.make_generation_workspace(items.size());
-     *     auto input = op.make_generation_input(res, items_buf, ws_buf);
+     *     auto input = op.make_generation_input(res, items_buf);
      *     co_await ttg::device::select(input);
-     *     op.submit_generation_kernel(res, items, items_buf, ws_buf);
+     *     op.submit_generation_kernel(res, items, items_buf);
      *     co_await ttg::device::wait(res.level_work->norms1d.buffer());
      *     op.publish_generation_work(res);
      *   }
@@ -1180,24 +1178,21 @@ namespace mra {
 
     /// Every buffer this generation round needs -- the shared generator
     /// tables, the whole level table's R/S/norms1d (one buffer per field,
-    /// not one per dimension/translation), items_buf, and workspace -- so
-    /// the caller can co_await ttg::device::select() on all of it in the
-    /// ONE select() call its task is allowed. Call after
-    /// collect_generation_items()/make_generate_op1d_items_buffer()/
-    /// make_generation_workspace(), which are all host-only and need no
-    /// prior select() of their own.
-    ttg::device::Input make_generation_input(const OpResult& res, ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
-                                              ttg::Buffer<T>& workspace) const {
+    /// not one per dimension/translation), and items_buf -- so the caller
+    /// can co_await ttg::device::select() on all of it in the ONE select()
+    /// call its task is allowed. Call after collect_generation_items()/
+    /// make_generate_op1d_items_buffer(), which are both host-only and need
+    /// no prior select() of their own.
+    ttg::device::Input make_generation_input(const OpResult& res, ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
       ttg::device::Input input;
-      add_generation_buffers(input, res, items_buf, workspace);
+      add_generation_buffers(input, res, items_buf);
       return input;
     }
 
     /// Same buffers as make_generation_input(), appended to an existing
     /// `input`. Adds nothing unless res.level_work is set.
     void add_generation_buffers(ttg::device::Input& input, const OpResult& res,
-                                ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
-                                ttg::Buffer<T>& workspace) const {
+                                ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
       if (!res.level_work) return;
       input.add(m_shared_c.buffer());
       input.add(m_shared_hgT.buffer());
@@ -1208,7 +1203,6 @@ namespace mra {
       input.add(res.level_work->S.buffer());
       input.add(res.level_work->norms1d.buffer());
       input.add(items_buf);
-      input.add(workspace);
     }
 
     /// Builds the flat (dimension, count-index, term) work-item list
@@ -1247,37 +1241,18 @@ namespace mra {
       return items;
     }
 
-    /// Allocates (Allocate scope -- device-resident, no host fill needed) the
-    /// per-(item, translation) cooperative scratch the generation kernel's
-    /// threads share (see generate_op1d.h's Op1DWorkspaceOffsets/
-    /// generate_op1d_workspace_size). Sized by MRA_OP1D_NUM_DISPLACEMENTS
-    /// (the workspace stride submit_generation_kernel below passes as
-    /// max_range_len -- see generate_op1d_kernel's comment on why the
-    /// generator now needs one scratch region per (item, translation) pair,
-    /// not just per item, to run every translation of an item concurrently
-    /// instead of looping over them serially in one block) since
-    /// collect_generation_items() currently always requests the full
-    /// level-wide range for every item. Host-only (no device view read) --
-    /// safe to call before the round's one select(), same as
-    /// collect_generation_items().
-    ttg::Buffer<T> make_generation_workspace(size_type n_items) const {
-      return ttg::Buffer<T>(generate_op1d_workspace_size(m_K) * n_items * MRA_OP1D_NUM_DISPLACEMENTS,
-                             ttg::scope::Allocate);
-    }
-
     /// Call only after co_await-ing make_generation_input()'s select();
-    /// `items`/`items_buf`/`workspace` must be the exact objects that went
+    /// `items`/`items_buf` must be the exact objects that went
     /// into that same select() call (via make_generation_input).
     void submit_generation_kernel(const OpResult& res, const std::vector<GenerateOp1DItem<T>>& items,
-                                   ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
-                                   ttg::Buffer<T>& workspace) const {
+                                   ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
       if (items.empty()) return;
       auto& table = *res.level_work;
       submit_generate_op1d_kernel<T>(
           items_buf.current_device_ptr(), items.size(), MRA_OP1D_NUM_DISPLACEMENTS, m_K,
           m_shared_c.current_view(), m_shared_hgT.current_view(), m_shared_hgT2k.current_view(),
           m_shared_quadx.current_view().data(), m_shared_quadw.current_view().data(), m_npt,
-          workspace.current_device_ptr(), MRA_OP1D_MAX_DISPLACEMENT,
+          MRA_OP1D_MAX_DISPLACEMENT,
           table.R.current_view(), table.S.current_view(), table.norms1d.current_view(),
           ttg::device::current_stream());
     }

@@ -113,22 +113,6 @@ namespace mra {
     }
 
     /**
-     * Per-item scratch layout for the cooperative generator below. Every
-     * region is block-wide -- written and read by every thread in the
-     * block, via caller-allocated GLOBAL memory (one region per work item,
-     * sized by op1d_workspace_size(K) and indexed by the item's position in
-     * the batch -- see submit_generate_op1d_kernel). Deliberately not CUDA
-     * __shared__ memory: that would need either compile-time sizing (K is a
-     * runtime value here) or an extern-shared/pointer-carving scheme, plus
-     * it runs into the team-lead-only-SHARED-rebind-before-SYNCTHREADS nvcc
-     * miscompile pitfall already flagged elsewhere in this codebase (see
-     * e.g. compress_process_one_leader's comment in kernels/compress.h).
-     * Plain per-item global memory sidesteps both at a modest bandwidth
-     * cost -- acceptable here since generation is not the hot loop this
-     * whole effort is trying to keep off (that's MADNESS's CPU-side
-     * nonstandard() call; see this file's header comment).
-     */
-    /**
      * Offsets of each named region within generate_op1d_one's single
      * dynamic-shared-memory allocation (see its own comment), sized by the
      * RUNTIME K (not MRA_MAX_K) -- generate_op1d_workspace_size(K) below
@@ -600,9 +584,8 @@ namespace mra {
      * unsupported-m, issmall checks) are redundantly identical on every
      * thread (cheap, and means no thread ever diverges from another at a
      * SYNCTHREADS()), while every matrix-valued step is a thread_id()-strided
-     * loop over independent output elements writing into block-wide scratch
-     * (`workspace`, sized by op1d_workspace_size(K) -- see
-     * submit_generate_op1d_kernel), with a SYNCTHREADS() between any pair of
+     * loop over independent output elements writing into shared memory,
+     * with a SYNCTHREADS() between any pair of
      * steps where one's output feeds the next's input. Every such step reads
      * a DIFFERENT buffer than it writes (never in-place), except the R/S
      * transpose, which is safe in place: each (i,j) with i<j is handled by
@@ -622,7 +605,7 @@ namespace mra {
                                      const ViewHgT& hgT,
                                      const ViewHgT2k& hgT2k,
                                      const T* quad_x, const T* quad_w, size_type npt,
-                                     T* workspace, Translation l_offset,
+                                     Translation l_offset,
                                      ViewR& R, ViewS& S, ViewNorms& norms) {
       const auto& p = item.params;
       const size_type l_idx = (size_type)(lx + l_offset);
@@ -834,11 +817,11 @@ namespace mra {
 
   } // namespace detail
 
-  /// Per-(item, translation) scratch size (elements of T) that
-  /// submit_generate_op1d_kernel expects via `workspace` -- see
-  /// GaussianConvolutionOperator::submit_generation_kernel in conv_mad.h,
-  /// which must allocate (and select()) workspace_size(K)*n_items*max_range_len
-  /// (see submit_generate_op1d_kernel's comment for max_range_len).
+  /// Per-block scratch size (elements of T) that generate_op1d_one needs --
+  /// every (item, translation) pair gets its own block, and each block's
+  /// scratch lives entirely in dynamic shared memory (see generate_op1d_one's
+  /// comment), so this is also exactly the dynamic shared-memory size
+  /// submit_generate_op1d_kernel requests per block at launch (below).
   SCOPE size_type generate_op1d_workspace_size(size_type K) {
     return detail::op1d_workspace_offsets(K).total;
   }
@@ -862,22 +845,6 @@ namespace mra {
    * TODO about levels 0/1/2 needing fewer translations, without requiring
    * uniform ranges). Within a block, work is distributed cooperatively
    * across all its threads -- see generate_op1d_one's header comment.
-   * Previously this was one block per item, looping over its whole
-   * translation range SEQUENTIALLY inside the block (reusing one workspace
-   * region, synchronized between iterations); this version gives each
-   * (item, translation) pair its own block -- and hence lets independent
-   * translations of the same item run concurrently on different SMs instead
-   * of serialized on one -- at the cost of needing `max_range_len` times the
-   * workspace (each pair needs its own disjoint scratch to run concurrently;
-   * see `workspace`'s indexing below).
-   *
-   * `workspace` must have room for n_items * max_range_len *
-   * generate_op1d_workspace_size(K) elements, laid out as a dense
-   * [n_items][max_range_len] grid of per-pair regions (`max_range_len` is
-   * the stride between items' regions, not necessarily any one item's own
-   * range length -- see above); each (item, translation) pair uses its own
-   * disjoint slice, so no synchronization is needed between blocks, only
-   * within a single block's own generate_op1d_one call.
    */
   template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
             concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
@@ -887,8 +854,7 @@ namespace mra {
       const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, auto K,
       ViewC c, ViewHgT hgT,
       ViewHgT2k hgT2k, const T* quad_x, const T* quad_w, size_type npt,
-      T* workspace, Translation l_offset, ViewR R, ViewS S, ViewNorms norms) {
-    const size_type ws_size = generate_op1d_workspace_size(K);
+      Translation l_offset, ViewR R, ViewS S, ViewNorms norms) {
     // load quad points and weights into shared memory
     SHARED T quad_x_shared[MRA_MAX_NPT];
     SHARED T quad_w_shared[MRA_MAX_NPT];
@@ -903,9 +869,8 @@ namespace mra {
       const size_type range_len = (size_type)(item.lmax - item.lmin + 1);
       for (size_type y = blockIdx.y; y < range_len; y += gridDim.y) {
         const Translation lx = item.lmin + (Translation)y;
-        T* item_workspace = workspace + (item_idx * max_range_len + y) * ws_size;
         detail::generate_op1d_one<T>(item, lx, K, c, hgT, hgT2k, quad_x_shared, quad_w_shared, npt,
-                                      item_workspace, l_offset, R, S, norms);
+                                     l_offset, R, S, norms);
       }
     }
   }
@@ -914,14 +879,11 @@ namespace mra {
    * Host-side launcher. `items` must already be resident on the current
    * device (n_items entries); `c`/`hgT`/`hgT2k`/`quad_x`/`quad_w` are the
    * shared (not per-item) tensors extracted once at operator construction
-   * (see conv_mad.h). `max_range_len` is the workspace stride between items
-   * (see generate_op1d_kernel's comment) -- conv_mad.h passes
+   * (see conv_mad.h). `max_range_len` bounds the grid's y dimension (one
+   * block per (item, translation) pair, see generate_op1d_kernel's comment)
+   * -- conv_mad.h passes
    * MRA_OP1D_NUM_DISPLACEMENTS, matching how collect_generation_items()
-   * currently always requests the full level-wide range. `workspace` must
-   * be a device pointer with room for n_items * max_range_len *
-   * generate_op1d_workspace_size(K) elements (see
-   * GaussianConvolutionOperator::submit_generation_kernel/
-   * make_generation_workspace in conv_mad.h, which allocate and select() it).
+   * currently always requests the full level-wide range.
    * `R`/`S`/`norms` are the FULL, level-wide destination views
    * (detail::LevelOp1DTable's own tensors, already select()-ed by the
    * caller) -- every (item, translation) pair writes into its own (d, *, c,
@@ -942,7 +904,7 @@ namespace mra {
       const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, size_type K,
       const ViewC& c, const ViewHgT& hgT,
       const ViewHgT2k& hgT2k, const T* quad_x, const T* quad_w, size_type npt,
-      T* workspace, Translation l_offset, const ViewR& R, const ViewS& S, const ViewNorms& norms,
+      Translation l_offset, const ViewR& R, const ViewS& S, const ViewNorms& norms,
       ttg::device::Stream stream) {
     if (n_items == 0 || max_range_len == 0) return;
     Dim3 thread_dims = max_thread_dims(2 * K);
@@ -962,10 +924,10 @@ namespace mra {
     // for every other K.
     if (K == 8) {
       CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, smem_size,
-                  stream, (items, n_items, max_range_len, Int<8>{}, c, hgT, hgT2k, quad_x, quad_w, npt, workspace, l_offset, R, S, norms));
+                  stream, (items, n_items, max_range_len, Int<8>{}, c, hgT, hgT2k, quad_x, quad_w, npt, l_offset, R, S, norms));
     } else {
       CALL_KERNEL((generate_op1d_kernel<T, ViewC, ViewHgT, ViewHgT2k, ViewR, ViewS, ViewNorms>), grid_dims, thread_dims, smem_size,
-                  stream, (items, n_items, max_range_len, K, c, hgT, hgT2k, quad_x, quad_w, npt, workspace, l_offset, R, S, norms));
+                  stream, (items, n_items, max_range_len, K, c, hgT, hgT2k, quad_x, quad_w, npt, l_offset, R, S, norms));
     }
     checkSubmit();
   }
@@ -1031,7 +993,7 @@ namespace mra {
         if (bb > T(0)) sum += (aa / bb);
       }
       if (n) prod *= sum;
-      norms(c, i, 0, 6) = prod * fabs(facv); // MUnorm
+      norms(c, i, 0, 6) = prod * std::fabs(facv); // MUnorm
     }
 
     /**
