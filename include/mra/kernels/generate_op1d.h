@@ -107,11 +107,8 @@ namespace mra {
     /// Ported from mra::Convolution::issmall (misc/convolutiondata.h).
     template <typename T>
     DEVSCOPE bool op1d_issmall(T expnt, Level n, Translation lx) {
-      T beta = expnt * exp2(T(-2) * T(n));
-      Translation l;
-      if (lx > 0) l = lx - 1;
-      else if (lx < 0) l = -lx - 1;
-      else l = 0;
+      T beta = expnt * std::exp2(T(-2) * T(n));
+      Translation l = lx == 0 ? 0 : std::abs(lx) - 1;
       return beta * T(l) * T(l) > T(49.0);
     }
 
@@ -249,13 +246,13 @@ namespace mra {
                                   Level n, Translation lx, T* tmp, T* out) {
       Translation lkeep = lx;
       Translation lxx = (lx < 0) ? (-lx - 1) : lx;
-      T scaledcoeff = coeff * exp2(T(-0.5) * T(n));
-      T beta = expnt * exp2(T(-2) * T(n));
-      T h = T(1) / sqrt(beta);
+      T scaledcoeff = coeff * std::exp2(T(-0.5) * T(n));
+      T beta = expnt * std::exp2(T(-2) * T(n));
+      T h = T(1) / std::sqrt(beta);
       size_type nbox = std::max(size_type(1), size_type(T(1) / h));
       h = T(1) / T(nbox);
-      T sch = fabs(scaledcoeff * h);
-      T argmax = fabs(log(T(1e-22) / sch));
+      T sch = std::fabs(scaledcoeff * h);
+      T argmax = std::fabs(std::log(T(1e-22) / sch));
 
       // acc[row*(2*K)+p]: one partial sum per (row, output coefficient),
       // reduced across rows below, flattened (rather than a T(*)[2*K]
@@ -383,7 +380,6 @@ namespace mra {
         if (f.state == ENTER) {
           if (op1d_issmall(p.expnt, f.n, f.lx)) {
             for (size_type i = thread_id(); i < 2 * K; i += block_size()) retbuf[i] = T(0);
-            SYNCTHREADS();
             --sp;
             continue;
           }
@@ -472,7 +468,6 @@ namespace mra {
           }
           SYNCTHREADS();
           for (size_type j = thread_id(); j < 2 * K; j += block_size()) retbuf[j] = combine_out[j];
-          SYNCTHREADS();
           --sp;
         }
       }
@@ -650,8 +645,8 @@ namespace mra {
           R_dst(idx / (2 * K), idx % (2 * K)) = T(0);
         for (size_type idx = thread_id(); idx < K * K; idx += block_size())
           S_dst(idx / K, idx % K) = T(0);
-        if (is_team_lead()) {
-          for (size_type f = 0; f < 5; ++f) norms_dst[f] = T(0);
+        if (thread_id() < 5) {
+          norms_dst[thread_id()] = T(0);
         }
         SYNCTHREADS();
         return;
@@ -718,8 +713,8 @@ namespace mra {
           R_dst(idx / (2 * K), idx % (2 * K)) = T(0);
         for (size_type idx = thread_id(); idx < K * K; idx += block_size())
           S_dst(idx / K, idx % K) = T(0);
-        if (is_team_lead()) {
-          for (size_type f = 0; f < 5; ++f) norms_dst[f] = T(0);
+        if (thread_id() < 5) {
+          norms_dst[thread_id()] = T(0);
         }
         SYNCTHREADS();
 #ifndef HAVE_DEVICE_ARCH
