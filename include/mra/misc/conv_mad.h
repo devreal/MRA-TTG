@@ -1258,8 +1258,10 @@ namespace mra {
     }
 
     /// Call only once the generating task has completed (e.g. via
-    /// ttg::device::on_complete()), after pulling the table back to the host
-    /// (co_await ttg::device::wait() on its R/S/norms1d): until the task
+    /// ttg::device::on_complete()), after pulling the table's norms1d back to
+    /// the host (co_await ttg::device::wait(); R/S stay on the device, where
+    /// they are consumed -- other devices stage them in device-to-device, which
+    /// requires peer access between the GPUs): until the task
     /// completes the runtime still holds its written device copies, which
     /// other tasks must not stage in. Publishes the whole
     /// table as Available so every other task at this level -- any
@@ -1327,8 +1329,14 @@ namespace mra {
       const size_type count = m_mad_conv_sep_vec.size();
       const size_type rank = (size_type)m_max_rank;
       const size_type K = m_K, K2 = 2 * m_K;
-      const T* R  = table.R.view_on(ttg::device::Device::host()).data();
-      const T* S  = table.S.view_on(ttg::device::Device::host()).data();
+      // R/S normally stay on the device (only norms1d is pulled back to the
+      // host before publishing); check them only if they happen to be there.
+      // norms1d is computed on the device from the same R/S, so it still
+      // catches wrong matrices.
+      const bool have_RS = table.R.buffer().is_current_on(ttg::device::Device::host()) &&
+                           table.S.buffer().is_current_on(ttg::device::Device::host());
+      const T* R  = have_RS ? table.R.view_on(ttg::device::Device::host()).data() : nullptr;
+      const T* S  = have_RS ? table.S.view_on(ttg::device::Device::host()).data() : nullptr;
       const T* N1 = table.norms1d.view_on(ttg::device::Device::host()).data();
       ValidationError eR, eS, eN;
       // per (c,i): number of bad entries over all d, l and fields, and how many
@@ -1341,8 +1349,8 @@ namespace mra {
             auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
             for (size_type i = 0; i < rank; ++i) {
               const size_type entry = ((d * MRA_OP1D_NUM_DISPLACEMENTS + li) * count + c) * rank + i;
-              const T* r = R + entry * K2 * K2;
-              const T* s = S + entry * K * K;
+              const T* r = have_RS ? R + entry * K2 * K2 : nullptr;
+              const T* s = have_RS ? S + entry * K * K : nullptr;
               const T* nn = N1 + entry * 5;
               const madness::ConvolutionData1D<T>* cd = nullptr;
               if (i < mad_ops.size()) cd = mad_ops[i].getop(d)->nonstandard(n, l);
@@ -1358,11 +1366,11 @@ namespace mra {
               auto& nbad = bad_ci[c * rank + i];
               auto& nzero = zero_ci[c * rank + i];
               auto& ntot = total_ci[c * rank + i];
-              for (size_type k = 0; k < K2 * K2; ++k) {
+              for (size_type k = 0; have_RS && k < K2 * K2; ++k) {
                 nbad += eR.update(r[k], haveR ? cd->R.ptr()[k] : T(0), loc("R", k));
                 nzero += (r[k] == T(0)); ++ntot;
               }
-              for (size_type k = 0; k < K * K; ++k) {
+              for (size_type k = 0; have_RS && k < K * K; ++k) {
                 nbad += eS.update(s[k], haveT ? cd->T.ptr()[k] : T(0), loc("S", k));
                 nzero += (s[k] == T(0)); ++ntot;
               }

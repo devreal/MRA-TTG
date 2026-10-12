@@ -551,12 +551,9 @@ namespace mra {
               auto gen_input = op.make_generation_input(res, items_buf);
               co_await ttg::device::select(gen_input);
               op.submit_generation_kernel(res, gen_items, items_buf);
-              // wait for the kernel and pull the table back to the host: the
-              // norms for finish_op_assembly(), R/S so that tasks on other
-              // devices can stage them in (published tables are shared by all
-              // devices, and D2D may not be available)
-              co_await ttg::device::wait(res.level_work->norms1d.buffer(), res.level_work->R.buffer(),
-                                         res.level_work->S.buffer());
+              // wait for the kernel and pull the table's norms back to the host
+              // for finish_op_assembly(); R/S are only ever used on the device
+              co_await ttg::device::wait(res.level_work->norms1d.buffer());
               // Publish only once this task has completed: until then the
               // runtime still holds our (written) device copies of the table,
               // and other tasks must not stage them in.
@@ -903,12 +900,11 @@ namespace mra {
         // wait for the norms to come back. If we built the operator, also
         // pull its norms (and the level table, if we generated it) back to
         // the host before publishing: screener_tt reads the norms there
-        // (finish_op_assembly() / opnorm lookup), and tasks on other devices
-        // stage R/S in from the host copy (D2D may not be available).
+        // (finish_op_assembly() / opnorm lookup). R/S are only ever used on
+        // the device, so they stay there.
         // need_generate implies need_assemble (see the try_get_op() loop above).
         if (need_generate) {
-          co_await ttg::device::wait(resnorms.buffer(), norms->buffer(), res.level_work->norms1d.buffer(),
-                                     res.level_work->R.buffer(), res.level_work->S.buffer());
+          co_await ttg::device::wait(resnorms.buffer(), norms->buffer(), res.level_work->norms1d.buffer());
         } else if (need_assemble) {
           co_await ttg::device::wait(resnorms.buffer(), norms->buffer());
         } else {
@@ -1195,8 +1191,7 @@ namespace mra {
         // back to the host before publishing -- see shell0_tt.
         // need_generate implies need_assemble.
         if (need_generate) {
-          co_await ttg::device::wait(norms->buffer(), res.level_work->norms1d.buffer(),
-                                     res.level_work->R.buffer(), res.level_work->S.buffer());
+          co_await ttg::device::wait(norms->buffer(), res.level_work->norms1d.buffer());
         } else {
           co_await ttg::device::wait(norms->buffer());
         }
