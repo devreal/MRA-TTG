@@ -37,6 +37,7 @@ namespace mra::detail {
 #define DEVSCOPE __device__
 #define SHARED __shared__
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
+#define LAUNCH_BOUNDS_P(__NT, __P) __launch_bounds__(__NT, __P)
 #define MRA_WARP_SIZE 32
 #define HAVE_DEVICE_ARCH 1
 #elif defined(__HIP__)
@@ -52,12 +53,14 @@ namespace mra::detail {
 #endif // __HIP_DEVICE_COMPILE__
 #define DEVSCOPE __device__
 #define LAUNCH_BOUNDS(__NT) __launch_bounds__(__NT, 2)
+#define LAUNCH_BOUNDS_P(__NT, __P) __launch_bounds__(__NT, __P)
 #else // __CUDA_ARCH__
 #define SCOPE inline
 #define SYNCTHREADS() do {} while(0)
 #define DEVSCOPE inline
 #define SHARED
 #define LAUNCH_BOUNDS(__NT)
+#define LAUNCH_BOUNDS_P(__NT, __P)
 #endif // __CUDA_ARCH__
 
 #if defined(__CUDACC__)
@@ -168,7 +171,7 @@ namespace mra::detail {
 #if defined(MRA_ENABLE_HOST)
 #define MAX_THREADS_PER_BLOCK 1
 #else
-#define MAX_THREADS_PER_BLOCK 512
+#define MAX_THREADS_PER_BLOCK 256
 #endif
 
 /**

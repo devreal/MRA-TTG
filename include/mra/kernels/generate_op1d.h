@@ -849,7 +849,7 @@ namespace mra {
   template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
             concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
             concepts::TensorView<5> ViewNorms>
-  LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+  LAUNCH_BOUNDS_P(MAX_THREADS_PER_BLOCK, 4)
   GLOBALSCOPE void generate_op1d_kernel(
       const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, auto K,
       ViewC c, ViewHgT hgT,
