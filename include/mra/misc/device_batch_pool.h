@@ -286,6 +286,19 @@ namespace mra::detail {
       std::vector<const void*> extra_srcs;
       std::vector<std::size_t> extra_sizes;
 
+#if defined(MRA_ENABLE_CUDA) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
+      // Scratch descriptor arrays for submit_grouped_copy's single
+      // cudaMemcpyBatchAsync call -- cached here instead of being freshly
+      // allocated and destroyed on every submit_grouped_copy call. Like
+      // extra_dsts/extra_srcs/extra_sizes above, these are cleared and
+      // rebuilt every launch (not persisted/grown via ensure_capacity), but
+      // clear() retains the underlying capacity, so steady-state launches
+      // reallocate nothing here either.
+      std::vector<const void*> batch_dsts;
+      std::vector<const void*> batch_srcs;
+      std::vector<std::size_t> batch_sizes;
+#endif
+
       Arg* dev_args = nullptr;
       size_type* dev_offsets = nullptr;
       std::size_t args_capacity = 0;
@@ -521,8 +534,14 @@ namespace mra::detail {
    * On CUDA 12.8+, this is a single cudaMemcpyBatchAsync call describing all
    * `2 + slot.extra_dsts.size()` copies (one shared cudaMemcpyAttributes
    * entry, since all of them are plain pinned-host -> device copies with the
-   * same access-order/location semantics as an ordinary cudaMemcpyAsync). On
-   * older CUDA toolkits, or on HIP (no batched-copy API exists there), this
+   * same access-order/location semantics as an ordinary cudaMemcpyAsync). The
+   * three descriptor arrays this call needs (dsts/srcs/sizes) live in the
+   * slot itself (slot.batch_dsts/batch_srcs/batch_sizes) rather than being
+   * allocated fresh here on every call -- only checked_out by one caller at a
+   * time, same as every other slot_t field, so reusing them across launches
+   * is safe without extra locking.
+   *
+   * On older CUDA toolkits, or on HIP (no batched-copy API exists there), this
    * falls back to that many ordinary async copies on the same stream; the
    * caller still only records one event for the slot afterwards (see
    * GroupedBatchPool::mark_submitted), so the slot/event count stays at one
@@ -544,9 +563,15 @@ namespace mra::detail {
   {
     const std::size_t num_extra = slot.extra_dsts.size();
 #if defined(MRA_ENABLE_CUDA) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
-    std::vector<const void*> dsts;
-    std::vector<const void*> srcs;
-    std::vector<std::size_t> sizes;
+    // Cached in the slot (see slot_t's own comment) instead of being
+    // allocated fresh on every call -- clear() keeps the vectors' capacity,
+    // so reserve() below is a no-op once a slot has warmed up.
+    auto& dsts = slot.batch_dsts;
+    auto& srcs = slot.batch_srcs;
+    auto& sizes = slot.batch_sizes;
+    dsts.clear();
+    srcs.clear();
+    sizes.clear();
     dsts.reserve(2 + num_extra);
     srcs.reserve(2 + num_extra);
     sizes.reserve(2 + num_extra);
