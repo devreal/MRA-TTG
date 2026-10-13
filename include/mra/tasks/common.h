@@ -16,8 +16,52 @@
 
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
+#include <ttg/serialization/std/vector.h>
 
 namespace mra{
+
+  /**
+   * Plain host-only container for make_compress's optional in-line
+   * truncation support: for a node already emitted, whether each function's
+   * wavelet coefficients survived (1) or were dropped/never present (0).
+   * Deliberately NOT a Tensor/ttg::Buffer -- this value is only ever read or
+   * written on the host (see mra/tasks/compress.h's do_compress, which packs
+   * every child's KeptInfo into a single device buffer itself rather than
+   * shipping each one to the device on its own), so there is no need to pay
+   * for ttg::pinned_allocator_t's pinned-memory allocation or for
+   * ttg::Buffer's device-residency bookkeeping -- a plain std::vector keeps
+   * this off the device entirely, including when a `kept` value is sent to a
+   * task running on a different process. Modeled on ChildLeafInfo in
+   * mra/tensor/functionnode.h, which does the same for per-(function,child)
+   * leaf bits. Empty means "nothing here" (a true leaf), same placeholder
+   * meaning the old DenseTensor<T,1>-based version used.
+   */
+  template<typename T>
+  struct KeptInfo : public ttg::TTValue<KeptInfo<T>> {
+  private:
+    std::vector<T> m_kept; // size N, or empty for "nothing here"
+
+  public:
+    KeptInfo() = default;
+    KeptInfo(const KeptInfo&) = delete;
+    KeptInfo& operator=(const KeptInfo&) = delete;
+    KeptInfo(KeptInfo&&) = default;
+    KeptInfo& operator=(KeptInfo&&) = default;
+
+    explicit KeptInfo(size_type N) : m_kept(N, T(0)) { }
+
+    bool empty() const { return m_kept.empty(); }
+    size_type size() const { return static_cast<size_type>(m_kept.size()); }
+
+    T& operator[](size_type i) { return m_kept[i]; }
+    T operator[](size_type i) const { return m_kept[i]; }
+
+    template <typename Archive>
+    void serialize(Archive& ar) { ar & m_kept; }
+
+    template <typename Archive>
+    void serialize(Archive& ar, const unsigned int) { serialize(ar); }
+  };
 
   /**
    * Make a start task that sends the keys of the batches to be projected
@@ -91,14 +135,14 @@ namespace mra{
    * truncation support: forwards an empty "kept" placeholder up for the same
    * leaf nodes do_send_leafs_up forwards `p` for. A true tree leaf has no
    * wavelet coefficients of its own, so there is nothing to have "kept" --
-   * an empty tensor is the same "nothing here" placeholder
-   * make_truncate's own dispatch_fn synthesizes for structurally-absent
-   * children (see tasks/truncate.h).
+   * an empty KeptInfo is the same "nothing here" placeholder make_truncate's
+   * own dispatch_fn synthesizes for structurally-absent children (see
+   * tasks/truncate.h).
    */
   template<typename T, mra::Dimension NDIM>
   static TASKTYPE do_send_leafs_kept_up(const mra::Key<NDIM>& key, const mra::FunctionsReconstructedNode<T, NDIM>& node) {
     if (!node.any_have_children()) {
-      mra::DenseTensor<T, 1> kept; // empty placeholder
+      mra::KeptInfo<T> kept; // empty placeholder
 #ifndef MRA_ENABLE_HOST
       co_await select_send_up(key, std::move(kept), std::make_index_sequence<mra::Key<NDIM>::num_children()>{}, "do_send_leafs_kept_up");
 #else

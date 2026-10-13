@@ -153,7 +153,7 @@ namespace mra {
       const InViewsT& in_views,
       size_type N,
       size_type tmp_pos,
-      const std::array<const T*, Key<NDIM>::num_children()>& child_kept,
+      const T* child_kept,
       T trunc_tol)
     {
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
@@ -191,12 +191,20 @@ namespace mra {
        * host side, from the identical, already-resolved inputs, purely to
        * keep its own host-side sparsity bookkeeping in sync -- no data needs
        * to flow back from this decision.
+       *
+       * child_kept is a single packed [num_children x N] buffer (child-major:
+       * child c's row is child_kept[c*N .. c*N+N)), built once on the host by
+       * do_compress from its 8 children's KeptInfo vectors -- one combined
+       * host->device transfer instead of 8 small ones. A structurally-absent
+       * child (a true leaf) has its row filled with zeros there, which the
+       * "!= T(0)" check below already treats the same as the old per-child
+       * nullptr check did.
        */
       if (is_team_lead()) {
         if (key.level() > 1 && d_sumsq[tmp_pos] < trunc_tol*trunc_tol) {
           bool any_child_kept = false;
           for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
-            if (child_kept[c] != nullptr && child_kept[c][fnid] != T(0)) {
+            if (child_kept[c*N + fnid] != T(0)) {
               any_child_kept = true;
             }
           }
@@ -270,7 +278,7 @@ namespace mra {
       T* tmp,
       T* d_sumsq,
       const InViewsT in_views,
-      std::array<const T*, Key<NDIM>::num_children()> child_kept,
+      const T* child_kept,
       T trunc_tol)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
@@ -294,7 +302,7 @@ namespace mra {
     T* tmp,
     T* d_sumsq,
     const InViewsT& in_views,
-    const std::array<const T*, Key<NDIM>::num_children()>& child_kept,
+    const T* child_kept,
     T trunc_tol,
     ttg::device::Stream stream)
   {
@@ -353,7 +361,7 @@ namespace mra {
       // of the H2D transfer itself now (see
       // submit_compress_batch_leader/submit_grouped_copy's comments), not by
       // a device kernel reading an offset out of this struct.
-      std::array<const T*, Key<NDIM>::num_children()>,                   // child_kept: this member's own 8 children's "kept" device pointers, for the in-kernel truncation decision (mirrors truncate.h's child_kept)
+      const T*,                                                         // child_kept: this member's own single packed [num_children x n] "kept" buffer (child-major, see compress_process_one), for the in-kernel truncation decision
       T                                                                  // trunc_tol: this member's own truncate_tol(key, ...); 0 when truncation is disabled
     >;
 
@@ -512,10 +520,11 @@ namespace mra {
      * (max_batch_size * 2 * total_functions), so, like the *BatchArg and
      * offsets pools above, it never needs to grow after that.
      *
-     * Truncation: each member also passes its own 8 children's "kept" device
-     * pointers (get<10>(), mirrors truncate.h's own child_kept) and its own
-     * truncate_tol(key, ...) (get<11>(), 0 when truncation is disabled)
-     * through coop(), so compress_process_one can decide and apply the
+     * Truncation: each member also passes its own single packed
+     * [num_children x n] "kept" device buffer (get<10>() -- built once,
+     * host-side, from its 8 children's KeptInfo vectors; see do_compress)
+     * and its own truncate_tol(key, ...) (get<11>(), 0 when truncation is
+     * disabled) through coop(), so compress_process_one can decide and apply the
      * truncation drop directly on result_in's device-resident sparsity
      * inside this same combined launch -- no second, per-member
      * host->device sparsity push needed afterward (do_compress mirrors the
@@ -578,7 +587,7 @@ namespace mra {
         auto& m_p_tensor      = batch[m].template get<7>(); // real p tensor: sparsity source AND this member's p_in scatter destination
         auto& m_result_tensor = batch[m].template get<8>(); // real result (d) tensor: likewise for result_in
         const size_type m_n_nonzero = batch[m].template get<9>();
-        auto& m_child_kept = batch[m].template get<10>(); // this member's own 8 children's "kept" device pointers
+        auto& m_child_kept = batch[m].template get<10>(); // this member's own single packed [num_children x n] "kept" device buffer
         const T m_trunc_tol = batch[m].template get<11>(); // this member's own truncate_tol(key, ...); 0 disables
         const size_type n = static_cast<size_type>(m_result_in.dim(0)); // structural N
 
@@ -621,7 +630,7 @@ void submit_compress_kernel<double, 3>(
     double* tmp,
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
-    const std::array<const double*, Key<3>::num_children()>& child_kept,
+    const double* child_kept,
     double trunc_tol,
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION

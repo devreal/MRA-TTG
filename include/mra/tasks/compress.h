@@ -7,6 +7,7 @@
 #include <vector>
 #include <iostream>
 #include "mra/kernels.h"
+#include "mra/tasks/common.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
@@ -48,16 +49,25 @@ namespace mra
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
     /**
-     * Companion tensor type used to carry, for each function, whether a
-     * node's own wavelet coefficients survived truncation (mirrors
-     * tasks/truncate.h's kept_tensor_type) -- flows up alongside `p` so a
-     * parent's own truncation decision can see whether any child still has
-     * live wavelet mass below it. Always wired (like `is_ns` below, cost is
-     * small and independent of whether truncation is actually enabled) so
-     * there is a single implementation to maintain; `enable_truncate` only
-     * gates whether coefficients actually get dropped.
+     * Companion value type used to carry, for each function, whether a
+     * node's own wavelet coefficients survived truncation -- flows up
+     * alongside `p` so a parent's own truncation decision can see whether
+     * any child still has live wavelet mass below it. Always wired (like
+     * `is_ns` below, cost is small and independent of whether truncation is
+     * actually enabled) so there is a single implementation to maintain;
+     * `enable_truncate` only gates whether coefficients actually get
+     * dropped.
+     *
+     * This is a plain host-side mra::KeptInfo (std::vector-backed), NOT a
+     * device-resident Tensor: each child's KeptInfo is only ever read on the
+     * host here, and do_compress below packs all 8 of them into a single
+     * device buffer itself for the kernel's benefit instead of shipping
+     * each child's vector to the device as its own small transfer (see
+     * child_kept_packed below). truncate.h's own kept_tensor_type (a
+     * DenseTensor<T,1>) is a separate, unrelated alias of the same name
+     * used in its own, still-device-based scheme.
      */
-    using kept_tensor_type = mra::DenseTensor<T, 1>;
+    using kept_info_type = mra::KeptInfo<T>;
 
     // Batching is controlled process-wide via mra::set_batch_size(), not per
     // call here -- see mra/misc/batch_size.h. Read once, at graph-construction
@@ -116,9 +126,9 @@ namespace mra
         return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>{})...);
       }(std::make_index_sequence<num_children>{});
     // companion "kept" edges: whether a child's own wavelet coefficients survived truncation
-    // (see kept_tensor_type above); flow alongside p_edges, one per child.
+    // (see kept_info_type above); flow alongside p_edges, one per child.
     auto kept_edges = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-        return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, kept_tensor_type>{})...);
+        return ttg::edges(((void)Is, ttg::Edge<mra::Key<NDIM>, kept_info_type>{})...);
       }(std::make_index_sequence<num_children>{});
     // do_compress's full set of "from below" inputs: p0..p7, kept0..kept7, then the self/prior edge
     auto send_to_compress_edges = std::tuple_cat(p_edges, kept_edges, std::make_tuple(filter_in));
@@ -141,10 +151,10 @@ namespace mra
                           const mra::FunctionsReconstructedNode<T,NDIM> &in5,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in6,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in7,
-                          const kept_tensor_type &kept0, const kept_tensor_type &kept1,
-                          const kept_tensor_type &kept2, const kept_tensor_type &kept3,
-                          const kept_tensor_type &kept4, const kept_tensor_type &kept5,
-                          const kept_tensor_type &kept6, const kept_tensor_type &kept7,
+                          const kept_info_type &kept0, const kept_info_type &kept1,
+                          const kept_info_type &kept2, const kept_info_type &kept3,
+                          const kept_info_type &kept4, const kept_info_type &kept5,
+                          const kept_info_type &kept6, const kept_info_type &kept7,
                           const mra::FunctionsReconstructedNode<T,NDIM> &in // the node from the prior op
                           ) -> TASKTYPE {
       //const typename ::detail::tree_types<T,K,NDIM>::compress_in_type& in,
@@ -159,9 +169,9 @@ namespace mra
         // stays default-constructed (empty, i.e. "nothing here") unless we
         // actually allocate a result below (mirrors do_send_leafs_kept_up's
         // leaf placeholder in tasks/common.h)
-        kept_tensor_type kept;
+        kept_info_type kept;
 
-        std::array<const kept_tensor_type*, num_children> kept_children =
+        std::array<const kept_info_type*, num_children> kept_children =
               {&kept0, &kept1, &kept2, &kept3, &kept4, &kept5, &kept6, &kept7};
 
         /**
@@ -182,40 +192,17 @@ namespace mra
          * dropped it); only the norm-threshold drop decision itself is
          * gated by enable_truncate.
          *
-         * child_kept() is a non-blocking, best-effort read -- NOT a device
-         * wait: an empty kept buffer is a true leaf (do_send_leafs_kept_up's
-         * placeholder) and a definite "not kept"; a non-empty buffer whose
-         * data has already landed on the host -- the common case, since the
-         * child's own do_compress already brings its `kept` back to host via
-         * its own post-kernel device wait (see the extended wait() below)
-         * before ever sending it up -- gives a definite real answer too.
-         * Only a non-empty buffer whose transfer is still in flight when we
-         * happen to be invoked is ambiguous; rather than block on
-         * co_await ttg::device::wait() here (only valid right after *this*
-         * task's own select() has resumed -- an earlier, misplaced wait()
-         * here previously segfaulted the batching machinery -- and blocking
-         * this early would defeat batching regardless), we conservatively
-         * assume "kept" for it. That can only cost a missed truncation /
-         * leaf-marking opportunity this round -- never wrongly drop live
-         * wavelet coefficients, i.e. it may leave a node (and its `kept`
-         * contribution to the parent) holding more than the tightest
-         * possible pruning would, but never less. Any such still-unresolved
-         * buffer is folded into this task's own batch-select below (see
-         * select_kept_in), so it is fully resolved -- and the decisions
-         * below corrected -- before `result`/`kept` are ever forwarded on.
+         * child_kept() is a plain, always-resolved host read: kept0..kept7
+         * are mra::KeptInfo values (plain std::vector-backed, see
+         * tasks/common.h), never device buffers, so unlike the old
+         * DenseTensor-based scheme there is no "transfer still in flight"
+         * ambiguity to guess around here -- an empty KeptInfo is a true leaf
+         * (do_send_leafs_kept_up's placeholder) and a definite "not kept";
+         * any non-empty one is immediately and fully readable.
          */
         auto child_kept = [&](size_type i, size_type c) -> bool {
           const auto& ck = *kept_children[c];
-          if (ck.empty()) return false;
-          // is_current_on(), not is_valid_on(): the latter only checks that a
-          // host-side allocation exists, not that its content has actually
-          // landed yet -- every other non-blocking "can I read this now"
-          // check in this codebase (e.g. tensor.h's own host_view()) uses
-          // is_current_on() for exactly that reason.
-          if (ck.buffer().is_current_on(ttg::device::Device::host())) {
-            return ck.buffer().host_ptr()[i] != T(0);
-          }
-          return true; // unresolved for now -- resolved and corrected below
+          return !ck.empty() && ck[i] != T(0);
         };
         auto mark_truncated_children_leaf = [&]() {
           for (size_type i = 0; i < N; ++i) {
@@ -265,6 +252,19 @@ namespace mra
           mark_truncated_children_leaf();
           //std::cout << name << " " << key << " result after apply_leaf_info " << result << " " << std::endl;
 
+          // Per-function "does any child still hold wavelet mass below it"
+          // flag, used by the host-side mirror of the in-kernel truncation
+          // decision further down. child_kept() is always fully resolved
+          // already (plain host KeptInfo vectors, no device residency to
+          // wait on), so -- unlike the old DenseTensor-based scheme -- this
+          // only needs computing once, here, not again after the kernel runs.
+          std::vector<bool> any_child_kept(N, false);
+          for (size_type i = 0; i < N; ++i) {
+            for (size_type c = 0; c < num_children; ++c) {
+              if (child_kept(i, c)) any_child_kept[i] = true;
+            }
+          }
+
           /**
            * Allocate the reconstructed node to send up to the parent.
            */
@@ -309,9 +309,29 @@ namespace mra
 
           auto& d = result.coeffs();
 
+          // Pack every child's KeptInfo into a single [num_children x N]
+          // host buffer (child-major: child c's row is
+          // child_kept_packed[c*N .. c*N+N)) so only ONE host->device
+          // transfer happens below, instead of up to 8 small ones (one per
+          // child, as the old DenseTensor-per-child scheme required). A
+          // structurally-absent child (kept_children[c]->empty(), i.e. a
+          // true leaf) leaves its row zeroed, which compress_process_one's
+          // "!= T(0)" check already treats the same as "not kept".
+          ttg::Buffer<T, DeviceAllocator<T>> child_kept_packed(N * num_children, ttg::scope::SyncIn);
+          {
+            T* packed = child_kept_packed.host_ptr();
+            std::fill(packed, packed + N * num_children, T(0));
+            for (size_type c = 0; c < num_children; ++c) {
+              const auto& ck = *kept_children[c];
+              if (!ck.empty()) {
+                for (size_type i = 0; i < N; ++i) packed[c*N + i] = ck[i];
+              }
+            }
+          }
+
 #ifndef MRA_ENABLE_HOST
           auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(),
-                                          tmp_scratch, d_sumsq);
+                                          tmp_scratch, d_sumsq, child_kept_packed);
           auto select_in = [&](const auto& in) {
             if (!in.empty()) {
               input.add(in.coeffs().buffer());
@@ -323,19 +343,6 @@ namespace mra
           select_in(in4); select_in(in5);
           select_in(in6); select_in(in7);
           input.add(norms.buffer());
-
-          // Fold every non-empty "kept" buffer into this task's own
-          // batch-select, exactly like select_in() above does for in0..in7 --
-          // whichever of them child_kept() above couldn't yet resolve
-          // (rare: still in flight) is guaranteed resolved once the wait()
-          // below resumes, so the corrected pass further down always has
-          // definite data to work with. Already-resident ones are a no-op
-          // here, so there is no need to distinguish them.
-          auto select_kept_in = [&](const kept_tensor_type& k) {
-            if (!k.empty()) input.add(k.buffer());
-          };
-          select_kept_in(kept0); select_kept_in(kept1); select_kept_in(kept2); select_kept_in(kept3);
-          select_kept_in(kept4); select_kept_in(kept5); select_kept_in(kept6); select_kept_in(kept7);
 
           co_await ttg::device::select(input);
 #endif
@@ -357,17 +364,10 @@ namespace mra
           auto rcoeffs_view = d.current_view();
           auto hgT_view = hgT.current_view();
 
-          // This node's children's "kept" device pointers, for the in-kernel
-          // truncation decision (mirrors truncate.h's own child_kept array).
-          // Valid right after select()/coop() above stages the kept buffers
-          // onto the device -- nullptr for an empty (true-leaf) child, same
-          // as select_kept_in()/child_kept() above and truncate.h's own use
-          // of current_device_ptr().
-          std::array<const T*, num_children> child_kept_ptrs =
-              {kept0.buffer().current_device_ptr(), kept1.buffer().current_device_ptr(),
-              kept2.buffer().current_device_ptr(), kept3.buffer().current_device_ptr(),
-              kept4.buffer().current_device_ptr(), kept5.buffer().current_device_ptr(),
-              kept6.buffer().current_device_ptr(), kept7.buffer().current_device_ptr()};
+          // Single packed [num_children x N] "kept" device pointer, for the
+          // in-kernel truncation decision -- valid right after select()
+          // above stages child_kept_packed onto the device.
+          const T* child_kept_ptr = child_kept_packed.current_device_ptr();
 
 #ifndef MRA_ENABLE_HOST
           if (enable_compress_batching) {
@@ -388,7 +388,7 @@ namespace mra
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
                                                                     tmp_scratch, d_sumsq, input_views,
                                                                     p.coeffs(), d, n_nonzero,
-                                                                    child_kept_ptrs, trunc_tol);
+                                                                    child_kept_ptr, trunc_tol);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
             detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view, total_functions);
           } else
@@ -399,39 +399,15 @@ namespace mra
             submit_compress_kernel(key, N, n_nonzero, K, is_ns,
                                   in_view, coeffs_view, rcoeffs_view, hgT_view,
                                   tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
-                                  child_kept_ptrs, trunc_tol,
+                                  child_kept_ptr, trunc_tol,
                                   ttg::device::current_stream());
           }
           norms.compute();
           /* wait for kernel and transfer sums back */
 #ifndef MRA_ENABLE_HOST
-          // Also wait on every "kept" buffer here (mark_device_out no-ops on
-          // an empty/never-staged/already-host buffer, so it is always safe
-          // to list all eight unconditionally -- see the comment on
-          // child_kept() above): this is the corresponding wait for the
-          // select_kept_in() calls above, and is what turns child_kept()'s
-          // conservative "assume kept" guess into a definite answer for
-          // every child by the time execution reaches the corrected pass
-          // below.
-          co_await ttg::device::wait(d_sumsq, norms.buffer(),
-                                      kept0.buffer(), kept1.buffer(), kept2.buffer(), kept3.buffer(),
-                                      kept4.buffer(), kept5.buffer(), kept6.buffer(), kept7.buffer());
+          co_await ttg::device::wait(d_sumsq, norms.buffer());
 #endif
           norms.verify();
-
-          // Every "kept" buffer is now fully resolved (see the wait() just
-          // above), so child_kept() no longer needs to guess for any of
-          // them -- redo the leaf marking (idempotent: set_child_leaf only
-          // ever flips false->true, so this only adds bits the earlier,
-          // possibly-guessed pass above may have missed) and recompute
-          // any_child_kept from scratch for the truncation decision below.
-          mark_truncated_children_leaf();
-          std::vector<bool> any_child_kept(N, false);
-          for (size_type i = 0; i < N; ++i) {
-            for (size_type c = 0; c < num_children; ++c) {
-              if (child_kept(i, c)) any_child_kept[i] = true;
-            }
-          }
 
 #if defined(MRA_CHECK_NORMS)
           // DEBUG: right after the compress kernel (+ its sparsity scatter,
@@ -498,11 +474,11 @@ namespace mra
             // node's device-resident wavelet coefficients for function i
             // under the identical condition (same d_sumsq_arr[pos], same
             // trunc_tol, same any_child_kept[i] -- resolved from the same
-            // kept0..7 buffers, both read only after they're guaranteed
-            // current, see child_kept() above). Re-applied here purely to
-            // keep this host-side `result` object's own sparsity bookkeeping
-            // in sync with the device -- no device transfer needed for this,
-            // since the device bits were already corrected in-kernel.
+            // kept0..7 KeptInfo vectors, see child_kept() above). Re-applied
+            // here purely to keep this host-side `result` object's own
+            // sparsity bookkeeping in sync with the device -- no device
+            // transfer needed for this, since the device bits were already
+            // corrected in-kernel.
             if (enable_truncate && key.level() > 1 && !result.is_zero(i) &&
                 !any_child_kept[i] && d_sumsq_arr[pos] < trunc_tol*trunc_tol) {
               result.set_zero(i);
@@ -515,10 +491,9 @@ namespace mra
           // either way, since a parent always needs to know a child's true
           // nonzero set to make its own decision once truncation is enabled
           // higher up the tree.)
-          kept = kept_tensor_type(N);
-          auto* kept_arr = kept.buffer().host_ptr();
+          kept = kept_info_type(N);
           for (size_type i = 0; i < N; ++i) {
-            kept_arr[i] = result.is_zero(i) ? T(0) : T(1);
+            kept[i] = result.is_zero(i) ? T(0) : T(1);
           }
         }
 
