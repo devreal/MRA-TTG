@@ -613,12 +613,16 @@ namespace mra {
       auto S_dst = S(item.d, l_idx, item.c, item.i);
       auto norms_dst = norms(item.d, l_idx, item.c, item.i);
 
-      // coeff==0 is the sentinel for a padding slot (i beyond a given count-index's
-      // real separated-expansion rank, up to the batch-wide max rank -- see
-      // conv_mad.h's work-item construction): a real Gaussian term never has an
-      // exactly-zero coefficient (MADNESS's separated expansion simply wouldn't
-      // include such a term), so this is unambiguous. m!=0 (derivative terms)
-      // are not supported by this generator (see this file's header comment).
+      // coeff==0 would be the sentinel for a padding slot (i beyond a given
+      // count-index's real separated-expansion rank), but conv_mad.h's
+      // collect_generation_items() no longer builds an item for such a slot
+      // at all (it only ever covers [0, real rank) -- see its own comment),
+      // so in practice this item always has a real, nonzero coeff; kept as a
+      // defensive check since a real Gaussian term never has an exactly-zero
+      // coefficient anyway (MADNESS's separated expansion simply wouldn't
+      // include such a term). m!=0 (derivative terms) are not supported by
+      // this generator (see this file's header comment) and are the actual
+      // reason this branch is still live.
       if (p.coeff == T(0) || p.m != 0) {
         if (p.coeff != T(0) && p.m != 0 && is_team_lead()) {
           THROWF("generate_op1d_one: derivative order m=%d is not supported by the device "
@@ -829,8 +833,9 @@ namespace mra {
   /**
    * One combined launch generating every (item, translation) pair implied by
    * `items` (device pointer, size n_items; each item's own [lmin, lmax] --
-   * currently always the full level-wide range, see conv_mad.h's
-   * collect_generation_items -- gives its number of translations) -- an
+   * conv_mad.h's collect_generation_items() sets this to the level's actual
+   * displacement range, max_op1d_displacement(n), narrower than the global
+   * ceiling at low levels -- gives its number of translations) -- an
    * arbitrary flattened worklist, so this single kernel covers however many
    * (term, dimension, level, translation) entries a caller has collected,
    * whether that's one task's own multiple missing dimensions or (in a
@@ -841,10 +846,11 @@ namespace mra {
    * (grid-stride) selects the item, blockIdx.y (grid-stride) selects a
    * translation within THAT item's own [lmin, lmax] (items with a shorter
    * range than another simply leave the higher blockIdx.y values as no-ops
-   * for themselves -- forward-compatible with the collect_generation_items
-   * TODO about levels 0/1/2 needing fewer translations, without requiring
-   * uniform ranges). Within a block, work is distributed cooperatively
-   * across all its threads -- see generate_op1d_one's header comment.
+   * for themselves -- this is what lets different levels, or even different
+   * count-indices at the same level, share one launch with heterogeneous
+   * per-item ranges without any special-casing here). Within a block, work
+   * is distributed cooperatively across all its threads -- see
+   * generate_op1d_one's header comment.
    */
   template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
             concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
@@ -881,15 +887,16 @@ namespace mra {
    * shared (not per-item) tensors extracted once at operator construction
    * (see conv_mad.h). `max_range_len` bounds the grid's y dimension (one
    * block per (item, translation) pair, see generate_op1d_kernel's comment)
-   * -- conv_mad.h passes
-   * MRA_OP1D_NUM_DISPLACEMENTS, matching how collect_generation_items()
-   * currently always requests the full level-wide range.
+   * -- conv_mad.h passes num_op1d_displacements(n), matching how
+   * collect_generation_items() sizes each item's own [lmin, lmax] for this
+   * level.
    * `R`/`S`/`norms` are the FULL, level-wide destination views
    * (detail::LevelOp1DTable's own tensors, already select()-ed by the
    * caller) -- every (item, translation) pair writes into its own (d, *, c,
    * i) slice of these, indexed by translation via `l_offset` (added to a
    * translation to get its index along the translation axis; conv_mad.h
-   * passes MRA_OP1D_MAX_DISPLACEMENT, matching how the table was sized).
+   * passes max_op1d_displacement(n), matching how the table was sized for
+   * this level).
    * Thread block sized by K via the same max_thread_dims() helper
    * submit_convolution_kernel uses, since the per-(item, translation) work
    * is genuinely distributed across the block -- see generate_op1d_one's
@@ -949,17 +956,26 @@ namespace mra {
      * cooperative distribution or SYNCTHREADS needed. Index order in the
      * last dimension of `norms` matches conv_mad.h's NormId exactly: Rnorm,
      * Snorm, Rnormf, Snormf, NSnormf, Fac, MUnorm, Opnorm, Rank.
+     *
+     * `rank_tensor` is the per-count-index REAL separated-expansion rank
+     * (conv_mad.h's m_shared_rank): a block whose `i` is beyond count-index
+     * c's own real rank bails out immediately, since conv_mad.h's
+     * collect_generation_items() no longer generates an item -- hence no
+     * norms1d entry -- for such a slot at all (it used to be a zero-filled
+     * padding placeholder; now it's simply untouched memory, so reading it
+     * here would be garbage, not a harmless zero).
      */
     template <typename T, Dimension NDIM, concepts::TensorView<5> ViewNorms1d, concepts::TensorView<2> ViewFac,
-              concepts::TensorView<4> ViewNorms>
+              concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
     GLOBALSCOPE void assemble_op1d_norms_kernel(
         size_type count, size_type rank, Level n,
         std::array<Translation, NDIM> lx, Translation l_offset,
-        ViewNorms1d norms1d, ViewFac fac, ViewNorms norms) {
+        ViewNorms1d norms1d, ViewFac fac, ViewNorms norms, ViewRank rank_tensor) {
       const size_type idx = blockIdx.x;
       const size_type c = idx / rank;
       const size_type i = idx % rank;
       if (c >= count) return;
+      if (i >= (size_type)rank_tensor(c)) return;
       if (!is_team_lead()) return;
 
       T nsnormf[NDIM];
@@ -981,9 +997,8 @@ namespace mra {
 
       // Ported from mra::GaussianConvolutionOperator::munorm2_ns (conv_mad.h):
       // computes the Frobenius norm of this term for the NS form, without
-      // the factor included. Degrades gracefully to 0 for padding slots
-      // (coeff==0 sentinel already zero-filled norms1d for those, so
-      // nsnormf/snormf/facv are all 0 here too, and bb==0 zeroes prod).
+      // the factor included. Padding slots (i >= rank_tensor(c)) never reach
+      // here at all -- see this function's header comment.
       T prod = T(1), sum = T(0);
       for (Dimension d = 0; d < NDIM; ++d) {
         T a = nsnormf[d], b = snormf[d];
@@ -1018,21 +1033,27 @@ namespace mra {
      * separated-expansion rank (conv_mad.h's m_shared_rank, extracted once
      * at operator construction -- unlike Opnorm this never needs a MADNESS
      * call per (level, displacement), since it depends only on the operator
-     * itself, not on n or the displacement).
+     * itself, not on n or the displacement). The sum below is bounded by
+     * THIS count-index's own real rank (rank_tensor(c)), not the
+     * operator-wide m_max_rank the `norms` tensor's rank axis is allocated
+     * with: MUnorm beyond a count-index's own real rank was never written by
+     * assemble_op1d_norms_kernel (no item was generated for it -- see
+     * conv_mad.h's collect_generation_items()), so summing into that range
+     * would read garbage, not a harmless zero.
      */
     template <typename T, concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
-    GLOBALSCOPE void assemble_op1d_opnorm_kernel(size_type count, size_type rank, ViewNorms norms,
-                                                  ViewRank rank_tensor) {
+    GLOBALSCOPE void assemble_op1d_opnorm_kernel(size_type count, ViewNorms norms, ViewRank rank_tensor) {
       const size_type c = blockIdx.x;
       if (c >= count) return;
 
+      const size_type real_rank = (size_type)rank_tensor(c);
       T s = T(0);
-      for (size_type i = thread_id(); i < rank; i += block_size()) {
+      for (size_type i = thread_id(); i < real_rank; i += block_size()) {
         T mu = norms(c, i, 0, 6); // MUnorm
         s += mu * mu;
       }
       SHARED T sum;
-      reduce_block(s, &sum, std::min(rank, (size_type)block_size()));
+      reduce_block(s, &sum, std::min(real_rank, (size_type)block_size()));
       SYNCTHREADS();
       if (is_team_lead()) {
         norms(c, 0, 0, 7) = sqrt(sum);      // Opnorm
@@ -1049,20 +1070,23 @@ namespace mra {
    * round also generated the table, already filled -- no wait() needed:
    * this kernel reads it on-device, unlike finish_op_assembly's host-side
    * equivalent for the MADNESS/host-cache path, which is what still needs
-   * norms1d pulled back to host). One block per (count, rank) pair. Must be
-   * followed by submit_assemble_op1d_opnorm_kernel (same stream) to fill in
-   * Opnorm/Rank -- see that function's comment.
+   * norms1d pulled back to host). One block per (count, rank) pair -- `rank`
+   * here is the operator-wide m_max_rank (how the table's axes are
+   * allocated), not any one count-index's own real rank; blocks beyond a
+   * given count-index's real rank are no-ops (see the kernel's own comment on
+   * `rank_tensor`). Must be followed by submit_assemble_op1d_opnorm_kernel
+   * (same stream) to fill in Opnorm/Rank -- see that function's comment.
    */
   template <typename T, Dimension NDIM, concepts::TensorView<5> ViewNorms1d, concepts::TensorView<2> ViewFac,
-            concepts::TensorView<4> ViewNorms>
+            concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
   void submit_assemble_op1d_norms_kernel(
       size_type count, size_type rank, Level n, std::array<Translation, NDIM> lx, Translation l_offset,
-      const ViewNorms1d& norms1d, const ViewFac& fac, const ViewNorms& norms,
+      const ViewNorms1d& norms1d, const ViewFac& fac, const ViewNorms& norms, const ViewRank& rank_tensor,
       ttg::device::Stream stream) {
     if (count == 0 || rank == 0) return;
     Dim3 thread_dims{1, 1, 1};
-    CALL_KERNEL((detail::assemble_op1d_norms_kernel<T, NDIM, ViewNorms1d, ViewFac, ViewNorms>),
-                count * rank, thread_dims, 0, stream, (count, rank, n, lx, l_offset, norms1d, fac, norms));
+    CALL_KERNEL((detail::assemble_op1d_norms_kernel<T, NDIM, ViewNorms1d, ViewFac, ViewNorms, ViewRank>),
+                count * rank, thread_dims, 0, stream, (count, rank, n, lx, l_offset, norms1d, fac, norms, rank_tensor));
     checkSubmit();
   }
 
@@ -1074,10 +1098,14 @@ namespace mra {
   template <typename T, concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
   void submit_assemble_op1d_opnorm_kernel(size_type count, size_type rank, const ViewNorms& norms,
                                            const ViewRank& rank_tensor, ttg::device::Stream stream) {
+    // `rank` here only sizes the block (must cover the largest real rank
+    // among this launch's count-indices, i.e. the operator-wide m_max_rank)
+    // -- the kernel itself bounds its own work per count-index via
+    // rank_tensor(c), not this parameter (see its own comment).
     if (count == 0 || rank == 0) return;
     Dim3 thread_dims(std::min((int)rank, (int)MAX_THREADS_PER_BLOCK), 1, 1);
     CALL_KERNEL((detail::assemble_op1d_opnorm_kernel<T, ViewNorms, ViewRank>), count, thread_dims, 0, stream,
-                (count, rank, norms, rank_tensor));
+                (count, norms, rank_tensor));
     checkSubmit();
   }
 
