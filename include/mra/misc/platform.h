@@ -3,8 +3,10 @@
 
 #include <cstdlib>
 #include <cstdio>
+#include <cstdint>
 #include <algorithm>
 #include <iostream>
+#include <limits>
 
 #if defined(MRA_ENABLE_CUDA)
 #include <cuda.h>
@@ -122,6 +124,61 @@ namespace mra::detail {
   } while (0)
 #define CONFIGURE_KERNEL(name, shared) do {} while(0)
 #endif // __CUDACC__
+
+namespace mra::detail {
+  /**
+   * Caps a 1D grid-stride launch at how many blocks the device can actually
+   * run concurrently for the given kernel/thread-count/shared-mem
+   * combination, instead of launching one block per work item. Work items
+   * beyond the returned count are picked up by the kernel's own
+   * `for (pos = blockIdx.x; pos < n; pos += gridDim.x)` loop rather than
+   * sitting as separate, immediately-resident blocks -- which is also what
+   * lets the caller size any per-block scratch buffer to this count rather
+   * than to the (potentially much larger) item count.
+   * `overcommit` launches a small multiple of bare occupancy so an SM has a
+   * ready block to switch to when another stalls, at the cost of that many
+   * more scratch-buffer slots.
+   */
+#if defined(MRA_ENABLE_CUDA)
+  template <typename KernelT>
+  inline std::uint32_t kernel_grid_cap(KernelT kernel, int threads, std::size_t smem_bytes,
+                                        std::uint32_t overcommit = 2) {
+    static const int num_sms = []() {
+      int device = 0;
+      cudaGetDevice(&device);
+      int n = 0;
+      cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, device);
+      return n;
+    }();
+    int blocks_per_sm = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, threads, smem_bytes);
+    return static_cast<std::uint32_t>(num_sms) * static_cast<std::uint32_t>(std::max(blocks_per_sm, 1)) * overcommit;
+  }
+#elif defined(MRA_ENABLE_HIP)
+  template <typename KernelT>
+  inline std::uint32_t kernel_grid_cap(KernelT kernel, int threads, std::size_t smem_bytes,
+                                        std::uint32_t overcommit = 2) {
+    static const int num_sms = []() {
+      int device = 0;
+      hipGetDevice(&device);
+      int n = 0;
+      hipDeviceGetAttribute(&n, hipDeviceAttributeMultiprocessorCount, device);
+      return n;
+    }();
+    int blocks_per_sm = 0;
+    hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, threads, smem_bytes);
+    return static_cast<std::uint32_t>(num_sms) * static_cast<std::uint32_t>(std::max(blocks_per_sm, 1)) * overcommit;
+  }
+#else
+  // Host "kernels" run as a single call with gridDim == {1,1,1} regardless
+  // of the block count passed to CALL_KERNEL (see the host CALL_KERNEL
+  // above), so there is nothing to cap.
+  template <typename KernelT>
+  inline std::uint32_t kernel_grid_cap(KernelT, int, std::size_t, std::uint32_t = 2) {
+    return std::numeric_limits<std::uint32_t>::max();
+  }
+#endif
+} // namespace mra::detail
 
 #if defined(__CUDA_ARCH__)
 #define THROW(s) do { std::printf(s); __trap(); } while(0)

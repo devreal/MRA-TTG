@@ -863,16 +863,27 @@ namespace mra{
 
     Dim3 thread_dims = detail::conv_thread_dims(K);
     auto smem_size = detail::apply_conv_shmem_size<T>(K);
+    const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
 
+    // total_nonzero can run into the thousands for a large batch, far beyond
+    // what the device can run concurrently -- cap the grid at actual
+    // occupancy and let convolution_kernel_batched's own grid-stride loop
+    // (see its comment) pick up the rest, rather than submitting one
+    // immediately-resident block per position.
+    //
     // Sparsity demotion for a member position whose computed norm turns out
     // to be exactly zero happens inline inside convolution_kernel_batched
     // itself (see convolution_process_one's comment) -- no separate
     // post-launch prune kernel needed.
     if (K == 8) {
-      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
+      size_type grid_x = std::min<size_type>(total_nonzero,
+          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>, threads, smem_size));
+      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<8>{}, fac));
     } else {
-      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
+      size_type grid_x = std::min<size_type>(total_nonzero,
+          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, size_type>, threads, smem_size));
+      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, fac));
     }
     checkSubmit();
