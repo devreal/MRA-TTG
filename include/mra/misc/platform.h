@@ -85,7 +85,7 @@ namespace mra::detail {
   do {                                                                                  \
     static size_type smem_size_config = 0;                                              \
     if (smem_size_config < shared) {                                                    \
-      cudaFuncSetAttribute(name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
+      cudaFuncSetAttribute((const void*)name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
       if (cudaPeekAtLastError() != cudaSuccess) {                                       \
         std::cout << "kernel configuration failed with " << shared << "B smem at "      \
                   << __FILE__ << ":" << __LINE__ << ": "                                \
