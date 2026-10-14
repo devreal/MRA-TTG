@@ -134,7 +134,7 @@ void write_header(const std::string& out_path, int K, int npt, double coeff, dou
   out << "};\n\n#endif // GENERATE_OP1D_REFERENCE_DATA_H\n";
 }
 
-#ifdef __CUDACC__
+//#ifdef __CUDACC__
 // Absolute+relative tolerance: |a-b| <= atol + rtol*max(|a|,|b|).
 bool close(double a, double b, double atol, double rtol) {
   return std::fabs(a - b) <= atol + rtol * std::max(std::fabs(a), std::fabs(b));
@@ -259,7 +259,7 @@ bool run_comparison(int K, int npt, double coeff, double expnt, int natlev, int 
   std::printf("\n%d/%d cases passed (atol=%.1e, rtol=%.1e)\n", num_pass, n_items, atol, rtol);
   return num_pass == n_items;
 }
-#endif // __CUDACC__
+//#endif // __CUDACC__
 
 } // namespace
 

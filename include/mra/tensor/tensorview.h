@@ -582,6 +582,18 @@ namespace mra {
     //TensorView(TensorView&& other) = default;
     TensorView(const TensorView& other) = default;
 
+    /**
+     * Converting constructor from a non-const view to a const view of the same
+     * sparsity and dimensions type. Sparsity bases of views are stateless (sparsity
+     * information lives in the storage), so copying pointer and dims is sufficient.
+     */
+    template<typename U>
+    requires(std::is_const_v<T> && !std::is_const_v<U> && std::is_same_v<const U, T>)
+    SCOPE TensorView(const TensorView<U, NDIM, Sparsity, DimsType>& other)
+    : m_ptr(other.m_ptr)
+    , m_dims(other.m_dims)
+    { }
+
     ~TensorView() = default;
 
     //TensorView& operator=(TensorView&& other) = default;
