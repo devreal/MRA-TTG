@@ -13,7 +13,7 @@
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
-#include "mra/kernels/impl/convolution_cuda_wmma.h"
+#include "mra/kernels/impl/convolution_cuda_mma.h"
 #include "mra/misc/conv_mad.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
@@ -532,7 +532,7 @@ namespace mra{
               concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
               concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
               concepts::TensorView<4> ViewOpnorms>
-    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    LAUNCH_BOUNDS_P(MAX_THREADS_PER_BLOCK, 4)
     GLOBALSCOPE void convolution_kernel(
       Key<NDIM> key,
       Key<NDIM> displacement,
@@ -729,7 +729,7 @@ namespace mra{
      * (convolution_process_one, defined above with convolution_kernel_impl).
      */
     template <typename T, Dimension NDIM>
-    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    LAUNCH_BOUNDS_P(MAX_THREADS_PER_BLOCK, 4)
     GLOBALSCOPE void convolution_kernel_batched(
       ConvolutionBatchArg<T, NDIM>* args,     // device ptr, size == num_members
       const size_type* member_offsets,        // device ptr, size == num_members+1
