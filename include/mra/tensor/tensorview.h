@@ -616,7 +616,7 @@ namespace mra {
       return m_dims[d];
     }
 
-    SCOPE const auto dims() const {
+    SCOPE const auto& dims() const {
       return m_dims;
     }
 
