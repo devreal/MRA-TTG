@@ -593,10 +593,10 @@ namespace mra::detail {
     const std::size_t total = dsts.size();
     if (total == 0) return;
     cudaMemcpyAttributes attrs{};
-    attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    attrs.srcAccessOrder = cudaMemcpySrcAccessOrderAny;
     attrs.srcLocHint = cudaMemLocation{cudaMemLocationTypeHost, 0};
     attrs.dstLocHint = cudaMemLocation{cudaMemLocationTypeDevice, device_id};
-    attrs.flags = cudaMemcpyFlagDefault;
+    attrs.flags = cudaMemcpyHostToDevice;
     std::size_t attrsIdxs[1] = { 0 }; // one attribute set applies to all entries
 #if CUDART_VERSION >= 13000
     check_cuda_rt(cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), total, &attrs, attrsIdxs, 1, stream),
