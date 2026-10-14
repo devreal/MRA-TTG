@@ -652,12 +652,27 @@ namespace mra{
       // caches the last size it configured and is a cheap no-op once that
       // size has already been set, so this is safe (and harmless) for both
       // backends.
-      CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM, mra::Int<8>>), smem_size);
+      //
+      // Unlike convolution_kernel_batched (only 2 explicit template params
+      // before its own abbreviated `auto K`, so `<T, NDIM, mra::Int<8>>`
+      // alone fully resolves it -- see its CONFIGURE_KERNEL call below),
+      // convolution_kernel has 7 MORE explicit template parameters
+      // (ViewIn..ViewOpnorms) before its abbreviated K becomes the 9th.
+      // Naming it as a bare value (for cudaFuncSetAttribute's `const void*`
+      // parameter, which gives the compiler nothing to deduce against)
+      // requires ALL 9 template arguments spelled out explicitly --
+      // conveniently, submit_convolution_kernel's own template parameters
+      // are exactly those types, passed straight through.
+      CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM, ViewIn, ViewF, ViewResult, ViewResnorms,
+                                                    ViewTransr, ViewTranss, ViewOpnorms, mra::Int<8>>),
+                        smem_size);
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
                   (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
     } else {
-      CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM, size_type>), smem_size);
+      CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM, ViewIn, ViewF, ViewResult, ViewResnorms,
+                                                    ViewTransr, ViewTranss, ViewOpnorms, size_type>),
+                        smem_size);
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
                   (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
