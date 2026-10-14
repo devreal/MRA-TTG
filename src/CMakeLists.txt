@@ -39,6 +39,7 @@ if (HAVE_CUDA)
   target_compile_definitions(mra-cuda-base INTERFACE
     MRA_CUDA_ARCH=${CMAKE_CUDA_ARCHITECTURES}
     MRA_ENABLE_CUDA=1
+    $<$<STREQUAL:${MRA_CONV_BACKEND},CUTLASS>:MRA_CONV_BACKEND_CUTLASS=1>
   )
   set(_mra_cuda_compile_options --expt-relaxed-constexpr --extended-lambda)
 
@@ -86,6 +87,7 @@ if (HAVE_CUDA)
   target_link_libraries(mra-cuda-base INTERFACE
     mra-base
     $<$<TARGET_EXISTS:mathdx::cublasdx>:mathdx::cublasdx>
+    $<$<TARGET_EXISTS:cutlass>:cutlass>
   )
   if (MRA_ENABLE_JIT)
     target_compile_definitions(mra-cuda-base INTERFACE MRA_ENABLE_JIT=1)

@@ -100,6 +100,12 @@ else()
   message(STATUS "cublasDx not found")
 endif()
 
+# backend for the fused batched convolution kernel (include/mra/kernels/impl/)
+set(MRA_CONV_BACKEND "WMMA" CACHE STRING "Backend for the fused batched convolution kernel (WMMA or CUTLASS)")
+set_property(CACHE MRA_CONV_BACKEND PROPERTY STRINGS WMMA CUTLASS)
+if (HAVE_CUDA AND MRA_CONV_BACKEND STREQUAL "CUTLASS")
+  include(FindOrFetchCUTLASS)
+endif()
 
 add_subdirectory(src)
 

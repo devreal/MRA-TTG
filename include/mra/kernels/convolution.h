@@ -13,7 +13,17 @@
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
+// Backend for the fused batched-GEMM convolution kernel (mra::accel::apply_conv
+// et al.): selected at configure time via -DMRA_CONV_BACKEND=WMMA|CUTLASS (see
+// top-level CMakeLists.txt). Falls back to the WMMA backend whenever the
+// CUTLASS backend wasn't requested, or its headers aren't actually available
+// -- both headers export the identical mra::accel symbol set, so nothing else
+// in this file needs to change based on which one gets included here.
+#if defined(MRA_CONV_BACKEND_CUTLASS) && __has_include(<cutlass/cutlass.h>)
+#include "mra/kernels/impl/convolution_cuda_cutlass.h"
+#else
 #include "mra/kernels/impl/convolution_cuda_wmma.h"
+#endif
 #include "mra/misc/conv_mad.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
@@ -632,13 +642,22 @@ namespace mra{
     // comment), which must still happen when there's no real work otherwise.
     const size_type grid = (n_nonzero > 0 || resnorms.empty()) ? n_nonzero : size_type(1);
 
-    //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
     if (K == 8) {
       //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+      // The WMMA backend's smem_size never exceeds the default 48KB static
+      // limit so this was previously a no-op left commented out; the
+      // CUTLASS backend's three-rotation-buffer-plus-swizzled-staging
+      // layout (see convolution_cuda_cutlass.h's apply_conv_shmem_size)
+      // needs well over 48KB, so this must actually run. CONFIGURE_KERNEL
+      // caches the last size it configured and is a cheap no-op once that
+      // size has already been set, so this is safe (and harmless) for both
+      // backends.
+      CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM, mra::Int<8>>), smem_size);
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
                   (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
     } else {
+      CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM, size_type>), smem_size);
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
                   (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
@@ -876,11 +895,16 @@ namespace mra{
     // itself (see convolution_process_one's comment) -- no separate
     // post-launch prune kernel needed.
     if (K == 8) {
+      // See submit_convolution_kernel's comment on CONFIGURE_KERNEL: a
+      // no-op for the WMMA backend, required for the CUTLASS backend's
+      // over-48KB shared-memory footprint.
+      CONFIGURE_KERNEL((detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>), smem_size);
       size_type grid_x = std::min<size_type>(total_nonzero,
           detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>, threads, smem_size));
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<8>{}, fac));
     } else {
+      CONFIGURE_KERNEL((detail::convolution_kernel_batched<T, NDIM, size_type>), smem_size);
       size_type grid_x = std::min<size_type>(total_nonzero,
           detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, size_type>, threads, smem_size));
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
