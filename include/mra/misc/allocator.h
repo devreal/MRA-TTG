@@ -15,6 +15,7 @@ using DeviceAllocator = ttg::pinned_allocator_t<T>;
 #ifndef MRA_HAVE_SCRATCH_ALLOCATOR
 
 /* fallback to std::allocator */
+#include <memory>
 
 template<typename T>
 using DeviceAllocator = std::allocator<T>;
