@@ -232,8 +232,21 @@ namespace mra{
         work_sparsity.nonzero_if_any(node, from_parent, result, r_arr[Is]...);
       }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
       const size_type n_nonzero = work_sparsity.count_nonzero();
+      // When batching, submit_reconstruct_kernel_batched's own occupancy-
+      // capped scratch pool (GroupedBatchPool::ensure_scratch) supplies every
+      // member's real per-block scratch -- no per-task buffer is needed at
+      // all in that case, so tmp_size is 0 and tmp_scratch is never
+      // allocated. The unbatched fallback (host, or batching disabled at
+      // runtime) still needs the full size, since it's the only thing
+      // submit_reconstruct_kernel uses as scratch.
+#ifndef MRA_ENABLE_HOST
+      const std::size_t tmp_size = enable_reconstruct_batching ? 0
+                                                                : reconstruct_tmp_size<NDIM>(K)*n_nonzero;
+#else
       const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*n_nonzero;
-      ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+#endif
+      ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
+      if (tmp_size > 0) tmp_scratch.reset(tmp_size, TempScope);
 
 #ifdef MRA_CHECK_NORMS
       // DEBUG: host-side breakdown of the exact same views the device-side
@@ -274,9 +287,9 @@ namespace mra{
 #ifndef MRA_ENABLE_HOST
       // pick apart the array of r's into individual buffers for the kernel
       auto inputs = [&]<std::size_t... Is>(std::index_sequence<Is...>){
-        return ttg::device::Input(hg.buffer(), tmp_scratch,
-                                  (r_arr[Is].coeffs().buffer())...);
+        return ttg::device::Input(hg.buffer(), (r_arr[Is].coeffs().buffer())...);
       }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
+      if (tmp_size > 0) inputs.add(tmp_scratch);
       if (!node.empty()) inputs.add(node.coeffs().buffer());
       if (!result.empty()) inputs.add(result.coeffs().buffer());
       if (!from_parent.empty()) inputs.add(from_parent.coeffs().buffer());
@@ -334,7 +347,7 @@ namespace mra{
         // batching) travels through as well, so the leader can flatten
         // every member's own non-zero work items into one combined 1D
         // launch (see submit_reconstruct_batch_leader).
-        auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view, tmp_scratch,
+        auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view,
                                                                 from_parent_view, r_ptrs, result_view,
                                                                 r_arr, result, n_nonzero);
         // followers: the leader's batched launch already wrote our slice of r_arr/result.

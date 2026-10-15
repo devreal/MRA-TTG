@@ -25,12 +25,30 @@
                   // hit here from exactly that: "name followed by '::' must be a
                   // class or namespace name" on ttg::device::Stream, because this
                   // header used to be included before whatever transitively provided it).
+#include "ttg/parsec/device.h"  // ttg_parsec::detail::ttg_device_to_parsec_device/first_device_id --
+                                // for translating this pool's plain device id into PaRSEC's own
+                                // device-id space, the same translation Buffer::allocate_on uses.
+#include <parsec/mca/device/device_gpu.h>
+#include <parsec/utils/zone_malloc.h>
 #include "mra/misc/allocator.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/types.h"  // for size_type -- see the ttg.h note above; do not
                              // rely on an includer having pulled this in already
 
 namespace mra::detail {
+
+  /**
+   * zone_malloc against the SAME per-GPU memory pool PaRSEC pre-reserves at
+   * startup and that ttg::Buffer's own device-side allocation already draws
+   * from (see ttg_parsec::Buffer::allocate_on in ttg/parsec/buffer.h) --
+   * `device_id` is this file's usual plain (TTG-space) device id, not
+   * PaRSEC's; translated here exactly as ttg_parsec::Buffer::allocate_on
+   * does.
+   */
+  inline parsec_device_gpu_module_t* parsec_gpu_device(int device_id) {
+    int parsec_id = device_id + ttg_parsec::detail::first_device_id;
+    return (parsec_device_gpu_module_t*)parsec_mca_device_get(parsec_id);
+  }
 
 #if defined(MRA_ENABLE_CUDA)
   inline void check_cuda_rt(cudaError_t err, const char* what) {
@@ -47,6 +65,87 @@ namespace mra::detail {
 #endif
 
   /**
+   * A single device allocation, requested once and never resized: the first
+   * call to ensure() allocates it -- preferring PaRSEC's zone_malloc (the
+   * same per-GPU pool ttg::Buffer's own device-side allocation draws from,
+   * see the comment on parsec_gpu_device above), falling back to a plain
+   * cudaMalloc/hipMalloc if the zone can't satisfy the request right now
+   * (e.g. temporarily exhausted) -- and every later call just returns that
+   * same buffer. A later call asking for MORE than the first one already
+   * provided throws rather than freeing and reallocating: zone_malloc/
+   * zone_free are plain host-side bookkeeping over the device's shared
+   * memory pool, with no awareness of which GPU kernels (on this buffer's
+   * own stream, or anyone else's) might still be running against a freed
+   * range, so handing it straight back to the zone for immediate reuse
+   * elsewhere has none of cudaFree's implicit synchronization safety net --
+   * safe only once nothing could possibly still be using the memory, which
+   * for every current owner (BatchPool::slot_t, GroupedBatchPool::slot_t)
+   * is exactly when this object itself is destroyed (process-lifetime pool
+   * teardown), never mid-run. The destructor frees via whichever allocator
+   * actually provided the memory (zone_free or cudaFree/hipFree), so PaRSEC
+   * isn't left thinking this range is still outstanding. Provides an
+   * implicit conversion to ElemT* so existing call sites that pass this
+   * object directly to a kernel launch or memcpy (expecting a raw pointer)
+   * keep working unchanged.
+   */
+  template <typename ElemT>
+  class FixedDeviceRegion {
+   public:
+    FixedDeviceRegion() = default;
+    FixedDeviceRegion(const FixedDeviceRegion&) = delete;
+    FixedDeviceRegion& operator=(const FixedDeviceRegion&) = delete;
+
+    ~FixedDeviceRegion() {
+      if (!ptr_) return;
+      if (from_zone_) {
+        zone_free(parsec_gpu_device(device_id_)->memory, ptr_);
+      } else {
+#if defined(MRA_ENABLE_CUDA)
+        cudaFree(ptr_);
+#elif defined(MRA_ENABLE_HIP)
+        hipFree(ptr_);
+#endif
+      }
+    }
+
+    ElemT* get() const { return ptr_; }
+    operator ElemT*() const { return ptr_; }
+    bool empty() const { return ptr_ == nullptr; }
+
+    void ensure(int device_id, std::size_t num_elems) {
+      if (ptr_ == nullptr) {
+        device_id_ = device_id;
+        void* p = zone_malloc(parsec_gpu_device(device_id)->memory, num_elems*sizeof(ElemT));
+        if (p != nullptr) {
+          ptr_ = static_cast<ElemT*>(p);
+          from_zone_ = true;
+        } else {
+          // Zone exhausted right now -- fall back to a plain allocation
+          // rather than failing outright.
+#if defined(MRA_ENABLE_CUDA)
+          check_cuda_rt(cudaMalloc(&ptr_, num_elems*sizeof(ElemT)), "cudaMalloc (zone_malloc fallback)");
+#elif defined(MRA_ENABLE_HIP)
+          check_hip_rt(hipMalloc(&ptr_, num_elems*sizeof(ElemT)), "hipMalloc (zone_malloc fallback)");
+#endif
+          from_zone_ = false;
+        }
+        capacity_ = num_elems;
+      } else if (num_elems > capacity_) {
+        throw std::runtime_error(
+            "FixedDeviceRegion::ensure: requested size exceeds the fixed capacity allocated "
+            "at first use -- this region is sized once from a known fixed upper bound and "
+            "never regrown (see class comment for why growing it would be unsafe)");
+      }
+    }
+
+   private:
+    ElemT* ptr_ = nullptr;
+    std::size_t capacity_ = 0;
+    int device_id_ = -1;
+    bool from_zone_ = false;
+  };
+
+  /**
    * Per-device pool of pinned host / device arrays of `Arg` used to build ONE
    * batched kernel launch. Memory is per-device, not per-stream: any slot may
    * be reused for any stream submitted on this pool's device. There is no
@@ -61,8 +160,7 @@ namespace mra::detail {
   struct BatchPool {
     struct slot_t {
       std::vector<Arg, DeviceAllocator<Arg>> host_args; // pinned host storage
-      Arg* dev_args = nullptr;
-      std::size_t dev_capacity = 0;
+      FixedDeviceRegion<Arg> dev_args;
 #if defined(MRA_ENABLE_CUDA)
       cudaEvent_t event;
 #elif defined(MRA_ENABLE_HIP)
@@ -91,11 +189,10 @@ namespace mra::detail {
       slot_t& operator=(const slot_t&) = delete;
 
       ~slot_t() {
+        // dev_args frees itself (FixedDeviceRegion's destructor).
 #if defined(MRA_ENABLE_CUDA)
-        if (dev_args) cudaFree(dev_args);
         cudaEventDestroy(event);
 #elif defined(MRA_ENABLE_HIP)
-        if (dev_args) hipFree(dev_args);
         hipEventDestroy(event);
 #endif
       }
@@ -167,21 +264,7 @@ namespace mra::detail {
 #endif
 
     void ensure_capacity(slot_t& s, std::size_t num_members) {
-      if (num_members > s.dev_capacity) {
-        if (s.dev_args) {
-#if defined(MRA_ENABLE_CUDA)
-          check_cuda_rt(cudaFree(s.dev_args), "cudaFree");
-#elif defined(MRA_ENABLE_HIP)
-          check_hip_rt(hipFree(s.dev_args), "hipFree");
-#endif
-        }
-#if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaMalloc(&s.dev_args, num_members*sizeof(Arg)), "cudaMalloc");
-#elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipMalloc(&s.dev_args, num_members*sizeof(Arg)), "hipMalloc");
-#endif
-        s.dev_capacity = num_members;
-      }
+      s.dev_args.ensure(device_id, num_members);
       s.host_args.reserve(num_members);
     }
 
@@ -299,10 +382,22 @@ namespace mra::detail {
       std::vector<std::size_t> batch_sizes;
 #endif
 
-      Arg* dev_args = nullptr;
-      size_type* dev_offsets = nullptr;
-      std::size_t args_capacity = 0;
-      std::size_t offsets_capacity = 0;
+      FixedDeviceRegion<Arg> dev_args;
+      FixedDeviceRegion<size_type> dev_offsets;
+
+      // Persistent, zone_malloc-backed scratch region shared by every launch
+      // of this kernel family on this device -- NOT per-member. Paired with
+      // kernel_grid_cap (platform.h): once the launch grid is capped at
+      // actual device occupancy instead of one block per work item, each
+      // kernel's own per-block scratch only needs occupancy-many slots
+      // (indexed by blockIdx.x inside the kernel), not one per item -- see
+      // e.g. submit_convolution_kernel_batched. Tied to this slot (not a
+      // single pool-wide buffer) so the SAME non-blocking event-based reuse
+      // that already protects dev_args/dev_offsets from two concurrent
+      // launches aliasing the same memory also protects this region: a slot
+      // is never handed out by acquire() until its previous submission's
+      // event has completed.
+      FixedDeviceRegion<unsigned char> dev_scratch;
 
 #if defined(MRA_ENABLE_CUDA)
       cudaEvent_t event;
@@ -325,19 +420,34 @@ namespace mra::detail {
       slot_t& operator=(const slot_t&) = delete;
 
       ~slot_t() {
+        // dev_args/dev_offsets/dev_scratch each free themselves
+        // (FixedDeviceRegion's destructor, via the matching deallocator for
+        // however they were actually allocated).
 #if defined(MRA_ENABLE_CUDA)
-        if (dev_args) cudaFree(dev_args);
-        if (dev_offsets) cudaFree(dev_offsets);
         cudaEventDestroy(event);
 #elif defined(MRA_ENABLE_HIP)
-        if (dev_args) hipFree(dev_args);
-        if (dev_offsets) hipFree(dev_offsets);
         hipEventDestroy(event);
 #endif
       }
     };
 
     explicit GroupedBatchPool(int device_id) : device_id(device_id) { }
+
+    // Delegates to FixedDeviceRegion::ensure (see its class comment) for this
+    // slot's shared scratch region. Callers are expected to size num_elems
+    // from kernel_grid_cap (platform.h) -- a fixed bound for a given
+    // kernel/device, independent of any particular launch's batch size -- so
+    // the first call already requests the one size every later call will
+    // also need; exceeding it indicates that assumption broke (e.g. K
+    // changed at runtime). No locking: the slot is already exclusively
+    // checked_out to whoever is calling this (between their own
+    // acquire()/mark_submitted() pair), same as slot.args/slot.offsets being
+    // mutated without extra locking elsewhere.
+    template <typename ElemT>
+    ElemT* ensure_scratch(slot_t& s, std::size_t num_elems) {
+      s.dev_scratch.ensure(device_id, num_elems * sizeof(ElemT));
+      return reinterpret_cast<ElemT*>(s.dev_scratch.get());
+    }
 
     GroupedBatchPool(const GroupedBatchPool&) = delete;
     GroupedBatchPool& operator=(const GroupedBatchPool&) = delete;
@@ -401,27 +511,9 @@ namespace mra::detail {
     }
 #endif
 
-    template <typename ElemT>
-    static void grow(ElemT*& dev_ptr, std::size_t& capacity, std::size_t num_elems) {
-      if (num_elems <= capacity) return;
-      if (dev_ptr) {
-#if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaFree(dev_ptr), "cudaFree");
-#elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipFree(dev_ptr), "hipFree");
-#endif
-      }
-#if defined(MRA_ENABLE_CUDA)
-      check_cuda_rt(cudaMalloc(&dev_ptr, num_elems*sizeof(ElemT)), "cudaMalloc");
-#elif defined(MRA_ENABLE_HIP)
-      check_hip_rt(hipMalloc(&dev_ptr, num_elems*sizeof(ElemT)), "hipMalloc");
-#endif
-      capacity = num_elems;
-    }
-
     void ensure_capacity(slot_t& s, std::size_t num_args, std::size_t num_offsets, std::size_t num_sparsity) {
-      grow(s.dev_args, s.args_capacity, num_args);
-      grow(s.dev_offsets, s.offsets_capacity, num_offsets);
+      s.dev_args.ensure(device_id, num_args);
+      s.dev_offsets.ensure(device_id, num_offsets);
       s.args.reserve(num_args);
       s.offsets.reserve(num_offsets);
       s.sparsity.reserve(num_sparsity);

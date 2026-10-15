@@ -135,6 +135,7 @@ namespace mra {
       size_type N,
       size_type K,
       size_type tmp_pos,
+      size_type tmp_slot,
       ST& s,
       TmpNodeT& tmp_node,
       T*& workspace,
@@ -154,7 +155,7 @@ namespace mra {
       fnid = find_nth_nonzero_any_with_result(N, tmp_pos, node_view, from_parent_view, result_view, r_arr,
                                               std::make_index_sequence<Key<NDIM>::num_children()>{});
 
-      T* block_tmp_ptr = &tmp_ptr[tmp_pos*reconstruct_tmp_size<NDIM>(K)];
+      T* block_tmp_ptr = &tmp_ptr[tmp_slot*reconstruct_tmp_size<NDIM>(K)];
       const size_type TWOK2NDIM = std::pow(2*K,NDIM);
       s           = DenseTensorView<T, NDIM>(&block_tmp_ptr[0], 2*K);
       tmp_node    = DenseTensorView<T, NDIM>(&block_tmp_ptr[1*TWOK2NDIM], 2*K);
@@ -197,7 +198,8 @@ namespace mra {
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& r_arr,
       concepts::TensorView<NDIM+1> auto& result_view,
       size_type N,
-      size_type tmp_pos)
+      size_type tmp_pos,
+      size_type tmp_slot)
     {
       const bool is_t0 = (0 == thread_id());
 
@@ -211,7 +213,7 @@ namespace mra {
       SHARED size_type fnid;
 
       if (is_t0) {
-        reconstruct_process_one_leader<T, NDIM>(node_view, tmp_ptr, from_parent_view, r_arr, result_view, N, K, tmp_pos,
+        reconstruct_process_one_leader<T, NDIM>(node_view, tmp_ptr, from_parent_view, r_arr, result_view, N, K, tmp_pos, tmp_slot,
                                                 s, tmp_node, workspace, node, from_parent, block_r_arr, result, fnid);
       }
       SYNCTHREADS();
@@ -296,7 +298,7 @@ namespace mra {
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x){
         reconstruct_process_one<T, NDIM>(key, K, accumulate_NS, node_view, tmp_ptr, hg,
-                                         from_parent_view, r_arr, result_view, N, pos);
+                                         from_parent_view, r_arr, result_view, N, pos, pos);
       }
     }
   } // namespace detail
@@ -359,7 +361,10 @@ namespace mra {
     using ReconstructBatchArg = std::tuple<
       Key<NDIM>,                                                          // key
       SparseTensorView<T, NDIM+1>,                                        // node_view (compressed node coeffs)
-      T*,                                                                 // tmp: this member's own scratch base
+      // No per-member tmp field anymore: every member's scratch comes out of
+      // one shared, occupancy-sized pool instead (see GroupedBatchPool::
+      // ensure_scratch / submit_reconstruct_kernel_batched), indexed by
+      // blockIdx.x rather than this member's own local position.
       SparseTensorView<T, NDIM+1>,                                        // from_parent_view
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // r_arr (the 8 children)
       SparseTensorView<T, NDIM+1>,                                        // result_view (leaf output)
@@ -375,11 +380,10 @@ namespace mra {
     struct ReconstructBatchArgIdx {
       static constexpr std::size_t key             = 0;
       static constexpr std::size_t node_view       = 1;
-      static constexpr std::size_t tmp             = 2;
-      static constexpr std::size_t from_parent_view = 3;
-      static constexpr std::size_t r_arr           = 4;
-      static constexpr std::size_t result_view     = 5;
-      static constexpr std::size_t n               = 6;
+      static constexpr std::size_t from_parent_view = 2;
+      static constexpr std::size_t r_arr           = 3;
+      static constexpr std::size_t result_view     = 4;
+      static constexpr std::size_t n               = 5;
     };
 
     /**
@@ -406,6 +410,9 @@ namespace mra {
       const size_type* member_offsets,        // device ptr, size == num_members+1
       size_type num_members,
       size_type total_nonzero,
+      T* shared_tmp,                          // one shared, occupancy-sized scratch pool for
+                                               // the whole launch -- indexed by blockIdx.x, not
+                                               // per-member (see GroupedBatchPool::ensure_scratch)
       size_type K,
       bool accumulate_NS,
       const concepts::TensorView<2> auto hg)
@@ -423,9 +430,9 @@ namespace mra {
         const size_type member_N = std::get<idx::n>(arg);
 
         reconstruct_process_one<T, NDIM>(std::get<idx::key>(arg), K, accumulate_NS,
-                                         std::get<idx::node_view>(arg), std::get<idx::tmp>(arg), hg,
+                                         std::get<idx::node_view>(arg), shared_tmp, hg,
                                          std::get<idx::from_parent_view>(arg), std::get<idx::r_arr>(arg),
-                                         std::get<idx::result_view>(arg), member_N, local_pos);
+                                         std::get<idx::result_view>(arg), member_N, local_pos, blockIdx.x);
       }
     }
 
@@ -545,9 +552,23 @@ namespace mra {
 
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = mTxmq_shmem_size<T>(2*K);
+    const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
 
-    CALL_KERNEL((detail::reconstruct_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, accumulate_NS, hg));
+    // total_nonzero can run into the thousands for a large batch, far beyond
+    // what the device can run concurrently -- cap the grid at actual
+    // occupancy and let reconstruct_kernel_batched's own grid-stride loop
+    // (see its comment) pick up the rest, rather than submitting one
+    // immediately-resident block per position.
+    // Scratch is sized from grid_cap -- a fixed bound for this kernel/device,
+    // independent of total_nonzero -- not from grid_x, so ensure_scratch's
+    // first allocation already covers every later launch and never needs to
+    // grow (see its comment for why growing it would be unsafe).
+    size_type grid_cap = detail::kernel_grid_cap(detail::reconstruct_kernel_batched<T, NDIM, SparseTensorView<T, 2>>, threads, smem_size);
+    size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+    T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * reconstruct_tmp_size<NDIM>(K));
+
+    CALL_KERNEL((detail::reconstruct_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, K, accumulate_NS, hg));
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
@@ -641,7 +662,7 @@ namespace mra {
         // structural N from the result, which is always allocated with N
         // functions (unlike the node, which is empty if it only exists via
         // from_parent) -- see below
-        total_sparsity_bytes += (num_children + 1) * static_cast<size_type>(batch[m].template get<7>().coeffs().dim(0));
+        total_sparsity_bytes += (num_children + 1) * static_cast<size_type>(batch[m].template get<6>().coeffs().dim(0));
       }
       slot.sparsity.resize(total_sparsity_bytes);
 
@@ -649,13 +670,16 @@ namespace mra {
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_key             = batch[m].template get<0>();
         auto& m_node_view       = batch[m].template get<1>();
-        auto& m_tmp             = batch[m].template get<2>();
-        auto& m_from_parent_view = batch[m].template get<3>();
-        auto& m_r_arr           = batch[m].template get<4>();
-        auto& m_result_view     = batch[m].template get<5>();
-        auto& m_r_arr_tensor    = batch[m].template get<6>(); // real array of 8 r Tensors, for their sparsity
-        auto& m_result_tensor   = batch[m].template get<7>(); // real result Tensor
-        const size_type m_n_nonzero = batch[m].template get<8>();
+        // No per-member tmp extraction anymore -- see ReconstructBatchArg's
+        // comment: every member's scratch now comes from one shared,
+        // occupancy-sized pool instead (ensure_scratch in
+        // submit_reconstruct_kernel_batched).
+        auto& m_from_parent_view = batch[m].template get<2>();
+        auto& m_r_arr           = batch[m].template get<3>();
+        auto& m_result_view     = batch[m].template get<4>();
+        auto& m_r_arr_tensor    = batch[m].template get<5>(); // real array of 8 r Tensors, for their sparsity
+        auto& m_result_tensor   = batch[m].template get<6>(); // real result Tensor
+        const size_type m_n_nonzero = batch[m].template get<7>();
         // structural N: taken from the result, not m_node_view -- the node is
         // empty (dim(0) == 0) whenever it only exists via from_parent, which
         // would size this member's sparsity copies and kernel scan to zero
@@ -707,7 +731,7 @@ namespace mra {
         slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset + num_children*n]);
         slot.extra_sizes.push_back(n);
 
-        slot.args.emplace_back(m_key, m_node_view, m_tmp.current_device_ptr(),
+        slot.args.emplace_back(m_key, m_node_view,
                                m_from_parent_view, m_r_arr, m_result_view,
                                n);
         sparsity_offset += (num_children + 1) * n;
