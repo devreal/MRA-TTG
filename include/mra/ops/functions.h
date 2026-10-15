@@ -205,69 +205,72 @@ namespace mra {
 
 
     namespace detail {
+#ifdef HAVE_DEVICE_ARCH
+      /**
+       * Sum of val over the first nlanes lanes of the calling warp, valid in
+       * lane 0. All existing lanes of the warp must call this; nlanes may be
+       * less than MRA_WARP_SIZE for the last, partial warp of a block, whose
+       * missing lanes are never read.
+       */
+      template <typename T>
+      DEVSCOPE T reduce_warp(T val, unsigned lane, unsigned nlanes) {
+#if defined(__CUDA_ARCH__)
+        const unsigned mask = (nlanes >= 32) ? 0xffffffffu : ((1u << nlanes) - 1);
+#endif
+        for (unsigned offset = MRA_WARP_SIZE / 2; offset > 0; offset /= 2) {
+#if defined(__CUDA_ARCH__)
+          T other = __shfl_down_sync(mask, val, offset);
+#else
+          T other = __shfl_down(val, offset);
+#endif
+          if (lane + offset < nlanes) val += other;
+        }
+        return val;
+      }
+#endif // HAVE_DEVICE_ARCH
+
       /**
        * Reduce the contributions of each calling thread in a block into a single value.
        * On the host, we simply copy the result into the output value.
-       * This requires block_size() elements in shared memory (or, if
-       * USE_SHFL_REDUCE is defined, one element per warp).
-       * The block size can be controlled explicitly in case not all threads
-       * contribute values.
+       * All threads of the block must call this; only the first blocksize
+       * threads contribute (blocksize can be given explicitly in case not
+       * all threads contribute values). Every thread receives the result.
+       * Uses warp shuffles and one shared-memory element per warp (or, if
+       * MRA_SMEM_REDUCE is defined, a shared-memory tree with block_size()
+       * elements).
        */
       template <typename T>
       SCOPE void reduce_block(const T input, T* output, size_type blocksize = block_size()) {
 #ifdef HAVE_DEVICE_ARCH
 
-#ifdef USE_SHFL_REDUCE
-        constexpr size_type NumWarps = MAX_THREADS_PER_BLOCK / MRA_WARP_SIZE;
-        __shared__ T sdata[NumWarps];
-        size_type tid = thread_id();
-        bool have_data = (tid < blocksize);
-        size_type warp_id = tid / MRA_WARP_SIZE;
-        size_type lane_id = tid % MRA_WARP_SIZE;
-        size_type warp_count = (blocksize + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
+#ifndef MRA_SMEM_REDUCE
+        constexpr unsigned MaxWarps = (MAX_THREADS_PER_BLOCK + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
+        /* per-warp partial sums, and the result in its own slot so that a
+         * subsequent call cannot overwrite it before every thread has read it */
+        __shared__ T sdata[MaxWarps + 1];
+        const unsigned tid    = thread_id();
+        const unsigned nthreads = block_size();
+        const unsigned lane   = tid % MRA_WARP_SIZE;
+        const unsigned warp   = tid / MRA_WARP_SIZE;
+        const unsigned nwarps = (nthreads + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
+        const unsigned nlanes = (nthreads - warp * MRA_WARP_SIZE < MRA_WARP_SIZE)
+                              ? nthreads - warp * MRA_WARP_SIZE : MRA_WARP_SIZE;
+        assert(nwarps <= MaxWarps);
 
-        /* reduce within the warp -- mask must reflect exactly the threads
-         * about to execute the shuffles below (have_data), since blocksize
-         * need not be a multiple of the warp size: a fixed full mask would
-         * mismatch the set of threads actually participating for a partial
-         * last warp, which is undefined behavior for __shfl_down_sync. */
-        unsigned mask = __ballot_sync(0xffffffff, have_data);
-        if (have_data) {
-          T val = input;
-          for (int offset = 16; offset > 0; offset /= 2)
-            val += __shfl_down_sync(mask, val, offset);
-          if (lane_id == 0) {
-            sdata[warp_id] = val;
-          }
+        T val = reduce_warp((tid < blocksize) ? input : T(0), lane, nlanes);
+        if (lane == 0) sdata[warp] = val;
+        SYNCTHREADS();
+
+        if (warp == 0) {
+          val = reduce_warp((lane < nwarps) ? sdata[lane] : T(0), lane, nlanes);
+          if (lane == 0) sdata[MaxWarps] = val;
         }
-
-        /* handle odd number of elements */
-        if (warp_count % 2 && warp_count > 1) {
-          if (tid == 0) {
-            sdata[0] += sdata[warp_count - 1];
-          }
-          SYNCTHREADS();
-        }
-
-        for (size_type s = warp_count / 2; s > 0; s /= 2) {
-          if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-          }
-          SYNCTHREADS();
-          /* handle odd sizes */
-          if (s % 2 == 1 && s > 1 && tid == 0) {
-            /* have thread 0 fold in the last (odd) element */
-            sdata[0] += sdata[s-1];
-          }
-        }
-
         SYNCTHREADS();
 
         // every thread returns a result
-        *output = sdata[0];
+        *output = sdata[MaxWarps];
 
-
-#else // USE_SHFL_REDUCE
+#else // MRA_SMEM_REDUCE
         __shared__ T sdata[MAX_THREADS_PER_BLOCK];
         size_type tid = thread_id();
         sdata[tid] = input;
@@ -298,7 +301,7 @@ namespace mra {
         // every thread returns a result
         *output = sdata[0];
         SYNCTHREADS();
-#endif // USE_SHFL_REDUCE
+#endif // MRA_SMEM_REDUCE
 #else  // HAVE_DEVICE_ARCH
         *output = input;
 #endif // HAVE_DEVICE_ARCH
