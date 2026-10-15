@@ -817,14 +817,28 @@ namespace mra {
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
+        // When batching, submit_convolution_kernel_batched's own occupancy-
+        // capped scratch pool (GroupedBatchPool::ensure_scratch) supplies
+        // every member's real per-block scratch -- no per-task buffer is
+        // needed at all in that case, so tmp_size is 0 and tmp is never
+        // allocated. The unbatched fallback (host, or batching disabled at
+        // runtime) still needs the full size, since it's the only thing
+        // submit_convolution_kernel uses as scratch.
+#ifndef MRA_ENABLE_HOST
+        const std::size_t tmp_size = enable_conv_batching ? 0 : convolution_tmp_size<NDIM>(K) * n_nonzero;
+#else
+        const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
+#endif
+        auto tmp = ttg::Buffer<T>();
+        if (tmp_size > 0) tmp.reset(tmp_size, TempScope);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
-                                        out.coeffs().buffer(), tmp);
+                                        out.coeffs().buffer());
+        if (tmp_size > 0) input.add(tmp);
         op.add_convolution_op_buffers(input, res, items_buf, norms.get());
         co_await ttg::device::select(input);
         if (need_generate) {
@@ -874,7 +888,7 @@ namespace mra {
           // resnorms_view) travels through too, so the leader can likewise
           // queue a direct zero-fill copy into its own device buffer (see
           // submit_convolution_batch_leader).
-          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view,
                                                                   transr, transs, opnorms_view, tol, at, out.coeffs(),
                                                                   n_nonzero, resnorms);
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
@@ -1099,7 +1113,16 @@ namespace mra {
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
 
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
+      // See shell0_tt's identical comment above: batched launches get their
+      // scratch from submit_convolution_kernel_batched's occupancy-capped
+      // pool instead -- no per-task buffer is needed at all in that case.
+#ifndef MRA_ENABLE_HOST
+      const std::size_t tmp_size = enable_conv_batching ? 0 : convolution_tmp_size<NDIM>(K) * n_nonzero;
+#else
+      const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
+#endif
+      auto tmp = ttg::Buffer<T>();
+      if (tmp_size > 0) tmp.reset(tmp_size, TempScope);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -1112,7 +1135,8 @@ namespace mra {
         resnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
       }
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
+      auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer());
+      if (tmp_size > 0) input.add(tmp);
       op.add_convolution_op_buffers(input, res, items_buf, norms.get());
       if (last_key) {
         // if this is the last we want to get the norms of the result back
@@ -1160,7 +1184,7 @@ namespace mra {
         // travels through too, so the leader can likewise queue a direct
         // zero-fill copy into its own device buffer (see
         // submit_convolution_batch_leader).
-        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
+        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view,
                                                                        transr, transs, opnorms_view, tol, at, out.coeffs(),
                                                                        n_nonzero, resnorms);
         // followers: the leader's batched launch already wrote our slice of out/resnorms.

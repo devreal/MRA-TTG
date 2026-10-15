@@ -293,8 +293,25 @@ namespace mra
           // p_in's own sparsity), not built into a host-side list here.
           const size_type n_nonzero = sparsity.count_nonzero();
 
+          // When batching, submit_compress_kernel_batched's own occupancy-
+          // capped scratch pool (GroupedBatchPool::ensure_scratch) supplies
+          // every member's real per-block transform workspace -- no per-task
+          // buffer is needed at all in that case, so tmp_size is 0 and
+          // tmp_scratch is never allocated. The unbatched fallback (host, or
+          // batching disabled at runtime) still needs the full size, since
+          // it's the only thing submit_compress_kernel uses as scratch.
+          // (d_sumsq below is NOT shrunk/skipped the same way: the host reads
+          // every compact position back after the kernel runs -- see
+          // do_compress's read of d_sumsq_arr further down -- so it must stay
+          // sized to this task's own n_nonzero and always allocated,
+          // regardless of batching.)
+#ifndef MRA_ENABLE_HOST
+          const std::size_t tmp_size = enable_compress_batching ? 0 : compress_tmp_size<NDIM>(K)*n_nonzero;
+#else
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*n_nonzero;
-          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+#endif
+          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
+          if (tmp_size > 0) tmp_scratch.reset(tmp_size, TempScope);
           const auto& hgT = functiondata.get_hgT();
           /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
           auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(n_nonzero, TempScope);
@@ -331,7 +348,8 @@ namespace mra
 
 #ifndef MRA_ENABLE_HOST
           auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(),
-                                          tmp_scratch, d_sumsq, child_kept_packed);
+                                          d_sumsq, child_kept_packed);
+          if (tmp_size > 0) input.add(tmp_scratch);
           auto select_in = [&](const auto& in) {
             if (!in.empty()) {
               input.add(in.coeffs().buffer());
@@ -386,7 +404,7 @@ namespace mra
             // per-function index list needs to travel with it, since each
             // member's real function ids are found on-device.
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
-                                                                    tmp_scratch, d_sumsq, input_views,
+                                                                    d_sumsq, input_views,
                                                                     p.coeffs(), d, n_nonzero,
                                                                     child_kept_ptr, trunc_tol);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
