@@ -1,6 +1,12 @@
 #ifndef MRA_KERNELS_IMPL_CONVOLUTION_CUDA_WMMA_H
 #define MRA_KERNELS_IMPL_CONVOLUTION_CUDA_WMMA_H
 
+/**
+ * Convolution on FP64 tensor cores (sm_80+) using CUDA WMMA. Kept as the
+ * basis for a rocWMMA port; on CUDA, convolution_cuda_mma.h is used unless
+ * MRA_CONV_USE_WMMA is defined (see mra/kernels/impl/convolution_accel.h).
+ */
+
 #include "mra/misc/types.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/misc/conv_mad.h" // for NormId, used as a template parameter below
@@ -16,6 +22,7 @@
 
 namespace mra {
   namespace accel {
+  namespace wmma {
 
     /**
      * apply_conv_k keeps each warp's share of the row tiles in registers, so
@@ -375,6 +382,7 @@ namespace mra {
       return 0;
     }
 
+  } // namespace wmma
   } // namespace accel
 
 } // namespace mra

@@ -13,7 +13,7 @@
 #include "mra/kernels/gaxpy.h"
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
-#include "mra/kernels/impl/convolution_cuda_wmma.h"
+#include "mra/kernels/impl/convolution_accel.h"
 #include "mra/misc/conv_mad.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
@@ -36,8 +36,8 @@ namespace mra{
 
     /**
      * Returns the number of bytes of shared memory required to launch convolution_kernel with the given K.
-     * Currently, only uses shared memory if using WMMA. WE may want to put some tensors into shared memory
-     * for non-WMMA runs.
+     * Currently, only uses shared memory if using tensor cores. WE may want to put some tensors into shared memory
+     * for other runs.
      */
     template<typename T>
     SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
@@ -52,7 +52,7 @@ namespace mra{
     /**
      * Thread block for the convolution kernels: max_thread_dims(2*K), with
      * the y dimension raised if needed so that the block holds at least
-     * mra::accel::apply_conv_min_threads(K) threads (the WMMA path in
+     * mra::accel::apply_conv_min_threads(K) threads (the tensor-core path in
      * apply_conv relies on it).
      */
     inline Dim3 conv_thread_dims(size_type K) {
@@ -64,7 +64,7 @@ namespace mra{
       }
       if (dims.x * dims.y * dims.z > MAX_THREADS_PER_BLOCK) {
         throw std::runtime_error("convolution: MAX_THREADS_PER_BLOCK is too small for the "
-                                 "WMMA convolution (needs " + std::to_string(min_threads) + " threads)");
+                                 "tensor-core convolution (needs " + std::to_string(min_threads) + " threads)");
       }
       return dims;
     }
