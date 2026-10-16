@@ -73,6 +73,27 @@ namespace mra {
     void foreach_child(const Key<NDIM>& key, auto&& fn) {
       foreach_child_impl(key, fn, std::make_index_sequence<Key<NDIM>::num_children()>{});
     }
+
+    /**
+     * True iff two sparsity sets mark the exact same function indices
+     * non-zero. Used by accumulate_tt to decide whether its newly-computed
+     * output sparsity exactly matches its input node's own -- if so, the
+     * input node's already-allocated storage has the right shape to be
+     * reused as the output in place (see accumulate_tt's comment), instead
+     * of allocating a fresh tensor. No existing comparator for this in the
+     * tensor/sparsity headers (SparsityInfo and a node's own sparsity() are
+     * different RangeSparsityBase instantiations with no operator== between
+     * them), so compare through the common is_nonzero()/count() interface
+     * both expose.
+     */
+    template <typename SparsityA, typename SparsityB>
+    bool sparsity_equal(const SparsityA& a, const SparsityB& b) {
+      if (a.count() != b.count() || a.count_nonzero() != b.count_nonzero()) return false;
+      for (size_type i = 0; i < a.count(); ++i) {
+        if (a.is_nonzero(i) != b.is_nonzero(i)) return false;
+      }
+      return true;
+    }
   } // namespace detail
 
 
@@ -1031,7 +1052,7 @@ namespace mra {
     auto accumulate_tt = ttg::make_tt<Space>(
       [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool, total_functions](
           const detail::KeyPair<NDIM>& keypair,
-          const mra::FunctionsCompressedNode<T, NDIM>& in_node,
+          mra::FunctionsCompressedNode<T, NDIM>&& in_node,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
           std::vector<detail::KeyPair<NDIM>>&& contribution_keys) -> TASKTYPE {
 
@@ -1104,10 +1125,29 @@ namespace mra {
       }
 #endif // MRA_ENABLE_HOST
 
-      out.allocate(sparsity, K, ttg::scope::Allocate);
-
-      out.set_ns();
-      mra::apply_leaf_info(out, in_node);
+      // When the newly-computed sparsity exactly matches in_node's own, its
+      // already-allocated storage has exactly the right shape to serve as
+      // out directly -- move it in instead of allocating a fresh tensor and
+      // copying/convolving into that. The move is an O(1) buffer-ownership
+      // transfer (see Tensor/ttg::Buffer's move ctor), not a device copy. Not
+      // applicable to an invalid (no corresponding prior node) or empty
+      // (no coefficients yet) in_node -- those fall through to the ordinary
+      // allocate path below.
+      // set_ns()/apply_leaf_info() must NOT run in the reuse branch the way
+      // they do below: set_ns() would be clobbered by the move if called
+      // first, and apply_leaf_info(out, in_node) reads in_node -- already
+      // moved-from by that point -- when out already carries in_node's exact
+      // child-leaf info verbatim via the move.
+      const bool reuse_in_node = !in_node.invalid() && !in_node.empty() &&
+                                  detail::sparsity_equal(sparsity, in_node.sparsity());
+      if (reuse_in_node) {
+        out = std::move(in_node);
+        out.set_ns();
+      } else {
+        out.allocate(sparsity, K, ttg::scope::Allocate);
+        out.set_ns();
+        mra::apply_leaf_info(out, in_node);
+      }
 
       DenseTensor<T, 1> resnorms;
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
@@ -1135,7 +1175,11 @@ namespace mra {
         resnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
       }
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer());
+      // When reusing in_node's storage as out, in_node is already moved-from
+      // -- out.coeffs().buffer() is now the SAME underlying buffer, so there
+      // is nothing further to select for it separately.
+      auto input = ttg::device::Input(out.coeffs().buffer(), contribution.coeffs().buffer());
+      if (!reuse_in_node) input.add(in_node.coeffs().buffer());
       if (tmp_size > 0) input.add(tmp);
       op.add_convolution_op_buffers(input, res, items_buf, norms.get());
       if (last_key) {
@@ -1164,7 +1208,11 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
       auto out_view = out.coeffs().current_view();
       auto contribution_view = contribution.coeffs().current_view();
-      auto in_node_view = in_node.coeffs().current_view();
+      // When reusing in_node's storage as out, in_node is already moved-from
+      // -- out_view IS what used to be in_node's own view, now aliasing the
+      // kernel's write target. convolution_process_one's staged_in (see its
+      // comment in kernels/convolution.h) is exactly what makes that safe.
+      auto in_node_view = reuse_in_node ? out_view : in_node.coeffs().current_view();
       auto resnorms_view = resnorms.current_view();
 
 #ifndef MRA_ENABLE_HOST
