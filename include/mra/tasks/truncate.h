@@ -232,7 +232,11 @@ namespace mra {
       }
       co_await std::move(sends);
 #else  // MRA_ENABLE_HOST
-      ttg::send<num_children>(key, std::move(node));
+      // like the device path: a node truncated for all functions is not forwarded,
+      // its parent already marks it as a child leaf
+      if (keep) {
+        ttg::send<num_children>(key, std::move(node));
+      }
       if (key.level() > 0) {
         select_send_up(key, std::move(kept), std::make_index_sequence<num_children>{}, name.c_str());
       }
