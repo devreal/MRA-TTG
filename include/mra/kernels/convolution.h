@@ -29,7 +29,13 @@ namespace mra{
   SCOPE size_type convolution_tmp_size(size_type K) {
     size_type K2NDIM = std::pow(K, NDIM);
     size_type TWOK2NDIM = std::pow(2*K, NDIM);
-    return 3*TWOK2NDIM + 2*K2NDIM; // resultc, result, f, work1, work2
+    // f0, resultc: K-sized. work1, work2, staged_in: 2K-sized. staged_in
+    // holds a copy of this function's "in" (the running sum so far), taken
+    // before any write into `result` -- which, when accumulate_tt reuses its
+    // input node's own storage as the output (see its comment), aliases the
+    // very same memory `in` reads from. See convolution_process_one's
+    // staged_in comment for why the copy has to happen there.
+    return 4*TWOK2NDIM + 2*K2NDIM; // f0, resultc, work1, work2, staged_in
   }
 
   namespace detail {
@@ -370,7 +376,7 @@ namespace mra{
      * straight to the variadic-Dims constructor.
      */
     template<typename T, Dimension NDIM, typename KT, typename TwoKT, typename InViewT, typename FViewT, typename ResultViewT,
-             typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename FT, typename InT, typename ResultT>
+             typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename StagedInT, typename FT, typename InT, typename ResultT>
     DEVSCOPE void convolution_process_one_leader(
       const InViewT& in_view,
       const FViewT& f_view,
@@ -385,6 +391,7 @@ namespace mra{
       ResultcT& resultc,
       Work1T& work1,
       Work2T& work2,
+      StagedInT& staged_in,
       FT& f,
       InT& in,
       ResultT& result,
@@ -405,6 +412,7 @@ namespace mra{
       resultc   = ResultcT(&block_tmp_ptr[                 K2NDIM], detail::broadcast_dims<typename ResultcT::dims_type>(K, std::make_index_sequence<NDIM>{}));
       work1     = Work1T(&block_tmp_ptr[              2*K2NDIM], detail::broadcast_dims<typename Work1T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
       work2     = Work2T(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename Work2T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      staged_in = StagedInT(&block_tmp_ptr[2*TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename StagedInT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
       in        = make_ct_tensorview_from(in_view(i), TWOK);
       f         = make_ct_tensorview_from(f_view(i), TWOK);
       result    = make_ct_tensorview_from(result_view(i), TWOK);
@@ -451,13 +459,13 @@ namespace mra{
       using tensor_view_2k_type = DenseTensorView<T, NDIM, dims_2k_type>;
       using const_tensor_view_2k_type = DenseTensorView<const T, NDIM, dims_2k_type>;
       SHARED tensor_view_k_type f0, resultc;
-      SHARED tensor_view_2k_type work1, work2, result;
+      SHARED tensor_view_2k_type work1, work2, result, staged_in;
       SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
 
       if (is_team_lead()) {
         convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos, tmp_slot,
-                                                f0, resultc, work1, work2, f, in, result, i);
+                                                f0, resultc, work1, work2, staged_in, f, in, result, i);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -472,10 +480,20 @@ namespace mra{
         return i;
       }
 
+      // Snapshot `in` into tmp-backed storage before anything below writes to
+      // `result` -- result_view/out may be the SAME underlying storage as
+      // in_view when accumulate_tt reuses its input node in place as the
+      // output (see its comment in mra/tasks/convolution.h), and apply_conv/
+      // convolution_kernel_impl's cheap-skip path both zero `result`
+      // unconditionally before the final combination with `in` -- which would
+      // otherwise read back zeros (or worse, the half-written new value)
+      // instead of the original running sum.
+      staged_in = in;
+
       int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0; // TODO: this is a bit hacky, can we do better?
 
       convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
-                                       transr, transs, opnorms_view, at, in, f, f0,
+                                       transr, transs, opnorms_view, at, staged_in, f, f0,
                                        resultc, result, work1, work2,
                                        resnorms.empty() ? nullptr : &resnorms[i]);
       return i;
