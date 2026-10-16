@@ -983,9 +983,22 @@ namespace mra {
 
 
     /**
-     * Recursive edges
+     * Recursive edges. Two separate node edges, not one, because the SAME
+     * node value dispatch hands accumulate_tt as in_node is also broadcast
+     * elsewhere as the (read-only) `contribution` input of OTHER accumulate_tt
+     * chains (one source node's coefficients contribute to many destination
+     * keys) -- TTG cannot reconcile one consumer wanting to move/mutate a
+     * value that other consumers still need to read. accumulate_node_recurse
+     * therefore stays const/read-only (fed by dispatch on the first hop, and
+     * by accumulate_tt itself with an empty placeholder on every later hop);
+     * accumulate_node_recurse_owned is exclusively owned by this one chain
+     * (an empty placeholder from dispatch on the first hop, real,
+     * move-from-safe data from accumulate_tt's own previous iteration on
+     * every later hop) -- see accumulate_tt's comment for how it picks
+     * whichever of the two actually arrived non-empty.
      */
     ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_node_recurse;
+    ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_node_recurse_owned;
     ttg::Edge<detail::KeyPair<NDIM>, std::vector<detail::KeyPair<NDIM>>> accumulate_contribution_recurse;
 
     /**
@@ -1015,12 +1028,17 @@ namespace mra {
         if (contributions.empty()) {
           // if we have no contributions to apply, just forward the input to the output
           //std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
-          send_out(key, in_node, std::integral_constant<std::size_t, 2>{});
+          send_out(key, in_node, std::integral_constant<std::size_t, 3>{});
         } else {
-          // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively
+          // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively.
+          // in_node goes out on the const edge (index 0): it's read-only here since the
+          // same value is also broadcast elsewhere as other chains' `contribution` input.
+          // The owned edge (index 1) gets an empty placeholder on this, the first hop --
+          // see the edges' own comment and accumulate_tt's for why.
           //std::cout << "ACCUMULATE DISPATCH " << key << " dispatching to accumulate " << contributions.back() << " with " << contributions.size() << " contributions" << std::endl;
           send_out(contributions.back(), in_node, std::integral_constant<std::size_t, 0>{});
-          send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 1>{});
+          send_out(contributions.back(), mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 1>{});
+          send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 2>{});
         }
 
         /**
@@ -1029,7 +1047,7 @@ namespace mra {
         [&]<std::size_t... Is>(std::index_sequence<Is...>){
           return ((
             child_empty[Is] && send_out(key, mra::FunctionsCompressedNode<T, NDIM>{},
-                                        std::integral_constant<std::size_t, 3+Is>{})
+                                        std::integral_constant<std::size_t, 4+Is>{})
           ), ...);
         }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
 
@@ -1037,7 +1055,7 @@ namespace mra {
         co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(to_shellN, contribution_edge, down_to_accumulate_leaf_info),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_to_adjust_leaf,
+         ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, accumulate_contribution_recurse, accumulate_to_adjust_leaf,
                     adjust_leaf_edges[0], adjust_leaf_edges[1], adjust_leaf_edges[2], adjust_leaf_edges[3],
                     adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7]),
          "AccumulateDispatch");
@@ -1047,14 +1065,31 @@ namespace mra {
      * The task recurses over the list of contributions to apply them one by one and send the result to the next contribution task.
      * After the last contribution is applied, the result is sent to the output.
      *
+     * Receives the running-sum node on TWO edges (see accumulate_node_recurse's
+     * own comment): in_node_const (read-only -- the same value dispatch sends
+     * here is also broadcast as other chains' `contribution` input) and
+     * in_node_owned (exclusively ours -- real data only when this task is a
+     * later hop fed by a previous accumulate_tt's own recursive send). Exactly
+     * one of the two is ever non-empty for a given invocation; pick that one
+     * as the effective running sum below. Only in_node_owned's data may ever
+     * be moved from.
+     *
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
       [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool, total_functions](
           const detail::KeyPair<NDIM>& keypair,
-          mra::FunctionsCompressedNode<T, NDIM>&& in_node,
+          const mra::FunctionsCompressedNode<T, NDIM>& in_node_const,
+          mra::FunctionsCompressedNode<T, NDIM>&& in_node_owned,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
           std::vector<detail::KeyPair<NDIM>>&& contribution_keys) -> TASKTYPE {
+      // Exactly one of in_node_const/in_node_owned is non-empty (see the
+      // class comment above and accumulate_node_recurse's) -- in_node is a
+      // read-only alias for whichever that is, used everywhere the old
+      // single in_node parameter used to be read; only in_node_owned itself
+      // may ever be moved from (see the reuse branch further down).
+      const bool in_node_from_owned = !in_node_owned.empty();
+      const auto& in_node = in_node_from_owned ? in_node_owned : in_node_const;
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
@@ -1129,19 +1164,23 @@ namespace mra {
       // already-allocated storage has exactly the right shape to serve as
       // out directly -- move it in instead of allocating a fresh tensor and
       // copying/convolving into that. The move is an O(1) buffer-ownership
-      // transfer (see Tensor/ttg::Buffer's move ctor), not a device copy. Not
-      // applicable to an invalid (no corresponding prior node) or empty
-      // (no coefficients yet) in_node -- those fall through to the ordinary
-      // allocate path below.
+      // transfer (see Tensor/ttg::Buffer's move ctor), not a device copy. Only
+      // ever valid when in_node came from the owned edge: in_node_const may
+      // be the SAME value other accumulate_tt chains are still reading as
+      // their own `contribution` (see accumulate_node_recurse's comment), so
+      // it must never be moved from, regardless of sparsity. Also excluded:
+      // an invalid (no corresponding prior node) or empty (no coefficients
+      // yet) in_node -- those fall through to the ordinary allocate path
+      // below.
       // set_ns()/apply_leaf_info() must NOT run in the reuse branch the way
       // they do below: set_ns() would be clobbered by the move if called
       // first, and apply_leaf_info(out, in_node) reads in_node -- already
       // moved-from by that point -- when out already carries in_node's exact
       // child-leaf info verbatim via the move.
-      const bool reuse_in_node = !in_node.invalid() && !in_node.empty() &&
+      const bool reuse_in_node = in_node_from_owned && !in_node.invalid() && !in_node.empty() &&
                                   detail::sparsity_equal(sparsity, in_node.sparsity());
       if (reuse_in_node) {
-        out = std::move(in_node);
+        out = std::move(in_node_owned);
         out.set_ns();
       } else {
         out.allocate(sparsity, K, ttg::scope::Allocate);
@@ -1306,18 +1345,24 @@ namespace mra {
         // if this was the last contribution to apply, send the result to the output
         ttg::trace(name, key, ": last contribution, node empty: ", empty);
         //std::cout << "ACCUMULATE " << key << " last contribution applied, sending result to output" << out << std::endl;
-        send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 2>{});
+        send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 3>{});
       } else {
-        // send the result to the next contribution task or output
-        send_out(contribution_keys.back(), std::move(out), std::integral_constant<std::size_t, 0>{});
-        send_out(contribution_keys.back(), std::move(contribution_keys), std::integral_constant<std::size_t, 1>{});
+        // send the result to the next contribution task or output: the real
+        // data goes out on the owned edge (index 1) -- the next accumulate_tt
+        // invocation is this chain's sole consumer of it, so it's safe for
+        // that task to move from it -- and an empty placeholder goes out on
+        // the const edge (index 0), since nothing real needs to travel there
+        // for this hop (see accumulate_node_recurse's comment).
+        send_out(contribution_keys.back(), mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 0>{});
+        send_out(contribution_keys.back(), std::move(out), std::integral_constant<std::size_t, 1>{});
+        send_out(contribution_keys.back(), std::move(contribution_keys), std::integral_constant<std::size_t, 2>{});
       }
 
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
-      }, ttg::edges(accumulate_node_recurse, screener_to_accumulate, accumulate_contribution_recurse),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_to_adjust_leaf),
+      }, ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, screener_to_accumulate, accumulate_contribution_recurse),
+         ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, accumulate_contribution_recurse, accumulate_to_adjust_leaf),
          "Accumulate");
 
     /***************************************************************************************
