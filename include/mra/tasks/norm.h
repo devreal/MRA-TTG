@@ -52,10 +52,9 @@ namespace mra{
       size_type N = fns->num_functions(key);
       auto norms_result = norm_tensor_type(N);
       // Zero-fill host-side first (rather than relying on default-constructed
-      // 0), since the kernel below only launches blocks for `in`'s non-zero
-      // functions -- covers exactly what norm_kernel used to write 0.0 for
-      // explicitly. norms_result's default scope is SyncIn, so this fill
-      // reaches the device copy via the select() below.
+      // 0). The kernel writes every function's entry, but the fill keeps the
+      // buffer defined should it not run. norms_result's default scope is
+      // SyncIn, so this fill reaches the device copy via the select() below.
       std::fill(norms_result.buffer().host_ptr(), norms_result.buffer().host_ptr() + N, T(0));
       const size_type n_nonzero = in.coeffs().sparsity().count_nonzero();
       auto fnnorms = FunctionNorms(name, norm0, norm1, norm2, norm3, norm4, norm5, norm6, norm7);

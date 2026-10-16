@@ -15,16 +15,23 @@ namespace mra {
       T* result_norm,
       const std::array<T, Key<NDIM>::num_children()>& child_norms,
       size_type blockid,
-      size_type K)
+      size_type K,
+      bool is_root)
     {
       const bool is_t0 = (0 == thread_id());
-      T norm = normf(n);
+      /* norms are passed up the tree squared (a sum over all nodes of the
+       * compressed tree) and only the root takes the square root */
+      SHARED T node_normsq;
+      sumabssq(n, &node_normsq);
+      /* wait for all threads to contribute */
+      SYNCTHREADS();
       if (is_t0) {
-        /* thread 0 adds the child norms and publishes the result */
+        /* thread 0 adds the children's squared norms and publishes the result */
+        T normsq = node_normsq;
         for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
-          norm += child_norms[i];
+          normsq += child_norms[i];
         }
-        *result_norm = norm;
+        *result_norm = is_root ? std::sqrt(normsq) : normsq;
       }
     }
 
@@ -43,20 +50,29 @@ namespace mra {
       SHARED DenseTensorView<const T, NDIM> n;
       SHARED std::array<T, Key<NDIM>::num_children()> block_child_norms;
       SHARED size_type blockid;
-      // Zero-function entries of result_norms are pre-filled with 0.0
-      // host-side (see mra/tasks/norm.h) since no block touches them here.
-      for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
+      SHARED bool is_zero;
+      // One block per function, including functions that are zero at this node:
+      // their children can still carry coefficients, whose norms must be passed up.
+      for (size_type pos = blockIdx.x; pos < N; pos += gridDim.x) {
         if (is_team_lead()) {
-          // node has exactly n_nonzero non-zero entries, so this always
-          // finds a valid function id -- see submit_norm_kernel.
-          blockid = find_nth_nonzero(N, pos, node);
-          n = node(blockid);
+          blockid = pos;
+          is_zero = node.is_zero(blockid);
+          if (!is_zero) n = node(blockid);
           for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
             block_child_norms[i] = (child_norms[i] != nullptr) ? child_norms[i][blockid] : T(0.0);
           }
         }
         SYNCTHREADS();
-        norm_kernel_impl<T, NDIM>(n, &result_norms[blockid], block_child_norms, blockid, K);
+        if (is_zero) {
+          if (is_team_lead()) {
+            T normsq = 0.0;
+            for (int i = 0; i < Key<NDIM>::num_children(); ++i) normsq += block_child_norms[i];
+            result_norms[blockid] = (key.level() == 0) ? std::sqrt(normsq) : normsq;
+          }
+        } else {
+          norm_kernel_impl<T, NDIM>(n, &result_norms[blockid], block_child_norms, blockid, K, key.level() == 0);
+        }
+        SYNCTHREADS(); // shared state is rewritten in the next iteration
       }
     }
   } // namespace detail
@@ -75,7 +91,7 @@ namespace mra {
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    CALL_KERNEL(detail::norm_kernel, n_nonzero, thread_dims, 0, stream,
+    CALL_KERNEL(detail::norm_kernel, N, thread_dims, 0, stream,
         (in, result_norms.data(), child_norms, N, n_nonzero, K, key));
     checkSubmit();
   }
