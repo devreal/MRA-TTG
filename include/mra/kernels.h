@@ -17,5 +17,6 @@
 #include "mra/kernels/convolution.h"
 #include "mra/kernels/truncate.h"
 #include "mra/kernels/inner_product.h"
+#include "mra/kernels/transform_functions.h"
 
 #endif // MRA_KERNELS_H
