@@ -36,10 +36,17 @@ namespace mra {
       constexpr auto num_children = Key<NDIM>::num_children();
       SHARED DenseTensorView<T, NDIM> n;
       if (node.is_zero(pos)) {
+        /* nothing to drop here, but a zero node whose children hold coefficients
+         * stays part of the tree: report it as kept so the parent keeps it as an
+         * inner node of that function */
         if (is_team_lead()) {
-          kept[pos] = T(0);
+          bool any_child_kept = false;
+          for (size_type c = 0; c < num_children; ++c) {
+            if (child_kept[c] != nullptr && child_kept[c][pos] != T(0.0)) any_child_kept = true;
+          }
+          kept[pos] = any_child_kept ? T(1.0) : T(0.0);
         }
-        return; // skip zero-function entries
+        return;
       }
       if (is_team_lead()) {
         n = node(pos);

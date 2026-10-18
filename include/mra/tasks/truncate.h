@@ -134,7 +134,7 @@ namespace mra {
                             const kept_tensor_type& child4, const kept_tensor_type& child5,
                             const kept_tensor_type& child6, const kept_tensor_type& child7,
                             mra::FunctionsCompressedNode<T, NDIM>&& node) -> TASKTYPE {
-      assert(!node.empty());
+      // node may be empty (zero for all functions) if it only holds the tree together
       constexpr const size_type out_terminal = num_children;
       const size_type N = fns->num_functions(key);
       //std::cout << "MERGE " << key << " empty=" << node.empty() << std::endl;
@@ -151,9 +151,10 @@ namespace mra {
       const T tol = mra::truncate_tol(key, thresh, cell_min_width, truncate_mode);
 
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(node.coeffs().buffer(), kept.buffer(),
+      auto input = ttg::device::Input(kept.buffer(),
                                       child0.buffer(), child1.buffer(), child2.buffer(), child3.buffer(),
                                       child4.buffer(), child5.buffer(), child6.buffer(), child7.buffer());
+      if (!node.empty()) input.add(node.coeffs().buffer());
       co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
