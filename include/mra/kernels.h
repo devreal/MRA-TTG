@@ -20,5 +20,6 @@
 #include "mra/kernels/transform_functions.h"
 #include "mra/kernels/multiply_broadcast.h"
 #include "mra/kernels/square.h"
+#include "mra/kernels/merge.h"
 
 #endif // MRA_KERNELS_H
