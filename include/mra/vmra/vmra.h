@@ -209,6 +209,22 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
           }
         }
       }
+      if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
+        /* The status of every function, also where no function has a leaf here and
+         * the node carries no coefficients (statuses default to Inner): a function
+         * without a node at this key ended above (Invalid). */
+        for (size_type fnid = 0; fnid < N; ++fnid) {
+          const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
+          auto accessor = coeffs.find(mad_key);
+          if (accessor.get() == coeffs.end()) {
+            result.set_leaf(fnid, LeafStatus::Invalid);
+          } else if (accessor.get()->second.is_leaf()) {
+            result.set_leaf(fnid, LeafStatus::Leaf);
+          } else {
+            result.set_leaf(fnid, LeafStatus::Inner);
+          }
+        }
+      }
       if (do_send) {
         ttg::send<0>(key, std::move(result));
       }
