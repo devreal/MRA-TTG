@@ -240,10 +240,10 @@ namespace mra {
         parent_to_child(D, right, key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
         parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
 
-        transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp_result, transform_result, axis);
+        transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::LEFT_RMT), tmp_result, transform_result, axis);
         deriv += transform_result;
         //std::cout << "BOUNDARY " << key << " axis " << axis << " right_tmp " << normf(right_tmp) << " deriv " << normf(deriv) << std::endl;
-        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp_result, transform_result, axis);
+        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::LEFT_R0T), tmp_result, transform_result, axis);
         deriv += transform_result;
         //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
       }

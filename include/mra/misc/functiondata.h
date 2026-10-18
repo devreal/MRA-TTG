@@ -42,8 +42,6 @@ namespace mra {
         // TODO: add quad_x and corresponding functions
 
         void make_deriv_op(){
-            bc_left = BCType::BC_ZERO;
-            bc_right = BCType::BC_ZERO;
             auto deriv_op_view = operators.current_view();
 
             // Operator blocks
@@ -222,7 +220,8 @@ namespace mra {
 
     public:
 
-        FunctionData(size_type K)
+        /// bc: boundary condition of the derivative operators, on both sides of every axis
+        FunctionData(size_type K, BCType bc = BCType::BC_ZERO)
         : K(K)
         , phi(K, K)
         , phiT(K, K)
@@ -231,6 +230,8 @@ namespace mra {
         , HG(2*K, 2*K)
         , HGT(2*K, 2*K)
         , operators(DerivOp::COUNT, K, K)
+        , bc_left(bc)
+        , bc_right(bc)
         {
             make_phi();
             make_phiT();
