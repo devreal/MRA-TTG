@@ -312,17 +312,18 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
           }
 
         } else {
+          /* In compressed form, wavelet coefficients live on interior nodes: a node is
+           * interior for this function if it holds coefficients or has children. A
+           * zero node without children is a leaf of this function, which MRA does not
+           * store; its parent records it via is_child_leaf (and adds it as an empty
+           * leaf with add_leaves). Writing it here as well would race with that. */
+          has_children = !node.is_zero(fnid) || !node.is_all_child_leaf(fnid);
+          if (!has_children && key.level() > 0) continue;   // except the root of a zero function
           if (!node.is_zero(fnid)) {
             mad_tensor = madness::Tensor<T>(dims);
             auto mra_subview = node.coeffs_view(fnid);
             std::copy_n(mra_subview.data(), mad_tensor.size(), mad_tensor.ptr());
           }
-
-          /* In MRA compressed form, leaf-level zero nodes are not stored; the
-           * parent records them via is_child_leaf.  MADNESS requires has_children
-           * to reflect the actual tree structure, so we conservatively set it true
-           * for every stored compressed node. */
-          has_children = true;
         }
 
         fn_impl->get_coeffs().replace(
@@ -334,7 +335,7 @@ auto make_vmra_store(std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
          * Instantiate them explicitly.
          */
         if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
-          if (add_leaves && !node.is_zero(fnid)) {
+          if (add_leaves && has_children) {
             for (auto child : children(key)) {
               if (node.is_child_leaf(fnid, child)) {
                 const auto mad_child_key = child.to_madness_key();
