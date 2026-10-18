@@ -16,6 +16,7 @@
 #include "mra/tasks/extract.h"
 #include "mra/tasks/convolution.h"
 #include "mra/tasks/truncate.h"
+#include "mra/tasks/inner_product.h"
 
 
 #endif // HAVE_TASKS_H

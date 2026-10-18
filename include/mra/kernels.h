@@ -16,5 +16,6 @@
 #include "mra/kernels/simple_norm.h"
 #include "mra/kernels/convolution.h"
 #include "mra/kernels/truncate.h"
+#include "mra/kernels/inner_product.h"
 
 #endif // MRA_KERNELS_H

@@ -335,6 +335,18 @@ namespace mra {
       detail::reduce_block(s, sum, std::min(a.size(), static_cast<size_type>(block_size())));
     }
 
+    /// Block-wide sum of a[i]*b[i] into *sum; a and b must have the same size.
+    /// As with sumabssq, *sum is only valid after a SYNCTHREADS().
+    template <typename accumulatorT>
+    SCOPE void sumprod(const concepts::TensorView auto& a, const concepts::TensorView auto& b, accumulatorT* sum) {
+      accumulatorT s = 0.0;
+      /* every thread computes a partial sum */
+      foreach_idx(a, [&](size_type i) mutable {
+        s += accumulatorT(a[i])*accumulatorT(b[i]);
+      });
+      detail::reduce_block(s, sum, std::min(a.size(), static_cast<size_type>(block_size())));
+    }
+
 
     /// Compute Frobenius norm ... still needs specializing for complex
     SCOPE auto normf(const concepts::TensorView auto& a) {
