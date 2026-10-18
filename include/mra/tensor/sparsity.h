@@ -74,6 +74,23 @@ namespace mra {
     }
 
 
+    /**
+     * Like sparsity_to_bytes, but writes only the entries of dest that differ.
+     * dest may be read concurrently, e.g., the host buffer of a tensor that several
+     * tasks read (Tensor::current_view() refreshes it even on const tensors): an
+     * entry is never transiently overwritten, and a destination that is already
+     * up to date is not written at all.
+     */
+    template<typename SparsityT>
+    void sparsity_update_bytes(const SparsityT& s, SparsityState* dest, size_type n) {
+      thread_local std::vector<SparsityState> scratch;
+      scratch.resize(n);
+      sparsity_to_bytes(s, scratch.data(), n);
+      for (size_type i = 0; i < n; ++i) {
+        if (dest[i] != scratch[i]) dest[i] = scratch[i];
+      }
+    }
+
     template<typename ViewT, typename PredT>
     SCOPE size_type find_nth_pred(size_type N, size_type pos,
                                   const ViewT& view, PredT&& pred) {

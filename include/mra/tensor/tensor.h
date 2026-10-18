@@ -115,10 +115,11 @@ namespace mra {
           // Write directly into the tensor's own host buffer -- no need to
           // stage through a pinned MockTensor buffer when the destination is
           // already host memory.
+          // Other tasks may be reading the same tensor concurrently: update only entries that changed.
           auto& mutable_tensor = const_cast<std::decay_t<S>&>(tensor);
-          detail::sparsity_to_bytes(mutable_tensor.sparsity(),
-                                     reinterpret_cast<detail::SparsityState*>(mutable_tensor.buffer().host_ptr()),
-                                     mutable_tensor.dim(0));
+          detail::sparsity_update_bytes(mutable_tensor.sparsity(),
+                                        reinterpret_cast<detail::SparsityState*>(mutable_tensor.buffer().host_ptr()),
+                                        mutable_tensor.dim(0));
         }
       }
     }
