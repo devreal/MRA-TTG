@@ -4,6 +4,8 @@
  *  - make_transform (with and without make_truncate)
  *  - FunctionVector (store, feed with and without keep)
  *  - make_multiply_broadcast
+ *  - make_square, and the density sum_i occ_i f_i^2 (square, compress, transform)
+ *  - make_derivative_adaptive, and the kinetic-energy matrix built from it
  *
  * The functions are Gaussians with different centers and exponents so that
  * their trees differ. Every MADNESS function written back by make_vmra_store
@@ -16,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <madness/mra/mra.h>
@@ -84,7 +87,8 @@ struct Graph {
   mra::size_type K;
   mra::FunctionData<T, NDIM> functiondata;
 
-  explicit Graph(mra::size_type K) : K(K), functiondata(K) {}
+  /* free boundary conditions for the derivative, the MADNESS default */
+  explicit Graph(mra::size_type K) : K(K), functiondata(K, mra::FunctionData<T, NDIM>::BC_FREE) {}
 
   void add(auto&& tt) { tts.push_back(std::move(tt)); }
 
@@ -348,6 +352,112 @@ static void test_multiply_broadcast(madness::World& world, mra::size_type K, rea
   check_well_formed(world, result, "multiply_broadcast");
 }
 
+static auto make_domain() {
+  auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
+  D[0].set_cube(-Length, Length);
+  return ttg::Buffer<mra::Domain<NDIM>>(std::move(D), 1);
+}
+
+static void test_square(madness::World& world, mra::size_type K, vec_t& f) {
+  const mra::size_type N = f.size();
+  auto db = make_domain();
+  madness::reconstruct(world, f);
+
+  /* f_i^2 */
+  {
+    Graph G(K);
+    ReconstructedEdge f_e, sq_e;
+    madness::reconstruct(world, f);
+    G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
+    G.add(mra::make_square<T, NDIM>(db, make_functions(N), G.functiondata, K, f_e, sq_e));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, sq_e));
+    G.execute();
+    vec_t ref = madness::square(world, f);
+    check_close("square", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "square");
+  }
+
+  /* sum_i occ_i f_i^2, as SCF::make_density */
+  {
+    madness::Tensor<double> occ(static_cast<long>(N), 1L);
+    for (long i = 0; i < long(N); ++i) occ(i, 0) = 2.0 - 0.5*i;
+    Graph G(K);
+    ReconstructedEdge f_e, sq_e;
+    CompressedEdge c_e, rho_e;
+    madness::reconstruct(world, f);
+    G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
+    G.add(mra::make_square<T, NDIM>(db, make_functions(N), G.functiondata, K, f_e, sq_e));
+    G.add(mra::make_compress(make_functions(N), K, false, G.functiondata, sq_e, c_e, "compress"));
+    G.add(mra::make_transform<T, NDIM>(make_functions(N), make_functions(1), K, device_matrix(occ), c_e, rho_e));
+    vec_t rho = empty_like(f.front(), 1);
+    G.add(mra::vmra::make_vmra_store(rho, rho_e, true /* add_leaves */));
+    G.execute();
+    vec_t vsq = madness::square(world, f);
+    madness::compress(world, vsq);
+    vec_t ref = {madness::copy(vsq[0]).scale(occ(0, 0))};
+    for (long i = 1; i < long(N); ++i) ref[0].gaxpy(1.0, vsq[i], occ(i, 0));
+    check_close("density", max_diff_norm(world, ref, rho), max_norm(world, ref));
+    check_well_formed(world, rho, "density");
+  }
+}
+
+static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
+  const mra::size_type N = f.size();
+  auto db = make_domain();
+  auto fns = make_functions(N);
+  madness::reconstruct(world, f);
+  auto grad = madness::gradient_operator<double, 3>(world);
+
+  /* each axis, against madness::Derivative */
+  for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+    const std::string what = "derivative axis " + std::to_string(axis);
+    Graph G(K);
+    ReconstructedEdge f_e, d_e;
+    madness::reconstruct(world, f);
+    G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
+    G.add(mra::make_derivative_adaptive<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, d_e));
+    G.execute();
+    vec_t ref = madness::apply(world, *grad[axis], f);
+    check_close(what, max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, what);
+  }
+
+  /* kinetic-energy matrix 1/2 sum_axis <d f_i|d f_j>, the three derivatives reading one input edge */
+  {
+    Graph G(K);
+    ReconstructedEdge f_e;
+    std::array<ReconstructedEdge, NDIM> d_e;
+    std::array<CompressedEdge, NDIM> c_e;
+    std::array<ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>>, NDIM> m_e;
+    madness::Tensor<double> kin(static_cast<long>(N), static_cast<long>(N));
+    std::mutex m;
+    madness::reconstruct(world, f);
+    G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
+    for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+      G.add(mra::make_derivative_adaptive<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e[axis]));
+      G.add(mra::make_compress(fns, K, false, G.functiondata, d_e[axis], c_e[axis], "compress"));
+      G.add(mra::make_matrix_inner<T, NDIM>(fns, fns, K, c_e[axis], c_e[axis], m_e[axis]));
+      G.add(ttg::make_tt([&](const mra::Key<NDIM>&, const mra::DenseTensor<T, 2>& r) {
+        const T* data = r.current_view().data();
+        std::lock_guard<std::mutex> lock(m);
+        for (mra::size_type i = 0; i < N; ++i)
+          for (mra::size_type j = 0; j < N; ++j) kin(i, j) += 0.5*data[i*N + j];
+      }, ttg::edges(m_e[axis]), ttg::edges(), "sink"));
+    }
+    G.execute();
+    world.gop.sum(kin.ptr(), kin.size());
+    madness::Tensor<double> ref(static_cast<long>(N), static_cast<long>(N));
+    for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+      vec_t d = madness::apply(world, *grad[axis], f);
+      ref += 0.5*madness::matrix_inner(world, d, d);
+    }
+    check_close("kinetic-energy matrix", (kin - ref).absmax(), ref.absmax());
+  }
+}
+
 int main(int argc, char** argv) {
   auto opt = mra::OptionParser(argc, argv);
   mra::size_type K = opt.parse("-K", 8);
@@ -377,6 +487,8 @@ int main(int argc, char** argv) {
     test_transform(world, K, f, thresh);
     test_function_vector(world, K, f);
     test_multiply_broadcast(world, K, a, f);
+    test_square(world, K, f);
+    test_derivative(world, K, f);
 
     if (ttg::default_execution_context().rank() == 0) {
       std::cout << (failures == 0 ? "All tests passed" : std::to_string(failures) + " test(s) failed") << std::endl;
