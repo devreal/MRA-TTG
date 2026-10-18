@@ -31,6 +31,10 @@ target_link_libraries(mra-generate-op1d-reference-dump PUBLIC MADworld MADtensor
 add_executable(mra-mad-vmra-host-parsec mad_vmra_test.cc ../autocorr.cc)
 target_link_libraries(mra-mad-vmra-host-parsec PUBLIC MADworld MADtensor mra::host)
 
+# inner products, transform, FunctionVector, multiply_broadcast; non-zero exit on failure
+add_executable(mra-mad-function-ops-host-parsec mad_function_ops_test.cc ../autocorr.cc)
+target_link_libraries(mra-mad-function-ops-host-parsec PUBLIC MADworld MADtensor MADmra mra::host)
+
 if (HAVE_CUDA OR HAVE_HIP)
   mra_generate_gpu_wrappers(
     SOURCES mad_derivative_test.cc
@@ -47,6 +51,12 @@ if (HAVE_CUDA OR HAVE_HIP)
     SOURCES mad_vmra_test.cc
     CUDA_OUTPUT_VAR _vmra_cu
     HIP_OUTPUT_VAR  _vmra_hip
+  )
+
+  mra_generate_gpu_wrappers(
+    SOURCES mad_function_ops_test.cc
+    CUDA_OUTPUT_VAR _function_ops_cu
+    HIP_OUTPUT_VAR  _function_ops_hip
   )
 
   # CUDA only for now: generate_op1d_pure_cuda.h (repo root) is written
@@ -69,6 +79,9 @@ if (HAVE_CUDA)
   add_executable(mra-mad-vmra-device-cuda-parsec ${_vmra_cu})
   target_link_libraries(mra-mad-vmra-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
 
+  add_executable(mra-mad-function-ops-device-cuda-parsec ${_function_ops_cu})
+  target_link_libraries(mra-mad-function-ops-device-cuda-parsec PUBLIC MADworld MADtensor MADmra mra::cuda)
+
   # Deliberately does NOT need mra::cuda's TTG task-graph headers -- see this
   # source's header comment for why staying dependency-light here matters.
   # Still links mra::cuda (not mra::host) for an ABI-consistent
@@ -88,4 +101,7 @@ if (HAVE_HIP)
 
   add_executable(mra-mad-vmra-device-hip-parsec ${_vmra_hip})
   target_link_libraries(mra-mad-vmra-device-hip-parsec PUBLIC MADworld MADtensor MADmra mra::hip)
+
+  add_executable(mra-mad-function-ops-device-hip-parsec ${_function_ops_hip})
+  target_link_libraries(mra-mad-function-ops-device-hip-parsec PUBLIC MADworld MADtensor MADmra mra::hip)
 endif()
