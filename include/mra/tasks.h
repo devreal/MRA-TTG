@@ -19,6 +19,7 @@
 #include "mra/tasks/inner_product.h"
 #include "mra/tasks/transform.h"
 #include "mra/tasks/functionvector.h"
+#include "mra/tasks/multiply_broadcast.h"
 
 
 #endif // HAVE_TASKS_H
