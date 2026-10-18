@@ -19,5 +19,6 @@
 #include "mra/kernels/inner_product.h"
 #include "mra/kernels/transform_functions.h"
 #include "mra/kernels/multiply_broadcast.h"
+#include "mra/kernels/square.h"
 
 #endif // MRA_KERNELS_H
