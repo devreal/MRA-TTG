@@ -18,6 +18,7 @@
 #include "mra/tasks/truncate.h"
 #include "mra/tasks/inner_product.h"
 #include "mra/tasks/transform.h"
+#include "mra/tasks/functionvector.h"
 
 
 #endif // HAVE_TASKS_H
