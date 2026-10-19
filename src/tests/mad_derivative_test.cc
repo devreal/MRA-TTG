@@ -221,7 +221,7 @@ void compare_mra_madness(const auto& madfunc, const auto& mramap, std::string na
         for (int i = 0; i < mra_view.dim(0); ++i) {
           for (int j = 0; j < mra_view.dim(1); ++j) {
             for (int k = 0; k < mra_view.dim(2); ++k) {
-              if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision) {
+              if (std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) > precision*std::max(T(1), mad_norm)) {
                 std::cout << "Mismatch for " << key << " at " << i << " " << j << " " << k << " : MRA "
                           << mra_view(i, j, k) << " MADNESS " << mad_coeff.coeff()(i, j, k)
                           << "(diff: " << std::abs(mra_view(i, j, k) - mad_coeff.coeff()(i, j, k)) << ")" << std::endl;
@@ -265,11 +265,9 @@ void compare_mra_madness(const auto& madfunc, const auto& mramap, std::string na
 template<typename T, mra::Dimension NDIM>
 void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T precision, int max_level,
                      T verification_precision, int argc, char** argv) {
-  auto functiondata = mra::FunctionData<T,NDIM>(K);
+  auto functiondata = mra::FunctionData<T,NDIM>(K, mra::FunctionData<T,NDIM>::BC_FREE); // as MADNESS below
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6,6);
-  T g1 = 0;
-  T g2 = 0;
   bool is_ns = false;
 
   auto pmap = make_procmap<NDIM>(N, 1);
@@ -319,8 +317,8 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
   auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
   // D(R(C(P)))
   auto extract_u = make_extract(reconstruct_result, umap, "extract_u");
-  using derivative_type = decltype(make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis_a,
-                                      FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap));
+  using derivative_type = decltype(make_derivative<T, NDIM>(db, gaussians, functiondata, K, axis_a, reconstruct_result,
+                                                            derivative_result, "derivative", pmap, dmap));
   using extract_type = decltype(make_extract(derivative_result, cmap));
   std::array<derivative_type, NDIM> derivatives;
   std::array<extract_type, NDIM> extracts;
@@ -333,10 +331,8 @@ void test_derivative(std::size_t N, size_type K, int axis_a, int axis_b, T preci
        ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out;
     std::cout << "Computing derivative in axis " << ax << std::endl;
-    derivatives[ax] = make_derivative(gaussians, K, deriv_in, out, functiondata, db, g1, g2, ax,
-                                      FunctionData<T, NDIM>::BC_DIRICHLET,
-                                      FunctionData<T, NDIM>::BC_DIRICHLET,
-                                      std::string("derivative")+std::to_string(ax), pmap, dmap);
+    derivatives[ax] = make_derivative<T, NDIM>(db, gaussians, functiondata, K, ax, deriv_in, out,
+                                               std::string("derivative")+std::to_string(ax), pmap, dmap);
     extracts[ax] = make_extract(out, cmaps[ax], std::string("extract_deriv")+std::to_string(ax));
     deriv_in = out;
   }

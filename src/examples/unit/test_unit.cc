@@ -12,8 +12,6 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6.0,6.0);
-  T g1 = 0;
-  T g2 = 0;
   Dimension axis = 0;
   bool is_ns = false;
 
@@ -50,8 +48,8 @@ void test(std::size_t N, std::size_t K, int max_level) {
   auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result);
   auto gaxpy = make_gaxpy(T(1.0), T(-1.0), gaussians, K, compress_result, compress_result, gaxpy_result);
   auto multiply = make_multiply(gaussians, functiondata, db, K, reconstruct_result, reconstruct_result, multiply_result);
-  auto derivative = make_derivative(gaussians, K, multiply_result, derivative_result, functiondata, db, g1, g2, axis,
-                                    FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative");
+  auto derivative = make_derivative<T, NDIM>(db, gaussians, functiondata, K, axis, multiply_result, derivative_result,
+                                             "derivative");
   auto printer =   make_printer(project_result,    "projected    ", false);
   auto printer2 =  make_printer(compress_result,   "compressed   ", false);
   auto printer3 =  make_printer(reconstruct_result,"reconstructed", false);

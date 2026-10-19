@@ -20,8 +20,6 @@ void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axi
   auto functiondata = mra::FunctionData<T,NDIM>(K);
   auto D = std::make_unique<mra::Domain<NDIM>[]>(1);
   D[0].set_cube(-6,6);
-  T g1 = 0;
-  T g2 = 0;
 
 
   auto pmap = make_procmap<NDIM>(N, num_batches);
@@ -60,8 +58,8 @@ void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axi
   // // R(C(P))
   auto reconstruct = make_reconstruct(gaussians, K, false, functiondata, compress_result, reconstruct_result, "reconstruct", pmap, dmap);
 
-  using derivative_type = decltype(make_derivative(gaussians, K, reconstruct_result, derivative_result, functiondata, db, g1, g2, axis_a,
-                                      FunctionData<T, NDIM>::BC_DIRICHLET, FunctionData<T, NDIM>::BC_DIRICHLET, "derivative", pmap, dmap));
+  using derivative_type = decltype(make_derivative<T, NDIM>(db, gaussians, functiondata, K, axis_a, reconstruct_result,
+                                                            derivative_result, "derivative", pmap, dmap));
   std::array<derivative_type, NDIM> derivatives;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> deriv_out;
   ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> deriv_in = reconstruct_result;
@@ -71,10 +69,8 @@ void test_derivative(std::size_t N, size_type K, Dimension axis_a, Dimension axi
        (axis_a < axis_b) ? (ax <= axis_b) : (ax >= axis_b);
        ax = (axis_a < axis_b) ? ax + 1 : ax - 1) {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out;
-    derivatives[ax] = make_derivative(gaussians, K, deriv_in, out, functiondata, db, g1, g2, ax,
-                                      FunctionData<T, NDIM>::BC_DIRICHLET,
-                                      FunctionData<T, NDIM>::BC_DIRICHLET,
-                                      std::string("derivative")+std::to_string(ax), pmap, dmap);
+    derivatives[ax] = make_derivative<T, NDIM>(db, gaussians, functiondata, K, ax, deriv_in, out,
+                                               std::string("derivative")+std::to_string(ax), pmap, dmap);
     deriv_in = out;
   }
   /* the final edge output */

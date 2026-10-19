@@ -5,7 +5,7 @@
  *  - FunctionVector (store, feed with and without keep)
  *  - make_multiply_broadcast
  *  - make_square, and the density sum_i occ_i f_i^2 (square, compress, transform)
- *  - make_derivative_adaptive, and the kinetic-energy matrix built from it
+ *  - make_derivative, and the kinetic-energy matrix built from it
  *
  * The functions are Gaussians with different centers and exponents so that
  * their trees differ. Every MADNESS function written back by make_vmra_store
@@ -416,7 +416,7 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
     ReconstructedEdge f_e, d_e;
     madness::reconstruct(world, f);
     G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
-    G.add(mra::make_derivative_adaptive<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e));
+    G.add(mra::make_derivative<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e));
     vec_t result = empty_like(f.front(), N);
     G.add(mra::vmra::make_vmra_store(result, d_e));
     G.execute();
@@ -437,7 +437,7 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
     madness::reconstruct(world, f);
     G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
     for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
-      G.add(mra::make_derivative_adaptive<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e[axis]));
+      G.add(mra::make_derivative<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e[axis]));
       G.add(mra::make_compress(fns, K, false, G.functiondata, d_e[axis], c_e[axis], "compress"));
       G.add(mra::make_matrix_inner<T, NDIM>(fns, fns, K, c_e[axis], c_e[axis], m_e[axis]));
       G.add(ttg::make_tt([&](const mra::Key<NDIM>&, const mra::DenseTensor<T, 2>& r) {
