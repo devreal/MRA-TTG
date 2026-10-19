@@ -1180,7 +1180,9 @@ namespace mra {
       const bool reuse_in_node = in_node_from_owned && !in_node.invalid() && !in_node.empty() &&
                                   detail::sparsity_equal(sparsity, in_node.sparsity());
       if (reuse_in_node) {
-        out = std::move(in_node_owned);
+        // not `out = std::move(in_node_owned)`: that would also move TTG's
+        // data-copy bookkeeping out of the task's input (see move_contents_from)
+        out.move_contents_from(std::move(in_node_owned));
         out.set_ns();
       } else {
         out.allocate(sparsity, K, ttg::scope::Allocate);

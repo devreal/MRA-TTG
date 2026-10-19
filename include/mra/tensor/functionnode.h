@@ -724,6 +724,21 @@ namespace mra {
         FunctionsCompressedNode& operator=(FunctionsCompressedNode&& other) = default;
         FunctionsCompressedNode& operator=(const FunctionsCompressedNode& other) = delete;
 
+        /**
+         * Move the node's contents (coefficients, key, sparsity, child info) out
+         * of other, but NOT the ttg::TTValue base: the defaulted move operators
+         * also transfer TTG's data-copy bookkeeping (readers/mutable tag, next
+         * task, refcount). Use this when other is a task input owned by TTG and
+         * this node is a local that will be sent on: a plain move would make the
+         * local look like a mutable, already-tracked copy (so TTG tries to copy
+         * it on send) and leave the task's input copy with zeroed bookkeeping.
+         */
+        void move_contents_from(FunctionsCompressedNode&& other) {
+          base_type::operator=(std::move(static_cast<base_type&>(other)));
+          m_child_is_leaf = std::move(other.m_child_is_leaf);
+          m_ns = other.m_ns;
+        }
+
 
         void set_child_leaf(int fn, int child, bool value = true) {
           m_child_is_leaf.set_child_leaf(fn, child, value);
