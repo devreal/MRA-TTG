@@ -4,6 +4,7 @@
 #include <array>
 #include <memory>
 #include <ttg.h>
+#include <utility>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/tensor/tensor.h"
@@ -40,7 +41,7 @@ namespace mra {
   auto make_transform(const std::shared_ptr<FunctionSetIn>& fns_in,
                       const std::shared_ptr<FunctionSetOut>& fns_out,
                       size_type K,
-                      std::shared_ptr<mra::DenseTensor<T, 2>> U,
+                      const std::shared_ptr<mra::DenseTensor<T, 2>> U,
                       ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
                       ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
                       const std::string& name = "transform",
@@ -145,7 +146,7 @@ namespace mra {
         }
         if (n_nonzero > 0) {
 #ifndef MRA_ENABLE_HOST
-          auto input = ttg::device::Input(out.coeffs().buffer(), U->buffer());
+          auto input = ttg::device::Input(out.coeffs().buffer(), std::as_const(*U).buffer());
           if (!in_node.empty()) input.add(in_node.coeffs().buffer());
           co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
@@ -153,7 +154,7 @@ namespace mra {
           auto sparseman = make_sparsity_manager(out);
           sparseman.populate_device_sparsity();
           submit_transform_functions_kernel<T, NDIM>(key, in_node.coeffs().current_view(), out_view,
-                                                     U->buffer().current_device_ptr(), N, M, n_nonzero, K,
+                                                     std::as_const(*U).buffer().current_device_ptr(), N, M, n_nonzero, K,
                                                      ttg::device::current_stream());
         }
 #ifndef MRA_ENABLE_HOST
