@@ -116,8 +116,8 @@ namespace mra {
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     multiply_kernel(
       const Domain<NDIM>& D,
-      const Key<NDIM>& keyA,
-      const Key<NDIM>& keyB,
+      const Key<NDIM> keyA,
+      const Key<NDIM> keyB,
       const concepts::TensorView<NDIM+1> auto nodeA_view,
       const concepts::TensorView<NDIM+1> auto nodeB_view,
       concepts::TensorView<NDIM+1> auto nodeR_view,

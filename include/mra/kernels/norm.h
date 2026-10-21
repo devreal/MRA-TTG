@@ -44,7 +44,7 @@ namespace mra {
       size_type N,
       size_type n_nonzero,
       size_type K,
-      const Key<NDIM>& key)
+      const Key<NDIM> key)
     {
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
       SHARED DenseTensorView<const T, NDIM> n;
