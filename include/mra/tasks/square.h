@@ -50,11 +50,14 @@ namespace mra {
       node_type result = (n_nonzero > 0) ? node_type(key, sparsity, K, ttg::scope::Allocate) : node_type(key, N);
       for (size_type j = 0; j < N; ++j) result.set_leaf(j, node.leaf_status(j));
 
+      /* scratch must outlive the kernel: destroying a buffer releases its device memory
+       * right away, while the kernel launched below is still running */
+      ttg::Buffer<T, DeviceAllocator<T>> tmp;
       if (n_nonzero > 0) {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        ttg::Buffer<T, DeviceAllocator<T>> tmp(square_tmp_size<NDIM>(K)*n_nonzero, TempScope);
+        tmp = ttg::Buffer<T, DeviceAllocator<T>>(square_tmp_size<NDIM>(K)*n_nonzero, TempScope);
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(db, phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp,
                                         node.coeffs().buffer(), result.coeffs().buffer());

@@ -150,13 +150,16 @@ namespace mra {
                                       : node_type(key, N);
       for (size_type j = 0; j < N; ++j) result.set_leaf(j, status[j]);
 
+      /* scratch must outlive the kernels: destroying a buffer releases its device memory
+       * right away, while the kernels launched below are still running */
+      ttg::Buffer<T, DeviceAllocator<T>> mul_tmp, refine_tmp;
       if (n_leaf > 0 || refine_a || n_refine_b > 0) {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
         const auto& hg = functiondata.get_hg();
-        ttg::Buffer<T, DeviceAllocator<T>> mul_tmp(multiply_broadcast_tmp_size<NDIM>(K)*std::max<size_type>(n_leaf, 1), TempScope);
-        ttg::Buffer<T, DeviceAllocator<T>> refine_tmp(refine_tmp_size<NDIM>(K)*std::max<size_type>(std::max<size_type>(n_refine_b, refine_a), 1), TempScope);
+        mul_tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_broadcast_tmp_size<NDIM>(K)*std::max<size_type>(n_leaf, 1), TempScope);
+        refine_tmp = ttg::Buffer<T, DeviceAllocator<T>>(refine_tmp_size<NDIM>(K)*std::max<size_type>(std::max<size_type>(n_refine_b, refine_a), 1), TempScope);
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(db, phibar.buffer(), phi.buffer(), quad_x.buffer(), hg.buffer(),
                                         mul_tmp, refine_tmp);
