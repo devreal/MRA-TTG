@@ -13,7 +13,6 @@
 #include "mra/tensor/functionnode.h"
 #include "mra/kernels/derivative.h"
 #include "mra/kernels/merge.h"
-#include "mra/kernels/multiply_broadcast.h"
 
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
