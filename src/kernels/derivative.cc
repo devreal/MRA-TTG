@@ -9,9 +9,7 @@ namespace mra {
   void submit_derivative_kernel<double, 3>(
     const Domain<3>& D,
     const Key<3>& key,
-    const Key<3>& left,
-    const Key<3>& center,
-    const Key<3>& right,
+    const Key<3>* src_keys,
     const SparseTensorView<double, 3+1>& node_left,
     const SparseTensorView<double, 3+1>& node_center,
     const SparseTensorView<double, 3+1>& node_right,

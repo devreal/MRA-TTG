@@ -294,11 +294,13 @@ namespace mra {
         struct function_metadata {
           T sum = 0.0;
           LeafStatus status = LeafStatus::Inner;
+          Level origin = 0; //< the coefficients are those of the ancestor this many levels above the node's key
           //std::array<bool, Key<NDIM>::num_children()> is_child_leaf = { false };
           template<typename Archive>
           void serialize(Archive& ar){
             ar & sum;
             ar & status;
+            ar & origin;
             //ar & is_child_leaf;
           }
         };
@@ -307,6 +309,7 @@ namespace mra {
         friend std::ostream& operator<<(std::ostream& s, const FunctionsReconstructedNode<U,NDIM>& node);
 
         std::vector<function_metadata> m_metadata;
+        std::uint8_t m_flags = 0; //< flags of the operation that produced the node, not interpreted otherwise
 
       public:
         /* constructs an empty node without key information,
@@ -460,10 +463,37 @@ namespace mra {
           return m_metadata[i].sum;
         }
 
+        /**
+         * The coefficients of function i are those of the ancestor origin(i) levels above
+         * key(), not yet projected to key(). Only make_derivative sets this; every other
+         * operation produces and expects coefficients at key() (origin 0).
+         */
+        Level origin(size_type i) const {
+          return m_metadata[i].origin;
+        }
+
+        void set_origin(size_type i, Level levels_up) {
+          m_metadata[i].origin = levels_up;
+        }
+
+        /// key of the node that the coefficients of function i belong to
+        key_type origin_key(size_type i) const {
+          return this->key().parent(m_metadata[i].origin);
+        }
+
+        std::uint8_t flags() const {
+          return m_flags;
+        }
+
+        void set_flags(std::uint8_t flags) {
+          m_flags = flags;
+        }
+
         template <typename Archive>
         void serialize(Archive& ar) {
           base_type::serialize(ar);
           ar& this->m_metadata;
+          ar& this->m_flags;
         }
 
         template <typename Archive>

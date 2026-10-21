@@ -34,7 +34,9 @@ namespace mra {
     const size_type K,
     T* tmp)
     {
-      if (parent == child || parent.is_invalid() || child.is_invalid()) {
+      if (coeffs.data() == nullptr) {
+        result = T(0); // the function has no coefficients at parent
+      } else if (parent == child || parent.is_invalid() || child.is_invalid()) {
         result = coeffs;
       } else {
         fcube_for_mul(D, child, parent, coeffs, result_tmp, phibar, phi, quad_x, K, tmp);
@@ -324,9 +326,7 @@ namespace mra {
     GLOBALSCOPE void derivative_kernel(
       const Domain<NDIM>& D,
       const Key<NDIM> key,
-      const Key<NDIM> left,
-      const Key<NDIM> center,
-      const Key<NDIM> right,
+      const Key<NDIM>* src_keys,
       const concepts::TensorView<NDIM+1> auto node_left,
       const concepts::TensorView<NDIM+1> auto node_center,
       const concepts::TensorView<NDIM+1> auto node_right,
@@ -352,6 +352,7 @@ namespace mra {
 
       SHARED DenseTensorView<T, NDIM> deriv_view;
       SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
+      SHARED Key<NDIM> left, center, right;
       SHARED size_type blockid;
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         if (is_team_lead()) {
@@ -362,22 +363,31 @@ namespace mra {
           node_center_view = node_center(blockid);
           node_right_view = node_right(blockid);
           deriv_view = deriv(blockid);
+          /* the nodes the coefficients of this function belong to */
+          left = src_keys[3*blockid + 0];
+          center = src_keys[3*blockid + 1];
+          right = src_keys[3*blockid + 2];
         }
         SYNCTHREADS();
         derivative_kernel_impl<T, NDIM>(D, key, left, center, right, node_left_view, node_center_view, node_right_view,
           operators, deriv_view, phi, phibar, quad_x, tmp, pos, K, g1, g2, axis, bc_left, bc_right);
+        SYNCTHREADS(); // shared state is rewritten in the next iteration
       }
     }
 
   } // namespace detail
 
+  /**
+   * Derivative at key of every function that is non-zero in deriv. src_keys (device
+   * memory, 3 per function: left, center, right) holds the nodes that the coefficients
+   * of node_left, node_center, and node_right belong to, per function: they are
+   * projected from there to the left neighbor, to key, and to the right neighbor.
+   */
   template <typename T, Dimension NDIM>
   void submit_derivative_kernel(
     const Domain<NDIM>& D,
     const Key<NDIM>& key,
-    const Key<NDIM>& left,
-    const Key<NDIM>& center,
-    const Key<NDIM>& right,
+    const Key<NDIM>* src_keys,
     const concepts::TensorView<NDIM+1> auto node_left,
     const concepts::TensorView<NDIM+1> auto node_center,
     const concepts::TensorView<NDIM+1> auto node_right,
@@ -405,7 +415,7 @@ namespace mra {
 
     //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::derivative_kernel, n_nonzero, thread_dims, smem_size, stream,
-      (D, key, left, center, right, node_left, node_center, node_right, operators,
+      (D, key, src_keys, node_left, node_center, node_right, operators,
         deriv, phi, phibar, quad_x, tmp, N, n_nonzero, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
@@ -416,9 +426,7 @@ namespace mra {
   void submit_derivative_kernel<double, 3>(
     const Domain<3>& D,
     const Key<3>& key,
-    const Key<3>& left,
-    const Key<3>& center,
-    const Key<3>& right,
+    const Key<3>* src_keys,
     const SparseTensorView<double, 3+1>& node_left,
     const SparseTensorView<double, 3+1>& node_center,
     const SparseTensorView<double, 3+1>& node_right,
