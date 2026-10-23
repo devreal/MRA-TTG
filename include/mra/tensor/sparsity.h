@@ -114,6 +114,37 @@ namespace mra {
     }
 
     /**
+     * find_nth_allocated for all threads of one warp (all 32 must call it,
+     * all get the result): tests 32 entries per step with a ballot, so the
+     * lookup costs N/32 steps instead of an O(N) serial scan by the team
+     * lead while the rest of the block waits. CUDA only; elsewhere this is
+     * find_nth_allocated.
+     */
+    template<typename ViewT>
+    DEVSCOPE size_type find_nth_allocated_warp(size_type N, size_type pos, const ViewT& view) {
+#if defined(__CUDA_ARCH__)
+      const unsigned lane = thread_id() % 32;
+      size_type count = 0;
+      for (size_type base = 0; base < N; base += 32) {
+        const bool hit = base + lane < N && view.is_allocated(base + lane);
+        const unsigned mask = __ballot_sync(0xffffffffu, hit);
+        const size_type n = __popc(mask);
+        if (pos < count + n) {
+          /* the lane holding the (pos - count)-th set bit of mask */
+          const unsigned below = __popc(mask & ((1u << lane) - 1u));
+          const unsigned sel = __ballot_sync(0xffffffffu, hit && below == pos - count);
+          return base + __ffs(sel) - 1;
+        }
+        count += n;
+      }
+      assert(false && "find_nth_allocated_warp: pos out of range for the number of allocated entries in view");
+      return N;
+#else
+      return find_nth_allocated(N, pos, view);
+#endif
+    }
+
+    /**
      * Same as find_nth_nonzero, but for kernels whose skip condition ORs two
      * (or more) genuinely independent views' sparsity -- e.g. reconstruct's
      * node/from_parent, where neither view's own sparsity provably subsumes

@@ -332,7 +332,8 @@ namespace mra {
       ViewResult& result)  // size K, stores the sum
     {
 #ifdef MRA_HAVE_MMA
-      if constexpr (mra::is_ct_integral_v<decltype(K)>) {
+      // only K=8 is implemented (any other compile-time K uses the generic path)
+      if constexpr (std::is_same_v<std::decay_t<decltype(K)>, mra::Int<8>>) {
         // apply_conv_k's per-warp register capacity needs at least MinWarps
         // whole warps -- guaranteed by launching with apply_conv_min_threads(K)
         assert(block_size() % mma_traits<T>::WarpSize == 0 &&
