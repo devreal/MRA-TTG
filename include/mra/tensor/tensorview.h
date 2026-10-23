@@ -599,6 +599,51 @@ namespace mra {
     //TensorView& operator=(TensorView&& other) = default;
 
     /**
+     * Copy assignment from an lvalue of the same type.
+     *
+     * For a non-const T this copies values into the patch, regardless of whether
+     * the source is const or not: `a = b` must not change meaning with the
+     * constness of b. Previously only a templated operator handled non-const
+     * sources, so a `const TensorView&` source fell through to the implicit
+     * copy-assignment and silently rebound the pointer instead of writing values.
+     * For a const T there is nothing to write into, so this rebinds the view.
+     *
+     * Rebinding a non-const view goes through the move-assignments below,
+     * e.g. `s = DenseTensorView<T,NDIM>(ptr, dims);`.
+     *
+     * Device: assumes this operation is called by all threads in a block, synchronizes
+     * Host: assumes this operation is called by a single CPU thread
+     */
+    SCOPE TensorView& operator=(const TensorView& other) {
+      if constexpr (std::is_const_v<T>) {
+        m_dims = other.m_dims;
+        m_ptr = other.m_ptr;
+      } else {
+        if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #6");
+        if (other.data() == nullptr) {
+          foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
+        } else {
+          foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
+        }
+      }
+      return *this;
+    }
+
+    /**
+     * Move assignment: rebinds the view. Non-template, so an exact-type rvalue
+     * always binds here rather than to the copy-assignment above (rvalue-ref vs
+     * const lvalue-ref between two non-templates), without relying on nvcc's
+     * ranking of templated candidates. The templated overload below handles
+     * sources with different dimension types.
+     */
+    SCOPE TensorView& operator=(TensorView&& other) {
+      m_dims = other.m_dims;
+      m_ptr = other.m_ptr;
+      other.m_ptr = nullptr;
+      return *this;
+    }
+
+    /**
      * Move constructor for non-const TensorView from non-const TensorView.
      * A static assert protects from cases where the source is const and the T is not.
      * This overload catches assignments like:
@@ -774,46 +819,11 @@ namespace mra {
     /// Device: assumes this operation is called by all threads in a block, synchronizes
     /// Host: assumes this operation is called by a single CPU thread
     ///
-    /// Same nvcc EDG mis-ranking as the value_type-mismatch copy operator
-    /// below (see its comment), but for the OTHER copy path: since this
-    /// overload's argument type is exactly `TensorView` (same T, same Dims),
-    /// value_type always matches, so that exclusion trick doesn't apply
-    /// here -- instead exclude rvalue arguments directly via a forwarding
-    /// reference + is_lvalue_reference_v check, so an exact-type rebind like
-    /// `s = DenseTensorView<T,NDIM>(ptr, dims);` can ONLY match the
-    /// rvalue-ref move-assignment above, not this value-copy. Without this,
-    /// nvcc was preferring THIS operator for that rvalue, silently
-    /// value-copying INTO whatever garbage pointer `s` (freshly SHARED, not
-    /// yet bound) already held instead of rebinding it -- since that
-    /// garbage pointer is not reliably non-null, this shows up as "non-const
-    /// call with nullptr" either here or, if the garbage pointer happened to
-    /// look non-null, downstream (e.g. `s = 0.0;` right after, once `s` is
-    /// actually used) -- confirmed by tagging every "nullptr" THROW site in
-    /// this file and observing the fill-with-scalar operator's throw fire
-    /// instead of this one.
-    template<typename OtherT>
-    requires(!std::is_const_v<T> && std::is_same_v<std::remove_reference_t<OtherT>, TensorView>
-             && std::is_lvalue_reference_v<OtherT>)
-    SCOPE TensorView& operator=(OtherT&& other) {
-      if (this->data() == nullptr) THROW("TensorView: non-const call with nullptr #6");
-      if (other.data() == nullptr) {
-        foreach_idx(*this, [&](size_type i){ this->operator[](i) = value_type{}; });
-      } else {
-        foreach_idx(*this, [&](size_type i){ this->operator[](i) = other[i]; });
-      }
-      return *this;
-    }
-
-
-    /// Copy into patch
-    /// Device: assumes this operation is called by all threads in a block, synchronizes
-    /// Host: assumes this operation is called by a single CPU thread
-    ///
     /// Constrained to exclude the case where `other`'s value_type is
     /// IDENTICAL to `T` (modulo the top-level cv-qualification difference a
     /// forwarding reference can't itself remove) -- that case is handled by
     /// either the non-template `operator=(const TensorView&)` above (lvalue,
-    /// exact type match) or the templated rvalue-ref move-assignment below
+    /// exact type match) or the rvalue-ref move-assignments above
     /// (rvalue, T matches, Dims may differ). This operator's actual job is
     /// value-copying from a source whose value_type DIFFERS from T (e.g.
     /// `const double` into `double`), which neither of those two can do
