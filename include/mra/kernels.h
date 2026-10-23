@@ -21,5 +21,6 @@
 #include "mra/kernels/multiply_broadcast.h"
 #include "mra/kernels/square.h"
 #include "mra/kernels/merge.h"
+#include "mra/kernels/concat.h"
 
 #endif // MRA_KERNELS_H

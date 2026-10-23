@@ -6,6 +6,8 @@
  *  - make_multiply_broadcast
  *  - make_square, and the density sum_i occ_i f_i^2 (square, compress, transform)
  *  - make_derivative, and the kinetic-energy matrix built from it
+ *  - make_concat, and a transform over the concatenated set
+ *  - make_transform with U computed in the graph from a reduction (matrix_inner)
  *
  * The functions are Gaussians with different centers and exponents so that
  * their trees differ. Every MADNESS function written back by make_vmra_store
@@ -458,6 +460,50 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
   }
 }
 
+static void test_concat(madness::World& world, mra::size_type K, vec_t& f, vec_t& g) {
+  const mra::size_type NA = f.size(), NB = g.size(), N = NA + NB;
+  vec_t fg = f;
+  fg.insert(fg.end(), g.begin(), g.end());
+
+  /* [f, g] */
+  {
+    Graph G(K);
+    CompressedEdge fe, ge, out_e;
+    G.load_compressed(f, fe, "f");
+    G.load_compressed(g, ge, "g");
+    G.add(mra::make_concat<T, NDIM>(make_functions(NA), make_functions(NB), K, fe, ge, out_e));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, out_e, true /* add_leaves */));
+    G.execute();
+    vec_t ref = madness::copy(world, fg);
+    madness::compress(world, ref);
+    check_close("concat", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "concat");
+  }
+
+  /* a combination of functions of both sets: transform of the concatenated set */
+  {
+    madness::Tensor<double> U(static_cast<long>(N), static_cast<long>(NA));
+    for (long i = 0; i < long(NA); ++i) {
+      U(i, i) = 0.5;
+      U(NA + (i % NB), i) = -1.0 - i;
+    }
+    Graph G(K);
+    CompressedEdge fe, ge, cat_e, out_e;
+    G.load_compressed(f, fe, "f");
+    G.load_compressed(g, ge, "g");
+    G.add(mra::make_concat<T, NDIM>(make_functions(NA), make_functions(NB), K, fe, ge, cat_e));
+    G.add(mra::make_transform<T, NDIM>(make_functions(N), make_functions(NA), K, device_matrix(U), cat_e, out_e));
+    vec_t result = empty_like(f.front(), NA);
+    G.add(mra::vmra::make_vmra_store(result, out_e, true /* add_leaves */));
+    G.execute();
+    vec_t ref = madness::transform(world, fg, U, 0.0, true);
+    madness::compress(world, ref);
+    check_close("transform of concat", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "transform of concat");
+  }
+}
+
 int main(int argc, char** argv) {
   auto opt = mra::OptionParser(argc, argv);
   mra::size_type K = opt.parse("-K", 8);
@@ -489,6 +535,7 @@ int main(int argc, char** argv) {
     test_multiply_broadcast(world, K, a, f);
     test_square(world, K, f);
     test_derivative(world, K, f);
+    test_concat(world, K, f, g);
 
     if (ttg::default_execution_context().rank() == 0) {
       std::cout << (failures == 0 ? "All tests passed" : std::to_string(failures) + " test(s) failed") << std::endl;

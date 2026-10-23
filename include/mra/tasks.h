@@ -21,6 +21,7 @@
 #include "mra/tasks/functionvector.h"
 #include "mra/tasks/multiply_broadcast.h"
 #include "mra/tasks/square.h"
+#include "mra/tasks/concat.h"
 
 
 #endif // HAVE_TASKS_H
