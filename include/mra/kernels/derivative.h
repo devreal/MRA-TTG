@@ -334,8 +334,11 @@ namespace mra {
       const Key<NDIM>& key,
       const Key<NDIM>* src_keys,
       const concepts::TensorView<NDIM+1> auto& node_left,
+      const concepts::TensorView<NDIM+1> auto& inh_left,
       const concepts::TensorView<NDIM+1> auto& node_center,
+      const concepts::TensorView<NDIM+1> auto& inh_center,
       const concepts::TensorView<NDIM+1> auto& node_right,
+      const concepts::TensorView<NDIM+1> auto& inh_right,
       const concepts::TensorView<3> auto& operators,
       concepts::TensorView<NDIM+1> auto& deriv,
       const concepts::TensorView<2> auto& phi,
@@ -359,9 +362,13 @@ namespace mra {
         // deriv has exactly n_nonzero non-zero entries, so this always
         // finds a valid function id -- see submit_derivative_kernel.
         blockid = find_nth_nonzero(N, pos, deriv);
+        /* a function's coefficients are in the node itself or else in the inherited node */
         node_left_view = node_left(blockid);
+        if (node_left_view.data() == nullptr) node_left_view = inh_left(blockid);
         node_center_view = node_center(blockid);
+        if (node_center_view.data() == nullptr) node_center_view = inh_center(blockid);
         node_right_view = node_right(blockid);
+        if (node_right_view.data() == nullptr) node_right_view = inh_right(blockid);
         deriv_view = deriv(blockid);
         /* the nodes the coefficients of this function belong to */
         left = src_keys[3*blockid + 0];
@@ -381,8 +388,11 @@ namespace mra {
       const Key<NDIM> key,
       const Key<NDIM>* src_keys,
       const concepts::TensorView<NDIM+1> auto node_left,
+      const concepts::TensorView<NDIM+1> auto inh_left,
       const concepts::TensorView<NDIM+1> auto node_center,
+      const concepts::TensorView<NDIM+1> auto inh_center,
       const concepts::TensorView<NDIM+1> auto node_right,
+      const concepts::TensorView<NDIM+1> auto inh_right,
       const concepts::TensorView<3> auto operators,
       concepts::TensorView<NDIM+1> auto deriv,
       const concepts::TensorView<2> auto phi,
@@ -404,7 +414,8 @@ namespace mra {
       static_assert(node_right.ndim() == NDIM+1, "node_right must be of dimension NDIM+1");
 
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        derivative_process_one<T, NDIM>(D, key, src_keys, node_left, node_center, node_right, operators, deriv,
+        derivative_process_one<T, NDIM>(D, key, src_keys, node_left, inh_left, node_center, inh_center,
+                                        node_right, inh_right, operators, deriv,
                                         phi, phibar, quad_x, tmp, N, pos, K, g1, g2, axis, bc_left, bc_right);
       }
     }
@@ -423,10 +434,13 @@ namespace mra {
   } // namespace detail
 
   /**
-   * Derivative at key of every function that is non-zero in deriv. src_keys (device
-   * memory, 3 per function: left, center, right) holds the nodes that the coefficients
-   * of node_left, node_center, and node_right belong to, per function: they are
-   * projected from there to the left neighbor, to key, and to the right neighbor.
+   * Derivative at key of every function that is non-zero in deriv. The coefficients
+   * of a function at the left neighbor, at key, and at the right neighbor are those in
+   * node_left, node_center, and node_right, or, where the function has none there, those
+   * in inh_left, inh_center, and inh_right (coefficients inherited from an ancestor).
+   * src_keys (device memory, 3 per function: left, center, right) holds the nodes that
+   * these coefficients belong to, per function: they are projected from there to the
+   * left neighbor, to key, and to the right neighbor.
    */
   template <typename T, Dimension NDIM>
   void submit_derivative_kernel(
@@ -434,8 +448,11 @@ namespace mra {
     const Key<NDIM>& key,
     const Key<NDIM>* src_keys,
     const concepts::TensorView<NDIM+1> auto node_left,
+    const concepts::TensorView<NDIM+1> auto inh_left,
     const concepts::TensorView<NDIM+1> auto node_center,
+    const concepts::TensorView<NDIM+1> auto inh_center,
     const concepts::TensorView<NDIM+1> auto node_right,
+    const concepts::TensorView<NDIM+1> auto inh_right,
     const concepts::TensorView<3> auto operators,
     concepts::TensorView<NDIM+1> auto deriv,
     const concepts::TensorView<2> auto phi,
@@ -455,7 +472,7 @@ namespace mra {
     const size_type smem_size = detail::derivative_smem_size<T, NDIM>(K);
     //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::derivative_kernel, n_nonzero, detail::derivative_thread_dims(K), smem_size, stream,
-      (D, key, src_keys, node_left, node_center, node_right, operators,
+      (D, key, src_keys, node_left, inh_left, node_center, inh_center, node_right, inh_right, operators,
         deriv, phi, phibar, quad_x, tmp, N, n_nonzero, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
@@ -476,8 +493,11 @@ namespace mra {
       Key<NDIM>,                     // key
       const Key<NDIM>*,              // src_keys
       SparseTensorView<T, NDIM+1>,   // node_left
+      SparseTensorView<T, NDIM+1>,   // inh_left
       SparseTensorView<T, NDIM+1>,   // node_center
+      SparseTensorView<T, NDIM+1>,   // inh_center
       SparseTensorView<T, NDIM+1>,   // node_right
+      SparseTensorView<T, NDIM+1>,   // inh_right
       SparseTensorView<T, NDIM+1>,   // deriv
       T*,                            // tmp: this member's scratch, indexed by local position
       size_type                      // N: this member's function count
@@ -487,11 +507,14 @@ namespace mra {
       static constexpr std::size_t key         = 0;
       static constexpr std::size_t src_keys    = 1;
       static constexpr std::size_t node_left   = 2;
-      static constexpr std::size_t node_center = 3;
-      static constexpr std::size_t node_right  = 4;
-      static constexpr std::size_t deriv       = 5;
-      static constexpr std::size_t tmp         = 6;
-      static constexpr std::size_t n           = 7;
+      static constexpr std::size_t inh_left    = 3;
+      static constexpr std::size_t node_center = 4;
+      static constexpr std::size_t inh_center  = 5;
+      static constexpr std::size_t node_right  = 6;
+      static constexpr std::size_t inh_right   = 7;
+      static constexpr std::size_t deriv       = 8;
+      static constexpr std::size_t tmp         = 9;
+      static constexpr std::size_t n           = 10;
     };
 
     template <typename T, Dimension NDIM>
@@ -523,8 +546,10 @@ namespace mra {
         SYNCTHREADS();
         auto& arg = args[member];
         derivative_process_one<T, NDIM>(D, std::get<idx::key>(arg), std::get<idx::src_keys>(arg),
-                                        std::get<idx::node_left>(arg), std::get<idx::node_center>(arg),
-                                        std::get<idx::node_right>(arg), operators, std::get<idx::deriv>(arg),
+                                        std::get<idx::node_left>(arg), std::get<idx::inh_left>(arg),
+                                        std::get<idx::node_center>(arg), std::get<idx::inh_center>(arg),
+                                        std::get<idx::node_right>(arg), std::get<idx::inh_right>(arg),
+                                        operators, std::get<idx::deriv>(arg),
                                         phi, phibar, quad_x, std::get<idx::tmp>(arg), std::get<idx::n>(arg),
                                         local_pos, K, g1, g2, axis, bc_left, bc_right);
       }
@@ -532,8 +557,8 @@ namespace mra {
 
     /**
      * Called by every member of a batch with the batch_view returned by its
-     * `co_await ttg::device::coop<Key<NDIM>>(key, src_keys, left, center, right,
-     * deriv_view, tmp, N, deriv, n_nonzero)`; the leader marshals every member and
+     * `co_await ttg::device::coop<Key<NDIM>>(key, src_keys, left, inh_left, center,
+     * inh_center, right, inh_right, deriv_view, tmp, N, deriv, n_nonzero)`; the leader marshals every member and
      * submits one combined launch. The sparsity of each member's result is copied to
      * its device buffer as part of the single H2D copy of the batch (see
      * submit_grouped_copy). total_functions (of the whole function set) bounds the
@@ -572,13 +597,13 @@ namespace mra {
       slot.extra_sizes.clear();
 
       size_type total_sparsity_bytes = 0;
-      for (std::size_t m = 0; m < nb; ++m) total_sparsity_bytes += batch[m].template get<7>();
+      for (std::size_t m = 0; m < nb; ++m) total_sparsity_bytes += batch[m].template get<10>();
       slot.sparsity.resize(total_sparsity_bytes);
 
       size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        const size_type m_N = batch[m].template get<7>();
-        auto& m_deriv_tensor = batch[m].template get<8>();
+        const size_type m_N = batch[m].template get<10>();
+        auto& m_deriv_tensor = batch[m].template get<11>();
         sparsity_to_bytes(m_deriv_tensor.sparsity(), reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset]), m_N);
         slot.extra_dsts.push_back(const_cast<T*>(m_deriv_tensor.buffer().device_ptr_on(device)));
         slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset]);
@@ -586,8 +611,9 @@ namespace mra {
         sparsity_offset += m_N;
         slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<1>(), batch[m].template get<2>(),
                                batch[m].template get<3>(), batch[m].template get<4>(), batch[m].template get<5>(),
-                               batch[m].template get<6>(), m_N);
-        slot.offsets[m + 1] = slot.offsets[m] + batch[m].template get<9>();
+                               batch[m].template get<6>(), batch[m].template get<7>(), batch[m].template get<8>(),
+                               batch[m].template get<9>(), m_N);
+        slot.offsets[m + 1] = slot.offsets[m] + batch[m].template get<12>();
       }
       const size_type total_nonzero = slot.offsets[nb];
 
@@ -612,8 +638,11 @@ namespace mra {
     const Key<3>& key,
     const Key<3>* src_keys,
     const SparseTensorView<double, 3+1>& node_left,
+    const SparseTensorView<double, 3+1>& inh_left,
     const SparseTensorView<double, 3+1>& node_center,
+    const SparseTensorView<double, 3+1>& inh_center,
     const SparseTensorView<double, 3+1>& node_right,
+    const SparseTensorView<double, 3+1>& inh_right,
     const DenseTensorView<double, 3>& operators,
     SparseTensorView<double, 3+1>& deriv,
     const DenseTensorView<double, 2>& phi,
