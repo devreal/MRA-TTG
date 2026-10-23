@@ -50,43 +50,68 @@ namespace mra{
     }
 
     /**
-     * The block size the convolution kernels are compiled for (their
-     * LAUNCH_BOUNDS, see conv_launch_threads): the K=6 tensor-core path runs
-     * with exactly apply_conv_min_threads(6) = 192 threads, and saying so
-     * lets the compiler use 160 instead of 128 registers per thread at the
-     * same 2 blocks per SM.
-     */
-    SCOPE constexpr int conv_max_threads(size_type K) {
-      return K == 6 ? 192 : MAX_THREADS_PER_BLOCK;
-    }
-
-    template<typename KT>
-    constexpr int conv_launch_threads() {
-      if constexpr (is_ct_integral_v<KT>) {
-        return conv_max_threads(KT::value);
-      } else {
-        return MAX_THREADS_PER_BLOCK;
-      }
-    }
-
-    /**
      * Thread block for the convolution kernels: max_thread_dims(2*K), with
      * the y dimension raised if needed so that the block holds at least
      * mra::accel::apply_conv_min_threads(K) threads (the tensor-core path in
      * apply_conv relies on it).
      */
-    inline Dim3 conv_thread_dims(size_type K) {
+    constexpr Dim3 conv_block_dims(size_type K) {
       Dim3 dims = max_thread_dims(2*K);
       const unsigned min_threads = mra::accel::apply_conv_min_threads(K);
       const unsigned xz = dims.x * dims.z;
       if (dims.y * xz < min_threads) {
         dims.y = (min_threads + xz - 1) / xz;
       }
-      if (dims.x * dims.y * dims.z > (unsigned)conv_max_threads(K)) {
+      return dims;
+    }
+
+    /**
+     * conv_block_dims, checked against MAX_THREADS_PER_BLOCK, the most any
+     * convolution kernel is compiled for (see conv_launch_threads).
+     */
+    inline Dim3 conv_thread_dims(size_type K) {
+      const Dim3 dims = conv_block_dims(K);
+      if (dims.x * dims.y * dims.z > MAX_THREADS_PER_BLOCK) {
         throw std::runtime_error("convolution: MAX_THREADS_PER_BLOCK is too small for the "
-                                 "tensor-core convolution (needs " + std::to_string(min_threads) + " threads)");
+                                 "tensor-core convolution (needs " +
+                                 std::to_string(mra::accel::apply_conv_min_threads(K)) + " threads)");
       }
       return dims;
+    }
+
+    /**
+     * The block size the convolution kernels are compiled for (their
+     * LAUNCH_BOUNDS): exactly conv_block_dims(K) for a compile-time K,
+     * which lets the compiler give each thread more registers at the same
+     * 2 blocks per SM if the block is smaller than MAX_THREADS_PER_BLOCK
+     * (K=6 on the mma path: 192 threads, up to 168 instead of 128
+     * registers), and MAX_THREADS_PER_BLOCK for a K known only at run time.
+     */
+    template<typename KT>
+    constexpr int conv_launch_threads() {
+      if constexpr (is_ct_integral_v<KT>) {
+        constexpr Dim3 dims = conv_block_dims(KT::value);
+        return dims.x * dims.y * dims.z;
+      } else {
+        return MAX_THREADS_PER_BLOCK;
+      }
+    }
+
+    /**
+     * Calls launch(K) with K as a compile-time constant (mra::Int) for the
+     * Ks that have a tensor-core path in the mma implementation (see
+     * mra::accel::mma::apply_term_needs), and with K as a run-time value
+     * otherwise. The kernels are compiled for these Ks on every backend;
+     * where the tensor-core path does not apply (WMMA: K=6; HIP and host:
+     * both), apply_conv falls back to the generic implementation.
+     */
+    template<typename LaunchFn>
+    void with_ct_K(size_type K, LaunchFn&& launch) {
+      switch (K) {
+        case 8:  launch(Int<8>{}); break;
+        case 6:  launch(Int<6>{}); break;
+        default: launch(K);        break;
+      }
     }
 
 
@@ -661,20 +686,12 @@ namespace mra{
     const size_type grid = (n_nonzero > 0 || resnorms.empty()) ? n_nonzero : size_type(1);
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
-    if (K == 8) {
-      //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+    //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+    detail::with_ct_K(K, [&](auto ctK) {
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
-                  (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
+                  (key, displacement, ctK, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
-    } else if (K == 6) {
-      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
-                  (key, displacement, Int<6>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp));
-    } else {
-      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
-                  (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp));
-    }
+    });
     checkSubmit();
   }
 
@@ -913,22 +930,12 @@ namespace mra{
     // to be exactly zero happens inline inside convolution_kernel_batched
     // itself (see convolution_process_one's comment) -- no separate
     // post-launch prune kernel needed.
-    if (K == 8) {
+    detail::with_ct_K(K, [&](auto ctK) {
       size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>, threads, smem_size));
+          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, decltype(ctK)>, threads, smem_size));
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<8>{}, fac));
-    } else if (K == 6) {
-      size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<6>>, threads, smem_size));
-      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<6>{}, fac));
-    } else {
-      size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, size_type>, threads, smem_size));
-      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, fac));
-    }
+                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, ctK, fac));
+    });
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
