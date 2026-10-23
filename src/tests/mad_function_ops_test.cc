@@ -460,6 +460,42 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
   }
 }
 
+static void test_transform_edge(madness::World& world, mra::size_type K, vec_t& f) {
+  const mra::size_type N = f.size();
+  auto fns = make_functions(N);
+  using matrix_t = mra::DenseTensor<T, 2>;
+  /* U(i,j) = S(i,j) / S(i,i) from the overlap S, computed at the root while the graph runs */
+  auto make_U = [](const madness::Tensor<double>& S) {
+    madness::Tensor<double> U(S.dim(0), S.dim(1));
+    for (long i = 0; i < S.dim(0); ++i)
+      for (long j = 0; j < S.dim(1); ++j) U(i, j) = S(i, j) / S(i, i);
+    return U;
+  };
+  Graph G(K);
+  CompressedEdge fe, out_e;
+  ttg::Edge<mra::Key<NDIM>, matrix_t> S_e, U_e;
+  G.load_compressed(f, fe, "f");
+  G.add(mra::make_matrix_inner<T, NDIM>(fns, fns, K, fe, fe, S_e));
+  G.add(ttg::make_tt([N, make_U](const mra::Key<NDIM>& key, const matrix_t& S) {
+    madness::Tensor<double> Sh(static_cast<long>(N), static_cast<long>(N));
+    for (mra::size_type i = 0; i < N; ++i)
+      for (mra::size_type j = 0; j < N; ++j) Sh(i, j) = S.current_view().data()[i*N + j];
+    madness::Tensor<double> Uh = make_U(Sh);
+    matrix_t U(std::array<mra::size_type, 2>{N, N});
+    for (mra::size_type i = 0; i < N; ++i)
+      for (mra::size_type j = 0; j < N; ++j) U.buffer().host_ptr()[i*N + j] = Uh(i, j);
+    ttg::send<0>(key, std::move(U));
+  }, ttg::edges(S_e), ttg::edges(U_e), "make_U"));
+  G.add(mra::make_transform<T, NDIM>(fns, fns, K, U_e, fe, out_e));
+  vec_t result = empty_like(f.front(), N);
+  G.add(mra::vmra::make_vmra_store(result, out_e, true /* add_leaves */));
+  G.execute();
+  vec_t ref = madness::transform(world, f, make_U(madness::matrix_inner(world, f, f)), 0.0, true);
+  madness::compress(world, ref);
+  check_close("transform with U from an edge", max_diff_norm(world, ref, result), max_norm(world, ref));
+  check_well_formed(world, result, "transform with U from an edge");
+}
+
 static void test_concat(madness::World& world, mra::size_type K, vec_t& f, vec_t& g) {
   const mra::size_type NA = f.size(), NB = g.size(), N = NA + NB;
   vec_t fg = f;
@@ -536,6 +572,7 @@ int main(int argc, char** argv) {
     test_square(world, K, f);
     test_derivative(world, K, f);
     test_concat(world, K, f, g);
+    test_transform_edge(world, K, f);
 
     if (ttg::default_execution_context().rank() == 0) {
       std::cout << (failures == 0 ? "All tests passed" : std::to_string(failures) + " test(s) failed") << std::endl;

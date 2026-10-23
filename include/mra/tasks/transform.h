@@ -1,6 +1,7 @@
 #ifndef MRA_TASKS_TRANSFORM_H
 #define MRA_TASKS_TRANSFORM_H
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <ttg.h>
@@ -23,9 +24,10 @@ namespace mra {
   /**
    * Linear combination of a set of functions in compressed form,
    *   out_j = sum_i U(i,j) in_i,   i < N, j < M
-   * (cf. madness::transform). U is an N x M row-major matrix. Its host copy is
-   * read to determine the structure of the result, so it must not be modified
-   * while the graph executes.
+   * (cf. madness::transform). U is an N x M row-major matrix, given when the graph
+   * is built or arriving through an edge (see the overloads below). It travels down
+   * the tree with the nodes; its host copy is read to determine the structure of
+   * the result.
    *
    * The tree of out_j is the union of the trees of the in_i with U(i,j) != 0.
    * To keep the output consistent (a node is sent if and only if its parent
@@ -37,29 +39,31 @@ namespace mra {
    * The input must be compressed, not non-standard. No screening is applied;
    * truncate the result if needed.
    */
-  template <typename T, Dimension NDIM, typename FunctionSetIn, typename FunctionSetOut,
-            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_transform(const std::shared_ptr<FunctionSetIn>& fns_in,
-                      const std::shared_ptr<FunctionSetOut>& fns_out,
-                      size_type K,
-                      const std::shared_ptr<mra::DenseTensor<T, 2>> U,
-                      ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
-                      ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
-                      const std::string& name = "transform",
-                      ProcMap procmap = {},
-                      DeviceMap devicemap = {})
+  namespace detail {
+    /* U arrives at the root on U_in, or, if U_fixed is given, is sent there by the dispatch
+     * task; every task passes it on to the children it sends a mask to */
+    template <typename T, Dimension NDIM, typename FunctionSetIn, typename FunctionSetOut,
+              typename ProcMap, typename DeviceMap>
+    auto make_transform_impl(const std::shared_ptr<FunctionSetIn>& fns_in,
+                             const std::shared_ptr<FunctionSetOut>& fns_out,
+                             size_type K,
+                             ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>> U_in,
+                             const std::shared_ptr<mra::DenseTensor<T, 2>> U_fixed,
+                             ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
+                             ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
+                             const std::string& name,
+                             ProcMap procmap,
+                             DeviceMap devicemap)
   {
     using node_type = mra::FunctionsCompressedNode<T, NDIM>;
+    using matrix_type = mra::DenseTensor<T, 2>;
     /* per output function: LeafStatus::Inner if present at this key, LeafStatus::Invalid if not */
     using mask_type = mra::DenseTensor<LeafStatus, 1>;
     static constexpr const int num_children = mra::Key<NDIM>::num_children();
 
-    if (U->dim(0) != fns_in->num_functions() || U->dim(1) != fns_out->num_functions()) {
-      throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
-    }
-
     /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; U is
-     * the same for every node, so any two tasks may be batched */
+     * the same for every node (also when it arrives through an edge: one matrix is passed
+     * down the tree), so any two tasks may be batched */
     const std::size_t max_batch_size = mra::get_batch_size();
     const bool enable_batching = mra::batching_enabled();
     const size_type total_functions = fns_out->num_functions();
@@ -75,11 +79,13 @@ namespace mra {
 
     ttg::Edge<mra::Key<NDIM>, node_type> node_e;
     ttg::Edge<mra::Key<NDIM>, mask_type> mask_e;
+    ttg::Edge<mra::Key<NDIM>, matrix_type> U_down(name + "-U");
 
     /**
-     * Forward the input nodes and seed the root with all output functions present.
+     * Forward the input nodes and seed the root with all output functions present
+     * (and with U, if it is fixed).
      */
-    auto dispatch_fn = [fns_out](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
+    auto dispatch_fn = [fns_out, U_fixed](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward(ttg::device::send<0>(key, node));
 #else  // MRA_ENABLE_HOST
@@ -94,6 +100,16 @@ namespace mra {
 #else  // MRA_ENABLE_HOST
         ttg::send<1>(key, std::move(mask));
 #endif // MRA_ENABLE_HOST
+        if (U_fixed) {
+          matrix_type U(std::array<size_type, 2>{U_fixed->dim(0), U_fixed->dim(1)});
+          std::copy(U_fixed->buffer().host_ptr(), U_fixed->buffer().host_ptr() + U_fixed->dim(0) * U_fixed->dim(1),
+                    U.buffer().host_ptr());
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::send<2>(key, std::move(U)));
+#else  // MRA_ENABLE_HOST
+          ttg::send<2>(key, std::move(U));
+#endif // MRA_ENABLE_HOST
+        }
       }
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
@@ -101,19 +117,23 @@ namespace mra {
     };
 
     auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn),
-                                           ttg::edges(in), ttg::edges(node_e, mask_e),
+                                           ttg::edges(in), ttg::edges(node_e, mask_e, U_down),
                                            name + "-dispatch");
 
-    auto transform_fn = [fns_in, fns_out, K, U, name, enable_batching, batch_pool, total_functions](
+    auto transform_fn = [fns_in, fns_out, K, name, enable_batching, batch_pool, total_functions](
                                                       const mra::Key<NDIM>& key,
                                                       const node_type& in_node,
-                                                      const mask_type& mask) -> TASKTYPE {
+                                                      const mask_type& mask,
+                                                      const matrix_type& U) -> TASKTYPE {
       if (in_node.is_ns()) {
         throw std::runtime_error(name + ": input must be compressed, not non-standard");
       }
       const size_type N = fns_in->num_functions(key);
       const size_type M = fns_out->num_functions(key);
-      const T* Uh = U->buffer().host_ptr();
+      if (U.dim(0) != N || U.dim(1) != M) {
+        throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
+      }
+      const T* Uh = U.buffer().host_ptr();
       const LeafStatus* mask_h = mask.buffer().host_ptr();
 
       /* output functions with a non-zero node here, and with children below here */
@@ -137,9 +157,11 @@ namespace mra {
       auto sends = ttg::device::forward();
 #endif // MRA_ENABLE_HOST
 
-      /* every child that receives input nodes gets a mask */
+      /* every child that receives input nodes gets a mask, and U */
+      std::vector<mra::Key<NDIM>> U_children;
       for (auto child : children(key)) {
         if (in_node.is_all_child_leaf(child)) continue;
+        U_children.push_back(child);
         mask_type child_mask(M);
         LeafStatus* cm = child_mask.buffer().host_ptr();
         for (size_type j = 0; j < M; ++j) {
@@ -149,6 +171,13 @@ namespace mra {
         sends.push_back(ttg::device::send<1>(child, std::move(child_mask)));
 #else  // MRA_ENABLE_HOST
         ttg::send<1>(child, std::move(child_mask));
+#endif // MRA_ENABLE_HOST
+      }
+      if (!U_children.empty()) {
+#ifndef MRA_ENABLE_HOST
+        sends.push_back(ttg::device::broadcast<2>(std::move(U_children), U));
+#else  // MRA_ENABLE_HOST
+        ttg::broadcast<2>(std::move(U_children), U);
 #endif // MRA_ENABLE_HOST
       }
 
@@ -163,13 +192,13 @@ namespace mra {
         }
         if (n_nonzero > 0) {
 #ifndef MRA_ENABLE_HOST
-          auto input = ttg::device::Input(out.coeffs().buffer(), std::as_const(*U).buffer());
+          auto input = ttg::device::Input(out.coeffs().buffer(), U.buffer());
           if (!in_node.empty()) input.add(in_node.coeffs().buffer());
           co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
           auto in_view = in_node.coeffs().current_view();
           auto out_view = out.coeffs().current_view();
-          const T* U_ptr = std::as_const(*U).buffer().current_device_ptr();
+          const T* U_ptr = U.buffer().current_device_ptr();
 #ifndef MRA_ENABLE_HOST
           if (enable_batching) {
             /* the output's sparsity is pushed by the leader along with the batch */
@@ -196,9 +225,9 @@ namespace mra {
     };
 
     auto transform_tt = ttg::make_tt<Space>(std::move(transform_fn),
-                                            ttg::edges(node_e, mask_e),
-                                            ttg::edges(out, mask_e),
-                                            name, {"node", "mask"}, {"out", "mask"});
+                                            ttg::edges(node_e, mask_e, U_fixed ? U_down : ttg::fuse(U_in, U_down)),
+                                            ttg::edges(out, mask_e, U_down),
+                                            name, {"node", "mask", "U"}, {"out", "mask", "U"});
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       dispatch_tt->set_keymap(procmap);
@@ -221,6 +250,47 @@ namespace mra {
     ops[0] = std::move(dispatch_tt);
     ops[1] = std::move(transform_tt);
     return make_ttg(std::move(ops), ins, outs, name);
+  }
+  } // namespace detail
+
+  /// with U fixed when the graph is built
+  template <typename T, Dimension NDIM, typename FunctionSetIn, typename FunctionSetOut,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_transform(const std::shared_ptr<FunctionSetIn>& fns_in,
+                      const std::shared_ptr<FunctionSetOut>& fns_out,
+                      size_type K,
+                      const std::shared_ptr<mra::DenseTensor<T, 2>> U,
+                      ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
+                      ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
+                      const std::string& name = "transform",
+                      ProcMap procmap = {},
+                      DeviceMap devicemap = {})
+  {
+    if (U->dim(0) != fns_in->num_functions() || U->dim(1) != fns_out->num_functions()) {
+      throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
+    }
+    return detail::make_transform_impl<T, NDIM>(fns_in, fns_out, K, ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>>(),
+                                                U, in, out, name, procmap, devicemap);
+  }
+
+  /**
+   * With U computed while the graph executes: U arrives on `U` at the root key (once),
+   * e.g., from a task that computes it from a reduction over another set of functions.
+   * The input nodes wait in the graph until it is there.
+   */
+  template <typename T, Dimension NDIM, typename FunctionSetIn, typename FunctionSetOut,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_transform(const std::shared_ptr<FunctionSetIn>& fns_in,
+                      const std::shared_ptr<FunctionSetOut>& fns_out,
+                      size_type K,
+                      ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>> U,
+                      ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
+                      ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
+                      const std::string& name = "transform",
+                      ProcMap procmap = {},
+                      DeviceMap devicemap = {})
+  {
+    return detail::make_transform_impl<T, NDIM>(fns_in, fns_out, K, U, nullptr, in, out, name, procmap, devicemap);
   }
 
 } // namespace mra
