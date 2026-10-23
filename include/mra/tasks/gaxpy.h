@@ -6,6 +6,7 @@
 #include "mra/kernels.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
@@ -35,7 +36,22 @@ namespace mra{
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> S1, S2; // to balance trees
 
-    auto func = [fns, K, scalarA, scalarB, name](
+    /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; the
+     * scalars are the same for every node, so any two tasks may be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+    const size_type total_functions = fns->num_functions();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::GaxpyBatchArg<T, NDIM>>> batch_pool;
+    if (enable_batching) {
+      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::GaxpyBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
+
+    auto func = [fns, K, scalarA, scalarB, name, enable_batching, batch_pool, total_functions](
               const mra::Key<NDIM>& key,
               const mra::FunctionsCompressedNode<T, NDIM>& t1,
               const mra::FunctionsCompressedNode<T, NDIM>& t2) -> TASKTYPE {
@@ -105,11 +121,21 @@ namespace mra{
         auto t2_view = t2.coeffs().current_view();
         auto out_view = out.coeffs().current_view();
 
-        auto sparseman = make_sparsity_manager(out);
-        sparseman.populate_device_sparsity();
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* the output's sparsity is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(t1_view, t2_view, out_view, N,
+                                                                  out.coeffs(), n_nonzero);
+          detail::submit_gaxpy_batch_leader<T, NDIM>(batch, *batch_pool, scalarA, scalarB, K, total_functions);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          auto sparseman = make_sparsity_manager(out);
+          sparseman.populate_device_sparsity();
 
-        submit_gaxpy_kernel(key, t1_view, t2_view, out_view,
-                            scalarA, scalarB, N, n_nonzero, K, ttg::device::current_stream());
+          submit_gaxpy_kernel(key, t1_view, t2_view, out_view,
+                              scalarA, scalarB, N, n_nonzero, K, ttg::device::current_stream());
+        }
 
         norms.compute();
 
@@ -174,6 +200,11 @@ namespace mra{
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; }, max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
     return tt;
 }
 

@@ -8,6 +8,7 @@
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/batch_size.h"
 #include "mra/tensor/leafstatus.h"
 #include "mra/tensor/sparsityinfo.h"
 #include "mra/tensor/functionnode.h"
@@ -60,6 +61,24 @@ namespace mra {
     DeviceMap devicemap = {})
   {
     using node_type = mra::FunctionsReconstructedNode<T, NDIM>;
+
+    /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; the
+     * operator data is the same for every node, so any two tasks may be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+    const size_type total_functions = fnsB->num_functions();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::MultiplyBroadcastBatchArg<T, NDIM>>> batch_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::MergeBatchArg<T, NDIM>>> merge_pool;
+    if (enable_batching) {
+      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::MultiplyBroadcastBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+      merge_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::MergeBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr, merge_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
     constexpr const int OUT = 0, BALANCE_A = 1, BALANCE_B = 2, INHERIT_A = 3, INHERIT_B = 4;
 
     ttg::Edge<mra::Key<NDIM>, node_type> SA(name + "-balance_a"), SB(name + "-balance_b");
@@ -95,7 +114,8 @@ namespace mra {
     auto primer_tt = ttg::make_tt<Space>(std::move(primer_fn), ttg::edges(a), ttg::edges(inh_a, inh_b),
                                          name + "-primer");
 
-    auto multiply_fn = [&db, &functiondata, fnsA, fnsB, K, name, invalid_node, inherits](
+    auto multiply_fn = [&db, &functiondata, fnsA, fnsB, K, name, invalid_node, inherits,
+                        enable_batching, batch_pool, merge_pool, total_functions](
                           const mra::Key<NDIM>& key,
                           const node_type& anode, const node_type& bnode,
                           const node_type& ainh, const node_type& binh) -> TASKTYPE {
@@ -191,24 +211,49 @@ namespace mra {
         co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
         auto& D = *db.current_device_ptr();
-        if (n_leaf > 0) {
-          auto out_view = result.coeffs().current_view();
-          auto sparseman = make_sparsity_manager(result);
-          sparseman.populate_device_sparsity();
-          submit_multiply_broadcast_kernel<T, NDIM>(D, key, anode.coeffs().current_view(), ainh.coeffs().current_view(),
-                                                    bnode.coeffs().current_view(), binh.coeffs().current_view(),
-                                                    inh_keys.current_device_ptr(), out_view,
-                                                    phibar.current_view(), phi.current_view(), quad_x.current_view(),
-                                                    N, n_leaf, K, mul_tmp.current_device_ptr(),
-                                                    ttg::device::current_stream());
-        }
-        if (merge_b) {
-          auto merged_view = merged.coeffs().current_view();
-          auto sparseman = make_sparsity_manager(merged);
-          sparseman.populate_device_sparsity();
-          /* never both: binh holds coefficients only of functions whose tree ended above */
-          submit_merge_kernel<NDIM>(key, bnode.coeffs().current_view(), binh.coeffs().current_view(), merged_view,
-                                    N, n_merged, K, ttg::device::current_stream());
+        auto a_leaf_view = anode.coeffs().current_view(), a_inh_view = ainh.coeffs().current_view();
+        auto b_leaf_view = bnode.coeffs().current_view(), b_inh_view = binh.coeffs().current_view();
+        auto out_view = result.coeffs().current_view();
+        std::remove_const_t<decltype(merged.coeffs().current_view())> merged_view;
+        if (merge_b) merged_view = merged.coeffs().current_view();
+        const mra::Key<NDIM>* inh_keys_ptr = inh_keys.current_device_ptr();
+        T* tmp_ptr = mul_tmp.current_device_ptr();
+        /* merging: never both, binh holds coefficients only of functions whose tree ended above */
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* a task can join one batch only, so the leader also merges for every member that
+           * needs it; the sparsity of the outputs is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, a_leaf_view, a_inh_view, b_leaf_view, b_inh_view,
+                                                                  inh_keys_ptr, out_view, N, tmp_ptr,
+                                                                  result.coeffs(), n_leaf,
+                                                                  merged_view, merged.coeffs(), n_merged);
+          if (batch.is_leader()) {
+            detail::submit_merge_batch<T, NDIM>(*merge_pool, batch.size(), [&](std::size_t m) {
+              auto& b = batch[m];
+              return std::forward_as_tuple(b.template get<3>(), b.template get<4>(), b.template get<11>(),
+                                           b.template get<12>(), b.template get<7>(), b.template get<13>());
+            }, K, total_functions);
+          }
+          detail::submit_multiply_broadcast_batch_leader<T, NDIM>(batch, *batch_pool, D, phibar.current_view(),
+                                                                  phi.current_view(), quad_x.current_view(),
+                                                                  K, total_functions);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          if (merge_b) {
+            auto sparseman = make_sparsity_manager(merged);
+            sparseman.populate_device_sparsity();
+            submit_merge_kernel<NDIM>(key, b_leaf_view, b_inh_view, merged_view, N, n_merged, K,
+                                      ttg::device::current_stream());
+          }
+          if (n_leaf > 0) {
+            auto sparseman = make_sparsity_manager(result);
+            sparseman.populate_device_sparsity();
+            submit_multiply_broadcast_kernel<T, NDIM>(D, key, a_leaf_view, a_inh_view, b_leaf_view, b_inh_view,
+                                                      inh_keys_ptr, out_view,
+                                                      phibar.current_view(), phi.current_view(), quad_x.current_view(),
+                                                      N, n_leaf, K, tmp_ptr, ttg::device::current_stream());
+          }
         }
       }
 
@@ -261,6 +306,12 @@ namespace mra {
       primer_tt->set_devicemap(devicemap);
       multiply_tt->set_devicemap(devicemap);
     }
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      multiply_tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+                                     max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(multiply_tt->template in<0>(), multiply_tt->template in<1>());
     auto outs = std::make_tuple(multiply_tt->template out<OUT>());

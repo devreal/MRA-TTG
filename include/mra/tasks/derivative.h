@@ -8,6 +8,7 @@
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/batch_size.h"
 #include "mra/tensor/leafstatus.h"
 #include "mra/tensor/sparsityinfo.h"
 #include "mra/tensor/functionnode.h"
@@ -84,6 +85,25 @@ namespace mra {
     constexpr const std::uint8_t LEFT_HAS_CHILDREN = 1, RIGHT_HAS_CHILDREN = 2;
 
     if (axis >= NDIM) throw std::runtime_error(name + ": invalid axis");
+
+    /* batching of the compute kernel is controlled process-wide (mra/misc/batch_size.h),
+     * read once here; the operator data is the same for every node, so any two tasks may
+     * be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+    const size_type total_functions = fns->num_functions();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::DerivativeBatchArg<T, NDIM>>> batch_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::MergeBatchArg<T, NDIM>>> merge_pool;
+    if (enable_batching) {
+      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::DerivativeBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+      merge_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::MergeBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr, merge_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
 
     /* inh: the status of each function at the children, without coefficients;
      * parent: the parent's combined node, holding the coefficients they inherit */
@@ -176,7 +196,8 @@ namespace mra {
      * to be differentiated here or below, Invalid: only needed by the neighbors).
      * Coefficients taken from the parent keep their origin, one level further up.
      */
-    auto assemble_fn = [fns, K, axis, neighbor_flags](const key_type& key, const node_type& input,
+    auto assemble_fn = [fns, K, axis, neighbor_flags, enable_batching, merge_pool, total_functions](
+                                                const key_type& key, const node_type& input,
                                                 const node_type& inherited, const node_type& parent) -> TASKTYPE {
       const size_type N = fns->num_functions(key);
       const std::uint8_t flags = neighbor_flags(key, inherited.flags());
@@ -213,11 +234,28 @@ namespace mra {
         co_await ttg::device::select(inputs);
 #endif // MRA_ENABLE_HOST
         auto out_view = combined.coeffs().current_view();
-        auto sparseman = make_sparsity_manager(combined);
-        sparseman.populate_device_sparsity();
+        auto input_view = input.coeffs().current_view(), parent_view = parent.coeffs().current_view();
         /* never both: the parent holds coefficients only of functions whose input tree ended above */
-        submit_merge_kernel<NDIM>(key, input.coeffs().current_view(), parent.coeffs().current_view(), out_view,
-                                  N, n_nonzero, K, ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* the sparsity of the combined node is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<key_type>(input_view, parent_view, out_view, combined.coeffs(),
+                                                            N, n_nonzero);
+          if (batch.is_leader()) {
+            detail::submit_merge_batch<T, NDIM>(*merge_pool, batch.size(), [&](std::size_t m) {
+              auto& b = batch[m];
+              return std::forward_as_tuple(b.template get<0>(), b.template get<1>(), b.template get<2>(),
+                                           b.template get<3>(), b.template get<4>(), b.template get<5>());
+            }, K, total_functions);
+          }
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          auto sparseman = make_sparsity_manager(combined);
+          sparseman.populate_device_sparsity();
+          submit_merge_kernel<NDIM>(key, input_view, parent_view, out_view, N, n_nonzero, K,
+                                    ttg::device::current_stream());
+        }
       }
       /* to the compute (0-2) and spawn (3-5) tasks: 0/3 center, 1/4 left input of the right
        * neighbor, 2/5 right input of the left neighbor. The node is sent directly to every
@@ -254,7 +292,8 @@ namespace mra {
      * Compute the derivative of the functions with a leaf here, and tell the neighbors
      * (or, where there is none, the own spawn task) whether this node has children.
      */
-    auto compute_fn = [&db, &functiondata, fns, K, axis, plan, has_children](
+    auto compute_fn = [&db, &functiondata, fns, K, axis, plan, has_children,
+                       enable_batching, batch_pool, total_functions](
                           const key_type& key, const node_type& center, const node_type& left,
                           const node_type& right) -> TASKTYPE {
       const size_type N = fns->num_functions(key);
@@ -302,15 +341,32 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
         auto& D = *db.current_device_ptr();
         auto result_view = result.coeffs().current_view();
-        auto sparseman = make_sparsity_manager(result);
-        sparseman.populate_device_sparsity();
-        submit_derivative_kernel(D, key, src_keys.current_device_ptr(),
-                                 left.coeffs().current_view(), center.coeffs().current_view(),
-                                 right.coeffs().current_view(), operators.current_view(), result_view,
-                                 phi.current_view(), phibar.current_view(), quad_x.current_view(),
-                                 tmp.current_device_ptr(), N, n_nonzero, K, T(0), T(0), axis,
-                                 FunctionData<T, NDIM>::BC_FREE, FunctionData<T, NDIM>::BC_FREE,
-                                 ttg::device::current_stream());
+        auto left_view = left.coeffs().current_view(), center_view = center.coeffs().current_view();
+        auto right_view = right.coeffs().current_view();
+        const key_type* src_keys_ptr = src_keys.current_device_ptr();
+        T* tmp_ptr = tmp.current_device_ptr();
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* the result's sparsity is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<key_type>(key, src_keys_ptr, left_view, center_view, right_view,
+                                                            result_view, tmp_ptr, N, result.coeffs(), n_nonzero);
+          detail::submit_derivative_batch_leader<T, NDIM>(batch, *batch_pool, D, operators.current_view(),
+                                                          phi.current_view(), phibar.current_view(),
+                                                          quad_x.current_view(), K, T(0), T(0), axis,
+                                                          FunctionData<T, NDIM>::BC_FREE,
+                                                          FunctionData<T, NDIM>::BC_FREE, total_functions);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          auto sparseman = make_sparsity_manager(result);
+          sparseman.populate_device_sparsity();
+          submit_derivative_kernel(D, key, src_keys_ptr, left_view, center_view, right_view,
+                                   operators.current_view(), result_view,
+                                   phi.current_view(), phibar.current_view(), quad_x.current_view(),
+                                   tmp_ptr, N, n_nonzero, K, T(0), T(0), axis,
+                                   FunctionData<T, NDIM>::BC_FREE, FunctionData<T, NDIM>::BC_FREE,
+                                   ttg::device::current_stream());
+        }
       }
 
       const int dec = has_children(status) ? 1 : 0;
@@ -426,6 +482,12 @@ namespace mra {
       compute_tt->set_devicemap(devicemap);
       spawn_tt->set_devicemap(devicemap);
     }
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      compute_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
+      assemble_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(assemble_tt->template in<0>());
     auto outs = std::make_tuple(compute_tt->template out<0>());

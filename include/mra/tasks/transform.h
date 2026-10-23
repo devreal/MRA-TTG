@@ -7,6 +7,7 @@
 #include <utility>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_size.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/leafstatus.h"
 #include "mra/tensor/sparsityinfo.h"
@@ -57,6 +58,21 @@ namespace mra {
       throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
     }
 
+    /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; U is
+     * the same for every node, so any two tasks may be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+    const size_type total_functions = fns_out->num_functions();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::TransformFunctionsBatchArg<T, NDIM>>> batch_pool;
+    if (enable_batching) {
+      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::TransformFunctionsBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
+
     ttg::Edge<mra::Key<NDIM>, node_type> node_e;
     ttg::Edge<mra::Key<NDIM>, mask_type> mask_e;
 
@@ -88,7 +104,8 @@ namespace mra {
                                            ttg::edges(in), ttg::edges(node_e, mask_e),
                                            name + "-dispatch");
 
-    auto transform_fn = [fns_in, fns_out, K, U, name](const mra::Key<NDIM>& key,
+    auto transform_fn = [fns_in, fns_out, K, U, name, enable_batching, batch_pool, total_functions](
+                                                      const mra::Key<NDIM>& key,
                                                       const node_type& in_node,
                                                       const mask_type& mask) -> TASKTYPE {
       if (in_node.is_ns()) {
@@ -150,12 +167,22 @@ namespace mra {
           if (!in_node.empty()) input.add(in_node.coeffs().buffer());
           co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
+          auto in_view = in_node.coeffs().current_view();
           auto out_view = out.coeffs().current_view();
-          auto sparseman = make_sparsity_manager(out);
-          sparseman.populate_device_sparsity();
-          submit_transform_functions_kernel<T, NDIM>(key, in_node.coeffs().current_view(), out_view,
-                                                     std::as_const(*U).buffer().current_device_ptr(), N, M, n_nonzero, K,
-                                                     ttg::device::current_stream());
+          const T* U_ptr = std::as_const(*U).buffer().current_device_ptr();
+#ifndef MRA_ENABLE_HOST
+          if (enable_batching) {
+            /* the output's sparsity is pushed by the leader along with the batch */
+            auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(in_view, out_view, N, M, out.coeffs(), n_nonzero);
+            detail::submit_transform_functions_batch_leader<T, NDIM>(batch, *batch_pool, U_ptr, K, total_functions);
+          } else
+#endif // MRA_ENABLE_HOST
+          {
+            auto sparseman = make_sparsity_manager(out);
+            sparseman.populate_device_sparsity();
+            submit_transform_functions_kernel<T, NDIM>(key, in_view, out_view, U_ptr, N, M, n_nonzero, K,
+                                                       ttg::device::current_stream());
+          }
         }
 #ifndef MRA_ENABLE_HOST
         sends.push_back(ttg::device::send<0>(key, std::move(out)));
@@ -181,6 +208,12 @@ namespace mra {
       dispatch_tt->set_devicemap(devicemap);
       transform_tt->set_devicemap(devicemap);
     }
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      transform_tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+                                      max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(dispatch_tt->template in<0>());
     auto outs = std::make_tuple(transform_tt->template out<0>());

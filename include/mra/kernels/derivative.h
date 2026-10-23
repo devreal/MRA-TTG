@@ -2,12 +2,15 @@
 #define MRA_KERNELS_DERIVATIVE_H
 
 #include <assert.h>
+#include <tuple>
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/device_batch_pool.h"
+#include "mra/tensor/sparsity.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/kernels/transform.h"
 #include "mra/kernels/fcube_for_mul.h"
@@ -321,6 +324,56 @@ namespace mra {
         }
       }
 
+    /**
+     * Derivative of the pos-th non-zero function of deriv, executed by one block;
+     * shared by derivative_kernel and derivative_kernel_batched.
+     */
+    template <typename T, Dimension NDIM>
+    DEVSCOPE void derivative_process_one(
+      const Domain<NDIM>& D,
+      const Key<NDIM>& key,
+      const Key<NDIM>* src_keys,
+      const concepts::TensorView<NDIM+1> auto& node_left,
+      const concepts::TensorView<NDIM+1> auto& node_center,
+      const concepts::TensorView<NDIM+1> auto& node_right,
+      const concepts::TensorView<3> auto& operators,
+      concepts::TensorView<NDIM+1> auto& deriv,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
+      T* tmp,
+      size_type N,
+      size_type pos,
+      size_type K,
+      const T g1,
+      const T g2,
+      size_type axis,
+      const int bc_left,
+      const int bc_right)
+    {
+      SHARED DenseTensorView<T, NDIM> deriv_view;
+      SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
+      SHARED Key<NDIM> left, center, right;
+      SHARED size_type blockid;
+      if (is_team_lead()) {
+        // deriv has exactly n_nonzero non-zero entries, so this always
+        // finds a valid function id -- see submit_derivative_kernel.
+        blockid = find_nth_nonzero(N, pos, deriv);
+        node_left_view = node_left(blockid);
+        node_center_view = node_center(blockid);
+        node_right_view = node_right(blockid);
+        deriv_view = deriv(blockid);
+        /* the nodes the coefficients of this function belong to */
+        left = src_keys[3*blockid + 0];
+        center = src_keys[3*blockid + 1];
+        right = src_keys[3*blockid + 2];
+      }
+      SYNCTHREADS();
+      derivative_kernel_impl<T, NDIM>(D, key, left, center, right, node_left_view, node_center_view, node_right_view,
+        operators, deriv_view, phi, phibar, quad_x, tmp, pos, K, g1, g2, axis, bc_left, bc_right);
+      SYNCTHREADS(); // shared state is rewritten by the next call
+    }
+
     template <typename T, Dimension NDIM>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void derivative_kernel(
@@ -350,29 +403,21 @@ namespace mra {
       static_assert(node_center.ndim() == NDIM+1, "node_center must be of dimension NDIM+1");
       static_assert(node_right.ndim() == NDIM+1, "node_right must be of dimension NDIM+1");
 
-      SHARED DenseTensorView<T, NDIM> deriv_view;
-      SHARED DenseTensorView<const T, NDIM> node_left_view, node_center_view, node_right_view;
-      SHARED Key<NDIM> left, center, right;
-      SHARED size_type blockid;
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
-        if (is_team_lead()) {
-          // deriv has exactly n_nonzero non-zero entries, so this always
-          // finds a valid function id -- see submit_derivative_kernel.
-          blockid = find_nth_nonzero(N, pos, deriv);
-          node_left_view = node_left(blockid);
-          node_center_view = node_center(blockid);
-          node_right_view = node_right(blockid);
-          deriv_view = deriv(blockid);
-          /* the nodes the coefficients of this function belong to */
-          left = src_keys[3*blockid + 0];
-          center = src_keys[3*blockid + 1];
-          right = src_keys[3*blockid + 2];
-        }
-        SYNCTHREADS();
-        derivative_kernel_impl<T, NDIM>(D, key, left, center, right, node_left_view, node_center_view, node_right_view,
-          operators, deriv_view, phi, phibar, quad_x, tmp, pos, K, g1, g2, axis, bc_left, bc_right);
-        SYNCTHREADS(); // shared state is rewritten in the next iteration
+        derivative_process_one<T, NDIM>(D, key, src_keys, node_left, node_center, node_right, operators, deriv,
+                                        phi, phibar, quad_x, tmp, N, pos, K, g1, g2, axis, bc_left, bc_right);
       }
+    }
+
+    template <typename T, Dimension NDIM>
+    size_type derivative_smem_size(size_type K) {
+      return std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
+                      static_cast<size_type>(mTxmq_shmem_size<T>(2*K)));
+    }
+
+    inline Dim3 derivative_thread_dims(size_type K) {
+      size_type max_threads = std::min(K, MRA_MAX_K_SIZET);
+      return Dim3(max_threads, max_threads, 1);
     }
 
   } // namespace detail
@@ -407,18 +452,157 @@ namespace mra {
     const int bc_right,
     ttg::device::Stream stream)
   {
-    size_type max_threads = std::min(K, MRA_MAX_K_SIZET);
-    Dim3 thread_dims = Dim3(max_threads, max_threads, 1);
-
-    auto smem_size = std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
-                              mTxmq_shmem_size<T>(2*K));
-
+    const size_type smem_size = detail::derivative_smem_size<T, NDIM>(K);
     //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::derivative_kernel, n_nonzero, thread_dims, smem_size, stream,
+    CALL_KERNEL(detail::derivative_kernel, n_nonzero, detail::derivative_thread_dims(K), smem_size, stream,
       (D, key, src_keys, node_left, node_center, node_right, operators,
         deriv, phi, phibar, quad_x, tmp, N, n_nonzero, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
+
+#ifndef MRA_ENABLE_HOST
+  /**
+   * Batching support for the derivative kernel, used by ttg::device::coop()/
+   * TT::set_batch_matcher() in mra/tasks/derivative.h. The operator data (D, the
+   * derivative operators, phi, phibar, quad_x, K, axis, boundary conditions) is the
+   * same for every node of the TT, so batching is unrestricted; the views, source
+   * keys and scratch of each node travel per member. The combined launch is flattened
+   * over the sum of each member's non-zero functions, see compress_kernel_batched.
+   */
+  namespace detail {
+
+    template <typename T, Dimension NDIM>
+    using DerivativeBatchArg = std::tuple<
+      Key<NDIM>,                     // key
+      const Key<NDIM>*,              // src_keys
+      SparseTensorView<T, NDIM+1>,   // node_left
+      SparseTensorView<T, NDIM+1>,   // node_center
+      SparseTensorView<T, NDIM+1>,   // node_right
+      SparseTensorView<T, NDIM+1>,   // deriv
+      T*,                            // tmp: this member's scratch, indexed by local position
+      size_type                      // N: this member's function count
+    >;
+
+    struct DerivativeBatchArgIdx {
+      static constexpr std::size_t key         = 0;
+      static constexpr std::size_t src_keys    = 1;
+      static constexpr std::size_t node_left   = 2;
+      static constexpr std::size_t node_center = 3;
+      static constexpr std::size_t node_right  = 4;
+      static constexpr std::size_t deriv       = 5;
+      static constexpr std::size_t tmp         = 6;
+      static constexpr std::size_t n           = 7;
+    };
+
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void derivative_kernel_batched(
+      DerivativeBatchArg<T, NDIM>* args,  // device ptr, size == num_members
+      const size_type* member_offsets,    // device ptr, size == num_members+1
+      size_type num_members,
+      size_type total_nonzero,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<3> auto operators,
+      const concepts::TensorView<2> auto phi,
+      const concepts::TensorView<2> auto phibar,
+      const concepts::TensorView<1> auto quad_x,
+      size_type K,
+      const T g1,
+      const T g2,
+      size_type axis,
+      const int bc_left,
+      const int bc_right)
+    {
+      using idx = DerivativeBatchArgIdx;
+      SHARED size_type member;
+      SHARED size_type local_pos;
+      for (size_type pos = blockIdx.x; pos < total_nonzero; pos += gridDim.x) {
+        if (is_team_lead()) {
+          member = find_member_for_pos(member_offsets, num_members, pos, &local_pos);
+        }
+        SYNCTHREADS();
+        auto& arg = args[member];
+        derivative_process_one<T, NDIM>(D, std::get<idx::key>(arg), std::get<idx::src_keys>(arg),
+                                        std::get<idx::node_left>(arg), std::get<idx::node_center>(arg),
+                                        std::get<idx::node_right>(arg), operators, std::get<idx::deriv>(arg),
+                                        phi, phibar, quad_x, std::get<idx::tmp>(arg), std::get<idx::n>(arg),
+                                        local_pos, K, g1, g2, axis, bc_left, bc_right);
+      }
+    }
+
+    /**
+     * Called by every member of a batch with the batch_view returned by its
+     * `co_await ttg::device::coop<Key<NDIM>>(key, src_keys, left, center, right,
+     * deriv_view, tmp, N, deriv, n_nonzero)`; the leader marshals every member and
+     * submits one combined launch. The sparsity of each member's result is copied to
+     * its device buffer as part of the single H2D copy of the batch (see
+     * submit_grouped_copy). total_functions (of the whole function set) bounds the
+     * sparsity staging.
+     */
+    template <typename T, Dimension NDIM, typename BatchView>
+    void submit_derivative_batch_leader(
+      BatchView& batch,
+      GroupedBatchPoolRegistry<DerivativeBatchArg<T, NDIM>>& registry,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<3> auto& operators,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
+      size_type K,
+      const T g1,
+      const T g2,
+      size_type axis,
+      const int bc_left,
+      const int bc_right,
+      size_type total_functions)
+    {
+      using arg_t = DerivativeBatchArg<T, NDIM>;
+      if (!batch.is_leader()) return;
+
+      const std::size_t nb = batch.size();
+      const auto device = ttg::device::current_device();
+      auto& pool = registry.get(device);
+      const std::size_t max_batch = registry.get_max_batch_size();
+      auto& slot = pool.acquire(max_batch, max_batch + 1, max_batch * total_functions);
+      slot.args.clear();
+      slot.offsets.resize(nb + 1);
+      slot.offsets[0] = 0;
+      slot.extra_dsts.clear();
+      slot.extra_srcs.clear();
+      slot.extra_sizes.clear();
+
+      size_type total_sparsity_bytes = 0;
+      for (std::size_t m = 0; m < nb; ++m) total_sparsity_bytes += batch[m].template get<7>();
+      slot.sparsity.resize(total_sparsity_bytes);
+
+      size_type sparsity_offset = 0;
+      for (std::size_t m = 0; m < nb; ++m) {
+        const size_type m_N = batch[m].template get<7>();
+        auto& m_deriv_tensor = batch[m].template get<8>();
+        sparsity_to_bytes(m_deriv_tensor.sparsity(), reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset]), m_N);
+        slot.extra_dsts.push_back(const_cast<T*>(m_deriv_tensor.buffer().device_ptr_on(device)));
+        slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset]);
+        slot.extra_sizes.push_back(m_N);
+        sparsity_offset += m_N;
+        slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<1>(), batch[m].template get<2>(),
+                               batch[m].template get<3>(), batch[m].template get<4>(), batch[m].template get<5>(),
+                               batch[m].template get<6>(), m_N);
+        slot.offsets[m + 1] = slot.offsets[m] + batch[m].template get<9>();
+      }
+      const size_type total_nonzero = slot.offsets[nb];
+
+      auto stream = ttg::device::current_stream();
+      submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
+      const size_type smem_size = derivative_smem_size<T, NDIM>(K);
+      CALL_KERNEL((derivative_kernel_batched<T, NDIM>), total_nonzero, derivative_thread_dims(K), smem_size, stream,
+                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, D,
+                   operators, phi, phibar, quad_x, K, g1, g2, axis, bc_left, bc_right));
+      checkSubmit();
+      pool.mark_submitted(slot, stream);
+    }
+
+  } // namespace detail
+#endif // !MRA_ENABLE_HOST
 
 #if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instanatiation */

@@ -5,6 +5,7 @@
 #include <ttg.h>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_size.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/functionnode.h"
 #include "mra/kernels/inner_product.h"
@@ -37,11 +38,13 @@ namespace mra {
 
   namespace detail {
 
-    template <typename T, Dimension NDIM, typename ResultT, typename FnsA, typename FnsB,
+    /* Matrix: whether the result is <a_i|b_j> (N x M) rather than <a_i|b_i> (N) */
+    template <typename T, Dimension NDIM, bool Matrix, typename ResultT, typename FnsA, typename FnsB,
               typename MakeResult, typename Submit, typename ProcMap, typename DeviceMap>
     auto make_inner_product_impl(
       const std::shared_ptr<FnsA>& fnsA,
       const std::shared_ptr<FnsB>& fnsB,
+      size_type K,
       ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> inA,
       ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> inB,
       ttg::Edge<mra::Key<NDIM>, ResultT> result,
@@ -61,6 +64,20 @@ namespace mra {
       ttg::Edge<mra::Key<NDIM>, node_type> SA, SB;   // empty nodes to balance the trees
       ttg::Edge<mra::Key<NDIM>, node_type> nodeA_e, nodeB_e;
       ttg::Edge<mra::Key<NDIM>, ResultT> r0, r1, r2, r3, r4, r5, r6, r7;
+
+      /* batching is controlled process-wide (mra/misc/batch_size.h), read once here;
+       * there is no operator data, so any two reduction tasks may be batched */
+      const std::size_t max_batch_size = mra::get_batch_size();
+      const bool enable_batching = mra::batching_enabled();
+#ifndef MRA_ENABLE_HOST
+      std::shared_ptr<GroupedBatchPoolRegistry<InnerBatchArg<T, NDIM>>> batch_pool;
+      if (enable_batching) {
+        batch_pool = std::make_shared<GroupedBatchPoolRegistry<InnerBatchArg<T, NDIM>>>(
+                       ttg::device::num_devices(), max_batch_size);
+      }
+#else  // MRA_ENABLE_HOST
+      std::nullptr_t batch_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
 
       /**
        * Pair the nodes of both trees: forward them to the reduction task, balance
@@ -122,7 +139,7 @@ namespace mra {
        * Compute this node's contribution, add the children's partial results
        * and pass the sum on to the parent (or to `result` at the root).
        */
-      auto reduce_fn = [fnsA, fnsB, make_result, submit, name](
+      auto reduce_fn = [fnsA, fnsB, K, make_result, submit, name, enable_batching, batch_pool](
                           const mra::Key<NDIM>& key,
                           const ResultT& c0, const ResultT& c1, const ResultT& c2, const ResultT& c3,
                           const ResultT& c4, const ResultT& c5, const ResultT& c6, const ResultT& c7,
@@ -149,8 +166,17 @@ namespace mra {
         for (int c = 0; c < num_children; ++c) {
           child_results[c] = children[c]->empty() ? nullptr : children[c]->buffer().current_device_ptr();
         }
-        submit(key, a.coeffs().current_view(), b.coeffs().current_view(),
-               r.buffer().current_device_ptr(), child_results, NA, NB, ttg::device::current_stream());
+        auto a_view = a.coeffs().current_view(), b_view = b.coeffs().current_view();
+        T* r_ptr = r.buffer().current_device_ptr();
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(a_view, b_view, r_ptr, child_results, NA, NB);
+          submit_inner_batch_leader<T, NDIM, Matrix>(batch, *batch_pool, K);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          submit(key, a_view, b_view, r_ptr, child_results, NA, NB, ttg::device::current_stream());
+        }
 
 #ifndef MRA_ENABLE_HOST
         if (key.level() == 0) {
@@ -180,6 +206,12 @@ namespace mra {
         pair_tt->set_devicemap(devicemap);
         reduce_tt->set_devicemap(devicemap);
       }
+#ifndef MRA_ENABLE_HOST
+      if (enable_batching) {
+        reduce_tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+                                     max_batch_size);
+      }
+#endif // MRA_ENABLE_HOST
 
       auto ins = std::make_tuple(pair_tt->template in<0>(), pair_tt->template in<1>());
       auto outs = std::make_tuple(reduce_tt->template out<num_children>());
@@ -216,8 +248,8 @@ namespace mra {
                       size_type NA, size_type NB, ttg::device::Stream stream) {
       submit_inner_kernel<T, NDIM>(key, a, b, r, children, NA, K, stream);
     };
-    return detail::make_inner_product_impl<T, NDIM, result_type>(
-      fns, fns, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap);
+    return detail::make_inner_product_impl<T, NDIM, false, result_type>(
+      fns, fns, K, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap);
   }
 
   /**
@@ -247,8 +279,8 @@ namespace mra {
                       size_type NA, size_type NB, ttg::device::Stream stream) {
       submit_matrix_inner_kernel<T, NDIM>(key, a, b, r, children, NA, NB, K, stream);
     };
-    return detail::make_inner_product_impl<T, NDIM, result_type>(
-      fnsA, fnsB, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap);
+    return detail::make_inner_product_impl<T, NDIM, true, result_type>(
+      fnsA, fnsB, K, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap);
   }
 
 } // namespace mra

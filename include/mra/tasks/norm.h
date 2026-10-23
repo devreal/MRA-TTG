@@ -4,6 +4,7 @@
 #include <ttg.h>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_size.h"
 #include "mra/misc/domain.h"
 #include "mra/misc/options.h"
 #include "mra/misc/functiondata.h"
@@ -34,10 +35,24 @@ namespace mra{
     ttg::Edge<mra::Key<NDIM>, norm_tensor_type> norm_e0, norm_e1, norm_e2, norm_e3, norm_e4, norm_e5, norm_e6, norm_e7;
     static constexpr const int num_children = mra::Key<NDIM>::num_children();
 
+    /* batching is controlled process-wide (mra/misc/batch_size.h), read once here;
+     * there is no operator data, so any two tasks may be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::NormBatchArg<T, NDIM>>> batch_pool;
+    if (enable_batching) {
+      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::NormBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
+
     /**
      * Takes a tensor of norms from each child
      */
-    auto norm_fn = [fns, K, name](const mra::Key<NDIM>& key,
+    auto norm_fn = [fns, K, name, enable_batching, batch_pool](const mra::Key<NDIM>& key,
                                 const norm_tensor_type& norm0,
                                 const norm_tensor_type& norm1,
                                 const norm_tensor_type& norm2,
@@ -71,7 +86,16 @@ namespace mra{
           norm2.buffer().current_device_ptr(), norm3.buffer().current_device_ptr(),
           norm4.buffer().current_device_ptr(), norm5.buffer().current_device_ptr(),
           norm6.buffer().current_device_ptr(), norm7.buffer().current_device_ptr()};
-      submit_norm_kernel(key, N, n_nonzero, K, node_view, norm_result_view, child_norms, ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+      if (enable_batching) {
+        T* norm_result_ptr = norm_result_view.data();
+        auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(node_view, norm_result_ptr, child_norms, key, N);
+        detail::submit_norm_batch_leader<T, NDIM>(batch, *batch_pool, K);
+      } else
+#endif // MRA_ENABLE_HOST
+      {
+        submit_norm_kernel(key, N, n_nonzero, K, node_view, norm_result_view, child_norms, ttg::device::current_stream());
+      }
 
       fnnorms.compute();
 #ifndef MRA_ENABLE_HOST
@@ -163,6 +187,11 @@ namespace mra{
       norm_tt->set_devicemap(devicemap);
       dispatch_tt->set_devicemap(devicemap);
     }
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      norm_tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; }, max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(dispatch_tt->template in<0>());
     auto outs = std::make_tuple(norm_tt->template out<8>());

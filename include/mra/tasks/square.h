@@ -6,6 +6,7 @@
 #include "mra/misc/types.h"
 #include "mra/misc/domain.h"
 #include "mra/misc/functiondata.h"
+#include "mra/misc/batch_size.h"
 #include "mra/tensor/leafstatus.h"
 #include "mra/tensor/sparsityinfo.h"
 #include "mra/tensor/functionnode.h"
@@ -40,7 +41,23 @@ namespace mra {
   {
     using node_type = mra::FunctionsReconstructedNode<T, NDIM>;
 
-    auto square_fn = [&db, &functiondata, fns, K](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
+    /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; the
+     * operator data is the same for every node, so any two tasks may be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+    const size_type total_functions = fns->num_functions();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::SquareBatchArg<T, NDIM>>> batch_pool;
+    if (enable_batching) {
+      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::SquareBatchArg<T, NDIM>>>(
+                     ttg::device::num_devices(), max_batch_size);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
+
+    auto square_fn = [&db, &functiondata, fns, K, enable_batching, batch_pool, total_functions](
+                        const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
       const size_type N = fns->num_functions(key);
       SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
       for (size_type j = 0; j < N; ++j) {
@@ -64,12 +81,26 @@ namespace mra {
         co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
         auto& D = *db.current_device_ptr();
+        auto in_view = node.coeffs().current_view();
         auto out_view = result.coeffs().current_view();
-        auto sparseman = make_sparsity_manager(result);
-        sparseman.populate_device_sparsity();
-        submit_square_kernel<T, NDIM>(D, key, node.coeffs().current_view(), out_view,
-                                      phibar.current_view(), phi.current_view(), quad_x.current_view(),
-                                      N, n_nonzero, K, tmp.current_device_ptr(), ttg::device::current_stream());
+        T* tmp_ptr = tmp.current_device_ptr();
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* the result's sparsity is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, out_view, N, tmp_ptr,
+                                                                  result.coeffs(), n_nonzero);
+          detail::submit_square_batch_leader<T, NDIM>(batch, *batch_pool, D, phibar.current_view(),
+                                                      phi.current_view(), quad_x.current_view(),
+                                                      K, total_functions);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          auto sparseman = make_sparsity_manager(result);
+          sparseman.populate_device_sparsity();
+          submit_square_kernel<T, NDIM>(D, key, in_view, out_view,
+                                        phibar.current_view(), phi.current_view(), quad_x.current_view(),
+                                        N, n_nonzero, K, tmp_ptr, ttg::device::current_stream());
+        }
       }
 #ifndef MRA_ENABLE_HOST
       co_await ttg::device::send<0>(key, std::move(result));
@@ -81,6 +112,11 @@ namespace mra {
     auto tt = ttg::make_tt<Space>(std::move(square_fn), ttg::edges(in), ttg::edges(out), name, {"in"}, {"out"});
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; }, max_batch_size);
+    }
+#endif // MRA_ENABLE_HOST
     return tt;
   }
 
