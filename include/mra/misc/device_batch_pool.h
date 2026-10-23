@@ -651,6 +651,32 @@ namespace mra::detail {
     return num_members;
   }
 
+  /**
+   * find_member_for_pos for all threads of one warp (all 32 must call it,
+   * all get the result and write `local_pos_out`): tests 32 members per
+   * step with a ballot. CUDA only; elsewhere this is find_member_for_pos.
+   */
+  DEVSCOPE size_type find_member_for_pos_warp(const size_type* offsets, size_type num_members,
+                                              size_type pos, size_type* local_pos_out) {
+#if defined(__CUDA_ARCH__)
+    const unsigned lane = thread_id() % 32;
+    for (size_type base = 0; base < num_members; base += 32) {
+      const size_type m = base + lane;
+      /* the offsets ascend: the member is the first m with pos < offsets[m+1] */
+      const unsigned mask = __ballot_sync(0xffffffffu, m < num_members && pos < offsets[m + 1]);
+      if (mask) {
+        const size_type member = base + __ffs(mask) - 1;
+        *local_pos_out = pos - offsets[member];
+        return member;
+      }
+    }
+    assert(false && "find_member_for_pos_warp: pos out of range of the batch's member offsets");
+    return num_members;
+#else
+    return find_member_for_pos(offsets, num_members, pos, local_pos_out);
+#endif
+  }
+
 } // namespace mra::detail
 
 #endif // !MRA_ENABLE_HOST
