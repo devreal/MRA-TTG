@@ -7,8 +7,9 @@
  * apply_conv_shmem_size and apply_conv_min_threads:
  *  - CUDA: mma.sync (convolution_cuda_mma.h), or WMMA
  *    (convolution_cuda_wmma.h) if MRA_CONV_USE_WMMA is defined.
- * Both only apply on sm_80+ with a compile-time K == 8 (mma also K == 6);
- * apply_conv returns false otherwise and the generic implementation is used.
+ * Both only apply on sm_80+ with a compile-time K == 8 (mma also K == 6,
+ * see mma::apply_term_needs); apply_conv returns false otherwise and the
+ * generic implementation is used.
  */
 
 #include "mra/kernels/impl/convolution_cuda_mma.h"

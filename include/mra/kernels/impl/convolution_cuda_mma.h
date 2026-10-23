@@ -33,37 +33,59 @@ namespace mra {
     inline constexpr int apply_conv_min_warps = 8;
 
     /**
-     * Same as apply_conv_min_warps for apply_conv_k6 (K=6): 12 z-planes in
-     * pairs, and 18 8-wide column tiles in threes, per warp.
+     * Same as apply_conv_min_warps for the two term functions of K=6:
+     * apply_conv_k6 (k = 12) gives each warp 2 of the 12 z-planes and 3 of
+     * the 18 8-wide column tiles, apply_conv_k6s (k = 6) every 6th term.
      */
     inline constexpr int apply_conv_k6_warps = 6;
 
     /**
+     * What the term function for k (see apply_term) needs from the block:
+     * the whole warps it splits the work among, and its shared memory in
+     * elements of T; {0, 0} if there is no term function for k. K has a
+     * tensor-core path if both its terms, k = 2K (R) and k = K (S), have one
+     * (see apply_conv_min_threads).
+     *
+     * Adding a K: its term functions in apply_term, their needs here, and
+     * K in detail::with_ct_K (kernels/convolution.h), which compiles the
+     * kernels with K as a compile-time constant. Block size, launch bounds
+     * and shared memory follow from this table.
+     */
+    struct term_needs {
+      int warps;
+      int smem;
+    };
+
+    SCOPE constexpr term_needs apply_term_needs(size_type k) {
+      switch (k) {
+        case 16:
+        case 8:   // apply_conv_k: W (k^3) and two sets of {Tx, Ty, Tz} (k^2 each)
+          return {apply_conv_min_warps, static_cast<int>(k * k * k + 2 * 3 * k * k)};
+        case 12:  // apply_conv_k6: W (rows padded to 16) and two sets of {Tx, Ty, Tz} A fragments (6 per lane, 32 lanes)
+          return {apply_conv_k6_warps, 12 * 12 * 16 + 2 * 3 * 6 * 32};
+        case 6:   // apply_conv_k6s: a W (k^3) per warp
+          return {apply_conv_k6_warps, apply_conv_k6_warps * 6 * 6 * 6};
+        default:
+          return {0, 0};
+      }
+    }
+
+    /**
      * Minimum number of threads per block for kernels calling apply_conv
-     * with this K: apply_conv_min_warps (K=8) or apply_conv_k6_warps (K=6)
-     * whole warps if the tensor-core path is used for K (mirrors the
-     * condition in apply_conv_shmem_size), 0 otherwise.
+     * with this K: enough whole warps for both term functions (see
+     * apply_term_needs) if the tensor-core path is used for K, 0 otherwise.
      */
     SCOPE constexpr int apply_conv_min_threads(auto K) {
 #ifdef MRA_ENABLE_CUDA
-      // CUDA warps are 32 threads (MRA_WARP_SIZE is only defined in device code)
-      if (K == 8) {
-        return apply_conv_min_warps * 32;
-      } else if (K == 6) {
-        return apply_conv_k6_warps * 32;
+      const size_type k = K;
+      const int r = apply_term_needs(2 * k).warps, s = apply_term_needs(k).warps;
+      if (r > 0 && s > 0) {
+        // CUDA warps are 32 threads (MRA_WARP_SIZE is only defined in device code)
+        return (r > s ? r : s) * 32;
       }
 #endif // MRA_ENABLE_CUDA
       return 0;
     }
-
-    /**
-     * Shared-memory layout of apply_conv_k6 for k = 12 or 6 (in elements):
-     * the exchange buffer W (k=12: rows padded to 16 for the swizzle), then
-     * two sets of {Tx, Ty, Tz} A fragments, apply_conv_k6_nfrag(k) per lane
-     * and matrix.
-     */
-    SCOPE constexpr int apply_conv_k6_wsize(int k) { return k == 12 ? k * k * 16 : k * k * k; }
-    SCOPE constexpr int apply_conv_k6_nfrag(int k) { return k == 12 ? 6 : 2; }
 
 #ifdef MRA_HAVE_DMMA
     /**
@@ -416,6 +438,89 @@ namespace mra {
     }
 
     /**
+     * The applied terms mu of one (R or S) separated operator, as in
+     * apply_conv_k: a term is applied if MADNESS's screening keeps it
+     * (kept). For the first MaxMaskRank terms this is decided once, by the
+     * whole block, as a bitmask in shared memory, so that finding the next
+     * term (next) does not wait for global memory; terms beyond are tested
+     * on the fly. Raw indexing into opnorms (opid, mu, d, NormId), see
+     * apply_conv_k.
+     */
+    template<typename T, Dimension NDIM, NormId Term>
+    class conv_terms {
+    public:
+      static constexpr int MaxMaskRank = 1024;
+      using mask_type = uint32_t[MaxMaskRank / 32];
+
+      /* Called by all threads of the block: computes the bitmask into mask
+       * (shared memory, owned by the caller) and synchronizes. */
+      template<concepts::TensorView<4> ViewOpnorms>
+      DEVSCOPE conv_terms(int opid, int rank, const T optol, const ViewOpnorms& opnorms, mask_type& mask)
+      : m_norms(opnorms.data())
+      , m_norms_rank(opnorms.dim(1))
+      , m_opid(opid)
+      , m_rank(rank)
+      , m_optol(optol)
+      , m_mask_rank(rank < MaxMaskRank ? rank : MaxMaskRank)
+      , m_mask(mask)
+      {
+        const int warp = thread_id() / MRA_WARP_SIZE;
+        const int lane = thread_id() % MRA_WARP_SIZE;
+        for (int base = warp * MRA_WARP_SIZE; base < m_mask_rank; base += (block_size() / MRA_WARP_SIZE) * MRA_WARP_SIZE) {
+          const int mu = base + lane;
+          const uint32_t bits = __ballot_sync(0xffffffffu, mu < m_mask_rank && kept(mu));
+          if (lane == 0) mask[base / 32] = bits;
+        }
+        SYNCTHREADS();
+      }
+
+      /* the first applied term >= mu, or rank */
+      DEVSCOPE int next(int mu) const {
+        while (mu < m_mask_rank) {
+          const uint32_t bits = m_mask[mu / 32] >> (mu % 32);
+          if (bits) return mu + __ffs(bits) - 1;
+          mu = (mu / 32 + 1) * 32;
+        }
+        while (mu < m_rank && !kept(mu)) ++mu;
+        return mu;
+      }
+
+      /* the n-th applied term after mu, or rank */
+      DEVSCOPE int advance(int mu, int n) const {
+        for (int s = 0; s < n && mu < m_rank; ++s) mu = next(mu + 1);
+        return mu;
+      }
+
+      /* the factor of term mu (sign-flipped for S) */
+      DEVSCOPE T mufac(int mu) const {
+        T mufac = norm(mu, 0, NormId::Fac);
+        return (NormId::Snorm == Term) ? -mufac : mufac;
+      }
+
+    private:
+      /* MADNESS uses slightly different thresholds for R and S terms. */
+      static constexpr double thresh = (Term == NormId::Rnorm) ? 1.e-20 : 0.0;
+
+      DEVSCOPE T norm(int mu, int d, NormId id) const {
+        return m_norms[((m_opid * m_norms_rank + mu) * NDIM + d) * (size_type)NormId::Count + (size_type)id];
+      }
+
+      DEVSCOPE bool kept(int mu) const {
+        double dnorm = 1.0;
+        for (Dimension d = 0; d < NDIM; ++d) dnorm *= norm(mu, d, Term);
+        return norm(mu, 0, NormId::MUnorm) > m_optol && dnorm > thresh;
+      }
+
+      const T* m_norms;
+      size_type m_norms_rank;
+      int m_opid;
+      int m_rank;
+      T m_optol;
+      int m_mask_rank;
+      const mask_type& m_mask;
+    };
+
+    /**
      * apply_conv_k for the R term of K=6 (k = 12), which is not a multiple
      * of the 8x8x4 tile (the S term, k = 6, is apply_conv_k6s). Same
      * structure as apply_conv_k (stages 1+2 in registers per z-plane, one swizzled
@@ -473,14 +578,18 @@ namespace mra {
       constexpr int KS    = (k + 3) / 4;              // 4-deep contraction steps per dimension
       constexpr int NP    = KS / 2;                   // A fragment pairs per tile (one 16-byte load each)
       constexpr int NS    = KS % 2;                   // single A fragments per tile (k = 12: the 8+t step)
-      constexpr int NF    = apply_conv_k6_nfrag(k);   // A fragments per lane and matrix
-      static_assert(NF == MT * KS, "apply_conv_k6: inconsistent fragment count");
+      constexpr int NF    = MT * KS;                  // A fragments per lane and matrix
       constexpr int NB1   = 3;                        // stage-1 B tiles per warp
       constexpr int NT3   = 3;                        // 8-wide column tiles per warp in stage 3
       static_assert(NW * NT3 * 8 == k * k, "apply_conv_k6: the warps' column tiles must cover n");
 
-      /* MADNESS uses slightly different thresholds for R and S terms. */
-      constexpr double thresh = (Term == NormId::Rnorm) ? 1.e-20 : 0.0;
+      /* shared memory: W, then two sets of {Tx, Ty, Tz} A fragments */
+      constexpr int WROW  = 16;                       // row length of W (padded for the swizzle, see widx)
+      constexpr int WSIZE = k * k * WROW;
+      constexpr int PM    = NF * MRA_WARP_SIZE;       // A-fragment entries per matrix
+      constexpr int TSET  = 3 * PM;                   // one set of {Tx, Ty, Tz}
+      static_assert(apply_term_needs(k).warps == NW && apply_term_needs(k).smem == WSIZE + 2 * TSET,
+                    "apply_conv_k6: apply_term_needs(12) does not match this layout");
 
       const int tid    = thread_id();
       const int warp   = tid / MRA_WARP_SIZE;
@@ -506,7 +615,7 @@ namespace mra {
       auto widx = [](int xp, int yp, int z) {
         // permutation (0, 2, 3, 1) of x'%4 in bits 2:1, x'/4 in bit 1, y'%2 in bit 0
         const int h = 2 * (((0x78 >> (2 * (xp % 4))) & 3) ^ ((xp / 4) % 2)) | (yp % 2);
-        return (yp * k + xp) * 16 + 2 * ((z / 2) ^ h) + (z % 2);
+        return (yp * k + xp) * WROW + 2 * ((z / 2) ^ h) + (z % 2);
       };
 
       /* f may have just been written by other threads (f0, see detail::apply_conv),
@@ -538,38 +647,9 @@ namespace mra {
         }
       }
 
-      /* raw indexing into opnorms and trans[d], see apply_conv_k */
-      const T* norms = opnorms.data();
-      const size_type norms_rank = opnorms.dim(1);
-      auto norm = [&](int mu, int d, NormId id) {
-        return norms[((opid * norms_rank + mu) * NDIM + d) * (size_type)NormId::Count + (size_type)id];
-      };
-      auto kept = [&](int mu) {
-        double dnorm = 1.0;
-        for (Dimension d = 0; d < NDIM; ++d) dnorm *= norm(mu, d, Term);
-        return norm(mu, 0, NormId::MUnorm) > optol && dnorm > thresh;
-      };
-
-      /* the applied terms as a bitmask, see apply_conv_k */
-      constexpr int MaxMaskRank = 1024;
-      __shared__ uint32_t kept_mask[MaxMaskRank / 32];
-      const int mask_rank = rank < MaxMaskRank ? rank : MaxMaskRank;
-      for (int base = warp * MRA_WARP_SIZE; base < mask_rank; base += (block_size() / MRA_WARP_SIZE) * MRA_WARP_SIZE) {
-        const int mu = base + lane;
-        const uint32_t bits = __ballot_sync(0xffffffffu, mu < mask_rank && kept(mu));
-        if (lane == 0) kept_mask[base / 32] = bits;
-      }
-      SYNCTHREADS();
-      /* the first applied term >= mu, or rank */
-      auto next_kept = [&](int mu) {
-        while (mu < mask_rank) {
-          const uint32_t bits = kept_mask[mu / 32] >> (mu % 32);
-          if (bits) return mu + __ffs(bits) - 1;
-          mu = (mu / 32 + 1) * 32;
-        }
-        while (mu < rank && !kept(mu)) ++mu;
-        return mu;
-      };
+      /* the applied terms (computing their bitmask synchronizes the block) */
+      __shared__ typename conv_terms<T, NDIM, Term>::mask_type kept_mask;
+      const conv_terms<T, NDIM, Term> terms(opid, rank, optol, opnorms, kept_mask);
 
       /**
        * Copy the A fragments of Tx, Ty, Tz of term mu into tbuf
@@ -585,7 +665,6 @@ namespace mra {
        * matrix, ZFill (zero-fill) or None (no entry). Tx has its own plan
        * (duplicated rows), Ty and Tz share one.
        */
-      constexpr int PM = NF * MRA_WARP_SIZE;                                     // entries per matrix
       constexpr int PJ = (PM + NW * MRA_WARP_SIZE - 1) / (NW * MRA_WARP_SIZE);  // entries per thread and matrix
       constexpr uint32_t ZFill = 0xfe, None = 0xff;
       static_assert(PJ <= 4 && k * k <= (int)ZFill, "apply_conv_k6: the prefetch plan must fit in 32 bits");
@@ -635,7 +714,7 @@ namespace mra {
       };
       /* the KS fragments of tile mt of matrix m (0: Tx, 1: Ty, 2: Tz) in tbuf */
       auto tfrags = [&](const T* tbuf, int m, int mt, T (&a)[KS]) {
-        const T* tm = tbuf + m * NF * MRA_WARP_SIZE;
+        const T* tm = tbuf + m * PM;
         #pragma unroll
         for (int h = 0; h < NP; ++h) {
           double2 v = reinterpret_cast<const double2*>(tm)[(mt * NP + h) * MRA_WARP_SIZE + lane];
@@ -647,22 +726,18 @@ namespace mra {
         }
       };
 
-      T* tbufs = c_smem + apply_conv_k6_wsize(k);  // 2 x {Tx, Ty, Tz}, after W
+      T* tbufs = c_smem + WSIZE;  // 2 x {Tx, Ty, Tz}, after W
       int buf = 0;
-      /* mufac of term mu (sign-flipped for S), loaded along with its prefetch */
-      auto get_mufac = [&](int mu) {
-        T mufac = norm(mu, 0, NormId::Fac);
-        return (NormId::Snorm == Term) ? -mufac : mufac;
-      };
-      int mu = next_kept(0);
+      /* mufac is loaded along with the term's prefetch */
+      int mu = terms.next(0);
       T mufac = 0.0;
       if (mu < rank) {
         prefetch(mu, tbufs);
-        mufac = get_mufac(mu);
+        mufac = terms.mufac(mu);
       }
 
       while (mu < rank) {
-        const T* tb = tbufs + buf * 3 * NF * MRA_WARP_SIZE;
+        const T* tb = tbufs + buf * TSET;
 
         /* this term's matrices have landed, and all warps are done with W */
         asm volatile("cp.async.wait_group 0;" ::: "memory");
@@ -728,11 +803,11 @@ namespace mra {
          * next term's matrices can go there while this one finishes */
         SYNCTHREADS();
 
-        const int mu_next = next_kept(mu + 1);
+        const int mu_next = terms.next(mu + 1);
         T mufac_next = 0.0;
         if (mu_next < rank) {
-          prefetch(mu_next, tbufs + (buf ^ 1) * 3 * NF * MRA_WARP_SIZE);
-          mufac_next = get_mufac(mu_next);
+          prefetch(mu_next, tbufs + (buf ^ 1) * TSET);
+          mufac_next = terms.mufac(mu_next);
         }
 
         if (active) {
@@ -830,9 +905,8 @@ namespace mra {
       static_assert(k == 6, "apply_conv_k6s: k must be 6");
       constexpr int NTILE = (k * k + 7) / 8;  // 8-wide column tiles of n = y'*k + x'
       constexpr int WS    = k * k * k;        // one warp's W
-
-      /* MADNESS uses slightly different thresholds for R and S terms. */
-      constexpr double thresh = (Term == NormId::Rnorm) ? 1.e-20 : 0.0;
+      static_assert(apply_term_needs(k).warps == NW && apply_term_needs(k).smem == NW * WS,
+                    "apply_conv_k6s: apply_term_needs(6) does not match this layout");
 
       const int tid    = thread_id();
       const int warp   = tid / MRA_WARP_SIZE;
@@ -872,43 +946,9 @@ namespace mra {
         acc[nt][0] = acc[nt][1] = 0.0;
       }
 
-      /* raw indexing into opnorms and trans[d], see apply_conv_k */
-      const T* norms = opnorms.data();
-      const size_type norms_rank = opnorms.dim(1);
-      auto norm = [&](int mu, int d, NormId id) {
-        return norms[((opid * norms_rank + mu) * NDIM + d) * (size_type)NormId::Count + (size_type)id];
-      };
-      auto kept = [&](int mu) {
-        double dnorm = 1.0;
-        for (Dimension d = 0; d < NDIM; ++d) dnorm *= norm(mu, d, Term);
-        return norm(mu, 0, NormId::MUnorm) > optol && dnorm > thresh;
-      };
-
-      /* the applied terms as a bitmask, see apply_conv_k */
-      constexpr int MaxMaskRank = 1024;
-      __shared__ uint32_t kept_mask[MaxMaskRank / 32];
-      const int mask_rank = rank < MaxMaskRank ? rank : MaxMaskRank;
-      for (int base = warp * MRA_WARP_SIZE; base < mask_rank; base += (block_size() / MRA_WARP_SIZE) * MRA_WARP_SIZE) {
-        const int mu = base + lane;
-        const uint32_t bits = __ballot_sync(0xffffffffu, mu < mask_rank && kept(mu));
-        if (lane == 0) kept_mask[base / 32] = bits;
-      }
-      SYNCTHREADS();
-      /* the first applied term >= mu, or rank */
-      auto next_kept = [&](int mu) {
-        while (mu < mask_rank) {
-          const uint32_t bits = kept_mask[mu / 32] >> (mu % 32);
-          if (bits) return mu + __ffs(bits) - 1;
-          mu = (mu / 32 + 1) * 32;
-        }
-        while (mu < rank && !kept(mu)) ++mu;
-        return mu;
-      };
-      /* the n-th applied term after mu */
-      auto advance = [&](int mu, int n) {
-        for (int s = 0; s < n && mu < rank; ++s) mu = next_kept(mu + 1);
-        return mu;
-      };
+      /* the applied terms (computing their bitmask synchronizes the block) */
+      __shared__ typename conv_terms<T, NDIM, Term>::mask_type kept_mask;
+      const conv_terms<T, NDIM, Term> terms(opid, rank, optol, opnorms, kept_mask);
 
       /* this lane's A-fragment elements of term mu: a[m][j] = T[c(t,j)][g] of
        * Tx, Ty, Tz (m = 0, 1, 2), zero for padding */
@@ -923,26 +963,22 @@ namespace mra {
           }
         }
       };
-      /* mufac of term mu (sign-flipped for S), loaded along with its fragments */
-      auto get_mufac = [&](int mu) {
-        T mufac = norm(mu, 0, NormId::Fac);
-        return (NormId::Snorm == Term) ? -mufac : mufac;
-      };
-
-      int mu = advance(next_kept(0), w);
+      /* warp w applies the terms w, w + NW, ... of the applied terms; mufac
+       * is loaded along with the term's fragments */
+      int mu = terms.advance(terms.next(0), w);
       T a[3][2], an[3][2];
       T mufac = 0.0;
       if (active && mu < rank) {
         load_frags(mu, a);
-        mufac = get_mufac(mu);
+        mufac = terms.mufac(mu);
       }
 
       while (active && mu < rank) {
-        const int mu_next = advance(mu, NW);
+        const int mu_next = terms.advance(mu, NW);
         T mufac_next = 0.0;
         if (mu_next < rank) {
           load_frags(mu_next, an);
-          mufac_next = get_mufac(mu_next);
+          mufac_next = terms.mufac(mu_next);
         }
 
         /* Stages 1+2 for the plane pairs (2p, 2p+1): zz[s][r] = Z[y' = g][x' = 2t+r] of plane 2p+s */
@@ -1014,16 +1050,63 @@ namespace mra {
       /* the next call reuses the shared memory */
       SYNCTHREADS();
     }
-#endif // MRA_HAVE_DMMA
-
 
     /**
-     * Implementation of convolution using FP64 tensor cores (mma, sm_80+),
-     * see apply_conv_k and apply_conv_k6. Currently only supports NDIM=3 and
-     * K=8 (i.e., 2K=16 for the R term and K=8 for the S term) or K=6 (2K=12
-     * and K=6). Works only if K is a compile-time constant, because the work
-     * distribution is configured at compile time. Returns false if it does
-     * not apply.
+     * Applies all terms of one (R or S) separated operator to the k^3 tensor
+     * f with the term function for k: apply_conv_k (k = 16 or 8, K = 8),
+     * apply_conv_k6 (k = 12, the R term of K = 6) or apply_conv_k6s (k = 6,
+     * the S term of K = 6). What each needs from the block is listed in
+     * apply_term_needs.
+     */
+    template<typename T, Dimension NDIM, NormId Term,
+             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorView<4> ViewOpnorms,
+             concepts::TensorView<NDIM> ViewF,
+             concepts::TensorView<NDIM> ViewResult>
+    DEVSCOPE void apply_term(
+      int opid,
+      auto k,
+      int rank,
+      const T optol,
+      const ViewTrans& trans,
+      const ViewOpnorms& opnorms,
+      const ViewF& f,
+      ViewResult& result  // size k, stores the sum
+      )
+    {
+      constexpr size_type kv = decltype(k)::value;
+      if constexpr (kv == 16 || kv == 8) {
+        apply_conv_k<T, NDIM, Term>(opid, k, rank, optol, trans, opnorms, f, result);
+      } else if constexpr (kv == 12) {
+        apply_conv_k6<T, NDIM, Term>(opid, k, rank, optol, trans, opnorms, f, result);
+      } else {
+        static_assert(kv == 6, "apply_term: no term function for this k (see apply_term_needs)");
+        apply_conv_k6s<T, NDIM, Term>(opid, k, rank, optol, trans, opnorms, f, result);
+      }
+    }
+#endif // MRA_HAVE_DMMA
+
+    /**
+     * Whether apply_conv takes the tensor-core path for a K of type KT: K is
+     * a compile-time constant and both its terms have a term function (see
+     * apply_term_needs).
+     */
+    template<typename KT>
+    SCOPE constexpr bool apply_conv_has_path() {
+      if constexpr (mra::is_ct_integral_v<KT>) {
+        return apply_conv_min_threads(std::decay_t<KT>::value) > 0;
+      } else {
+        return false;
+      }
+    }
+
+    /**
+     * Implementation of convolution using FP64 tensor cores (mma, sm_80+):
+     * the R term (k = 2K) applied to f and the S term (k = K) to f0, each by
+     * apply_term. Currently only supports NDIM=3 and the Ks of
+     * apply_term_needs (K=8: k = 16 and 8, K=6: k = 12 and 6). Works only if
+     * K is a compile-time constant, because the work distribution is
+     * configured at compile time. Returns false if it does not apply.
      */
     template<typename T, Dimension NDIM,
              concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
@@ -1047,41 +1130,29 @@ namespace mra {
       ViewResult& result)  // size K, stores the sum
     {
 #ifdef MRA_HAVE_DMMA
-      if constexpr (mra::is_ct_integral_v<decltype(K)>) {
-        // apply_conv_k's per-warp register capacity needs at least MinWarps
-        // whole warps -- guaranteed by launching with apply_conv_min_threads(K)
+      if constexpr (apply_conv_has_path<decltype(K)>()) {
+        // the term functions keep their share of the tensors in the registers
+        // of apply_conv_min_threads(K) whole warps -- guaranteed by launching
+        // with at least that many threads
         assert(block_size() % MRA_WARP_SIZE == 0 &&
                block_size() / MRA_WARP_SIZE >= apply_conv_min_threads(K) / MRA_WARP_SIZE);
         // get the rank of the operation
         const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank); // doing computation assuming full rank
 
         static_assert(NDIM == 3, "Tensor-core convolution only supports NDIM=3");
-        static_assert(K == 8 || K == 6, "Tensor-core convolution only supports K=8 and K=6");
         // convolution for f
         if (at[0]) {
-          if constexpr (K == 8) {
-            apply_conv_k<T, NDIM, NormId::Rnorm>(
-                        opid, mra::Int<2>{}*K, rank, optol, transr, opnorms,
-                        f, result);
-          } else {
-            apply_conv_k6<T, NDIM, NormId::Rnorm>(
-                        opid, mra::Int<2>{}*K, rank, optol, transr, opnorms,
-                        f, result);
-          }
+          apply_term<T, NDIM, NormId::Rnorm>(
+                      opid, mra::Int<2>{}*K, rank, optol, transr, opnorms,
+                      f, result);
         } else {
           result = 0.0;
         }
         // convolution for f0
         if (at[1]) {
-          if constexpr (K == 8) {
-            apply_conv_k<T, NDIM, NormId::Snorm>(
-                        opid, K, rank, optol, transs, opnorms,
-                        f0, resultc);
-          } else {
-            apply_conv_k6s<T, NDIM, NormId::Snorm>(
-                        opid, K, rank, optol, transs, opnorms,
-                        f0, resultc);
-          }
+          apply_term<T, NDIM, NormId::Snorm>(
+                      opid, K, rank, optol, transs, opnorms,
+                      f0, resultc);
         } else {
           resultc = 0.0;
         }
@@ -1093,8 +1164,7 @@ namespace mra {
 
     /**
      * Returns the number of bytes of shared memory required for the
-     * convolution kernel using tensor cores (see apply_conv_k and
-     * apply_conv_k6).
+     * convolution kernel using tensor cores (see apply_term_needs).
      *
      * NOTE: This needs to be updated if the kernel is changed to
      *       use more shared memory.
@@ -1102,14 +1172,11 @@ namespace mra {
     template<typename T>
     SCOPE constexpr size_type apply_conv_shmem_size(auto K) {
 #ifdef MRA_ENABLE_CUDA
-      if (K == 8) {
-        auto K2 = mra::Int<2>{}*K;
-        // W (exchange buffer of apply_conv_k) and two sets of {Tx, Ty, Tz}
-        return (K2*K2*K2 + 2*3*K2*K2)*sizeof(T);
-      } else if (K == 6) {
-        // the R term (2K = 12) needs more than the S term: W and two sets
-        // of {Tx, Ty, Tz} A fragments (32 lanes each) of apply_conv_k6
-        return (apply_conv_k6_wsize(12) + 2*3*apply_conv_k6_nfrag(12)*32)*sizeof(T);
+      if (apply_conv_min_threads(K) > 0) {
+        // the larger of the two term functions' needs (see apply_term_needs)
+        const size_type k = K;
+        const size_type r = apply_term_needs(2 * k).smem, s = apply_term_needs(k).smem;
+        return (r > s ? r : s) * sizeof(T);
       }
 #endif // MRA_ENABLE_CUDA
       return 0;
