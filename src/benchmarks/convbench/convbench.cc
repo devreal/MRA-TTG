@@ -37,6 +37,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <mutex>
 
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
@@ -175,6 +176,7 @@ namespace {
     T thresh, lo, mu, gamma, L;
     T cnorm, cspread;
     bool all_points;
+    bool checksum;
     bool with_resnorms;
     unsigned long seed;
   };
@@ -189,6 +191,9 @@ namespace {
     const T fac = vol_nsphere(NDIM, radius);
 
     std::unique_ptr<PointState> state;
+    /* -checksum: sum over tasks of sum_i (i+1)*resnorms[i], to compare builds */
+    std::mutex checksum_mutex;
+    double checksum = 0.0;
 
     const bool enable_batching = mra::batching_enabled();
 #ifndef MRA_ENABLE_HOST
@@ -281,6 +286,17 @@ namespace {
         co_await ttg::device::wait(resnorms.buffer());
       }
 #endif // MRA_ENABLE_HOST
+      if (cfg.checksum) {
+        auto rn = resnorms.view_on(ttg::device::Device::host());
+        double sum = 0.0;
+        for (size_type i = 0; i < N; ++i) sum += (i + 1) * rn(i);
+        std::lock_guard<std::mutex> lock(checksum_mutex);
+        if (checksum == 0.0) {
+          std::cerr << "# resnorms[0, N/2, N-1] of one task: " << std::setprecision(17) << rn(0) << " "
+                    << rn(N / 2) << " " << rn(N - 1) << std::defaultfloat << std::endl;
+        }
+        checksum += sum;
+      }
     }, ttg::edges(e), ttg::edges(), "conv-bench");
 
 #ifndef MRA_ENABLE_HOST
@@ -371,6 +387,7 @@ namespace {
             fill_random(ps->in, N, fnorms, rng);
           }
           state = std::move(ps);
+          checksum = 0.0;
 
           /* first iteration is warm-up: moves inputs and operator data to the device */
           std::vector<double> times;
@@ -390,6 +407,10 @@ namespace {
           for (auto t : times) t_mean += t;
           t_mean /= times.size();
           const double gflop = flops_per_task * cfg.ntasks * 1e-9;
+          if (is_root && cfg.checksum) {
+            std::cout << "# checksum " << opname << " level " << n << " disp " << disp_str(disp) << " "
+                      << std::setprecision(17) << checksum / (cfg.nreps + 1) << std::defaultfloat << std::endl;
+          }
 
           if (is_root) {
             std::cout << opname << "," << K << "," << N << "," << n << "," << disp_str(disp) << ","
@@ -415,7 +436,7 @@ int main(int argc, char **argv) {
   if (opt.exists("-h") || opt.exists("--help")) {
     std::cout << "Usage: " << argv[0] << " [options]\n"
               << "  -op <list>     operators: coulomb,bsh,slater (default: coulomb,bsh)\n"
-              << "  -K <k>         polynomial order (default: 8; K=8 uses the WMMA path on sm_80+)\n"
+              << "  -K <k>         polynomial order (default: 8; K=8 and K=6 use tensor cores on sm_80+)\n"
               << "  -N <n>         functions per node (default: 16)\n"
               << "  -p <p>         threshold 10^-p (default: 6)\n"
               << "  -lo <lo>       smallest length scale resolved by the operator (default: 1e-6)\n"
@@ -430,6 +451,7 @@ int main(int argc, char **argv) {
               << "  -r <reps>      timed repetitions per point, after one warm-up (default: 3)\n"
               << "  -B <b>         max batch size, <=1 disables batching (default: mra default)\n"
               << "  -resnorms      also compute result norms (as for the last contribution)\n"
+              << "  -checksum      print a checksum of the result norms per point (implies -resnorms)\n"
               << "  -all           also run points where every function is screened out\n"
               << "  -s <seed>      random seed (default: 5551212)\n"
               << "  -c <cores>     number of cores (default: all)\n";
@@ -453,7 +475,8 @@ int main(int argc, char **argv) {
   cfg.cspread = opt.parse("-cspread", 0.0);
   cfg.ntasks = opt.parse("-n", 256);
   cfg.nreps = opt.parse("-r", 3);
-  cfg.with_resnorms = opt.exists("-resnorms");
+  cfg.checksum = opt.exists("-checksum");
+  cfg.with_resnorms = opt.exists("-resnorms") || cfg.checksum;
   cfg.all_points = opt.exists("-all");
   cfg.seed = opt.parse("-s", 5551212L);
   int cores = opt.parse("-c", -1);
