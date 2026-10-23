@@ -502,20 +502,28 @@ namespace mra
 
         // Recur up
         if (key.level() > 0) {
+          /* The parent marks this node as a child leaf of every function it does not
+           * keep (see mark_truncated_children_leaf), so a node kept for no function --
+           * truncated away, or without coefficients below it -- is not part of the
+           * output tree and is not sent, as in make_truncate. Its descendants are not
+           * kept either (a function is only dropped where no child keeps it). */
+          bool any_kept = false;
+          for (size_type i = 0; i < kept.size() && !any_kept; ++i) any_kept = (kept[i] != T(0));
           // will not return
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::forward(
+          auto sends = ttg::device::forward(
             // select to which child of our parent we send
             select_send_up(key, std::move(p), std::make_index_sequence<num_children>{}, "compress"),
             // and forward our own "kept" contribution the same way, offset
             // to the parent's kept0..kept7 terminal group
-            select_send_up<num_children>(key, std::move(kept), std::make_index_sequence<num_children>{}, "compress-kept"),
-            // Send result to output tree
-            ttg::device::send<out_terminal_id>(key, std::move(result)));
+            select_send_up<num_children>(key, std::move(kept), std::make_index_sequence<num_children>{}, "compress-kept"));
+          // Send result to output tree
+          if (any_kept) sends.push_back(ttg::device::send<out_terminal_id>(key, std::move(result)));
+          co_await std::move(sends);
 #else
             select_send_up(key, std::move(p), std::make_index_sequence<num_children>{}, "compress");
             select_send_up<num_children>(key, std::move(kept), std::make_index_sequence<num_children>{}, "compress-kept");
-            ttg::send<out_terminal_id>(key, std::move(result));
+            if (any_kept) ttg::send<out_terminal_id>(key, std::move(result));
 #endif
         } else {
           bool all_correct = true;
