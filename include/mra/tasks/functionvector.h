@@ -128,8 +128,13 @@ namespace mra {
       }
       m_impl->size = N;
       Impl* impl = m_impl.get();
-      auto tt = ttg::make_tt([impl, name](const key_type& key, node_type&& node) {
+      /* a device task, though it does no device work: TTG pushes data that is on a
+       * device out to the host when it is sent to a host task */
+      auto tt = ttg::make_tt<Space>([impl, name](const key_type& key, node_type&& node) -> TASKTYPE {
         impl->insert(key, std::move(node), name);
+#ifndef MRA_ENABLE_HOST
+        co_return;
+#endif // MRA_ENABLE_HOST
       }, ttg::edges(in), ttg::edges(), name, {"input"}, {});
       tt->set_defer_writer(true);
       return tt;
@@ -183,9 +188,14 @@ namespace mra {
        * share with read-only consumers without copying it. Moving it on from the
        * task that took it over marks it read-only, after which TTG shares it among
        * all consumers of `out` (and defers a single consumer that takes it over).
-       * Same (default) keymap as the store, so the node stays on its process. */
-      auto forward_tt = ttg::make_tt([](const key_type& key, node_type&& node) {
+       * Same (default) keymap as the store, so the node stays on its process. A
+       * device task, as the store, so that the node is not pushed out to the host. */
+      auto forward_tt = ttg::make_tt<Space>([](const key_type& key, node_type&& node) -> TASKTYPE {
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::send<0>(key, std::move(node));
+#else  // MRA_ENABLE_HOST
         ttg::send<0>(key, std::move(node));
+#endif // MRA_ENABLE_HOST
       }, ttg::edges(forward_e), ttg::edges(out), name + "-forward", {"input"}, {"output"});
 
       auto ins = std::make_tuple(dispatch_tt->template in<0>());
@@ -196,8 +206,12 @@ namespace mra {
       ops.push_back(std::move(forward_tt));
       if (keep) {
         Impl* impl = m_impl.get();
-        auto restore_tt = ttg::make_tt([impl, name](const key_type& key, node_type&& node) {
+        /* a device task, as the store */
+        auto restore_tt = ttg::make_tt<Space>([impl, name](const key_type& key, node_type&& node) -> TASKTYPE {
           impl->insert(key, std::move(node), name + "-restore");
+#ifndef MRA_ENABLE_HOST
+          co_return;
+#endif // MRA_ENABLE_HOST
         }, ttg::edges(out), ttg::edges(), name + "-restore", {"input"}, {});
         restore_tt->set_defer_writer(true);
         ops.push_back(std::move(restore_tt));
