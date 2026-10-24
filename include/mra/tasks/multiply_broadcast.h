@@ -195,14 +195,22 @@ namespace mra {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        mul_tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_broadcast_tmp_size<NDIM>(K)*std::max<size_type>(n_leaf, 1), TempScope);
+        /* only the unbatched product kernel needs it; batched, the scratch is the batch
+         * slot's, see submit_multiply_broadcast_batch_leader */
+#ifndef MRA_ENABLE_HOST
+        const std::size_t tmp_size = enable_batching ? 0 : multiply_broadcast_tmp_size<NDIM>(K)*n_leaf;
+#else
+        const std::size_t tmp_size = multiply_broadcast_tmp_size<NDIM>(K)*n_leaf;
+#endif
+        if (tmp_size > 0) mul_tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, TempScope);
         /* the nodes the inherited coefficients belong to: a, then b_0..b_N-1 */
         inh_keys = ttg::Buffer<mra::Key<NDIM>, DeviceAllocator<mra::Key<NDIM>>>(1 + N);
         mra::Key<NDIM>* ik = inh_keys.host_ptr();
         ik[0] = ainh.origin_key(0);
         for (size_type j = 0; j < N; ++j) ik[1 + j] = binh.origin_key(j);
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(db, phibar.buffer(), phi.buffer(), quad_x.buffer(), mul_tmp, inh_keys);
+        auto input = ttg::device::Input(db, phibar.buffer(), phi.buffer(), quad_x.buffer(), inh_keys);
+        if (tmp_size > 0) input.add(mul_tmp);
         if (!result.empty()) input.add(result.coeffs().buffer());
         if (!merged.empty()) input.add(merged.coeffs().buffer());
         for (const node_type* n : {&anode, &bnode, &ainh, &binh}) {
@@ -217,21 +225,20 @@ namespace mra {
         std::remove_const_t<decltype(merged.coeffs().current_view())> merged_view;
         if (merge_b) merged_view = merged.coeffs().current_view();
         const mra::Key<NDIM>* inh_keys_ptr = inh_keys.current_device_ptr();
-        T* tmp_ptr = mul_tmp.current_device_ptr();
         /* merging: never both, binh holds coefficients only of functions whose tree ended above */
 #ifndef MRA_ENABLE_HOST
         if (enable_batching) {
           /* a task can join one batch only, so the leader also merges for every member that
            * needs it; the sparsity of the outputs is pushed by the leader along with the batch */
           auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, a_leaf_view, a_inh_view, b_leaf_view, b_inh_view,
-                                                                  inh_keys_ptr, out_view, N, tmp_ptr,
+                                                                  inh_keys_ptr, out_view, N,
                                                                   result.coeffs(), n_leaf,
                                                                   merged_view, merged.coeffs(), n_merged);
           if (batch.is_leader()) {
             detail::submit_merge_batch<T, NDIM>(*merge_pool, batch.size(), [&](std::size_t m) {
               auto& b = batch[m];
-              return std::forward_as_tuple(b.template get<3>(), b.template get<4>(), b.template get<11>(),
-                                           b.template get<12>(), b.template get<7>(), b.template get<13>());
+              return std::forward_as_tuple(b.template get<3>(), b.template get<4>(), b.template get<10>(),
+                                           b.template get<11>(), b.template get<7>(), b.template get<12>());
             }, K, total_functions);
           }
           detail::submit_multiply_broadcast_batch_leader<T, NDIM>(batch, *batch_pool, D, phibar.current_view(),
@@ -252,7 +259,8 @@ namespace mra {
             submit_multiply_broadcast_kernel<T, NDIM>(D, key, a_leaf_view, a_inh_view, b_leaf_view, b_inh_view,
                                                       inh_keys_ptr, out_view,
                                                       phibar.current_view(), phi.current_view(), quad_x.current_view(),
-                                                      N, n_leaf, K, tmp_ptr, ttg::device::current_stream());
+                                                      N, n_leaf, K, mul_tmp.current_device_ptr(),
+                                                      ttg::device::current_stream());
           }
         }
       }

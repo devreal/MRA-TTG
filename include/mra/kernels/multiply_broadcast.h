@@ -37,7 +37,9 @@ namespace mra {
      * holds them, else from a_inh (at inh_keys[0], an ancestor of key), likewise b_j
      * (inh_keys[1+j]). As madness::FunctionImpl::do_mul: values at the quadrature
      * points of the node, product, back to coefficients. Executed by one block; shared
-     * by multiply_broadcast_kernel and multiply_broadcast_kernel_batched.
+     * by multiply_broadcast_kernel and multiply_broadcast_kernel_batched. The block's
+     * scratch is the tmp_slot-th one of tmp: the position for the unbatched kernel, the
+     * block for the batched one (see submit_multiply_broadcast_batch_leader).
      */
     template <typename T, Dimension NDIM>
     DEVSCOPE void multiply_broadcast_process_one(
@@ -55,7 +57,8 @@ namespace mra {
       size_type N,
       size_type K,
       T* tmp,
-      size_type pos)
+      size_type pos,
+      size_type tmp_slot)
     {
       SHARED DenseTensorView<const T, NDIM> a, b;
       SHARED DenseTensorView<T, NDIM> out, acube, bcube;
@@ -65,7 +68,7 @@ namespace mra {
       const size_type K2NDIM = std::pow(K, NDIM);
       if (is_team_lead()) {
         j = find_nth_nonzero(N, pos, out_view);
-        T* block_tmp = &tmp[pos*multiply_broadcast_tmp_size<NDIM>(K)];
+        T* block_tmp = &tmp[tmp_slot*multiply_broadcast_tmp_size<NDIM>(K)];
         acube = DenseTensorView<T, NDIM>(&block_tmp[0], K, K, K);
         bcube = DenseTensorView<T, NDIM>(&block_tmp[K2NDIM], K, K, K);
         workspace = &block_tmp[2*K2NDIM];
@@ -116,7 +119,7 @@ namespace mra {
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         multiply_broadcast_process_one<T, NDIM>(D, key, a_leaf, a_inh, b_leaf, b_inh, inh_keys, out_view,
-                                                phibar, phi, quad_x, N, K, tmp, pos);
+                                                phibar, phi, quad_x, N, K, tmp, pos, pos);
       }
     }
 
@@ -161,9 +164,10 @@ namespace mra {
    * Batching support for the multiply_broadcast kernel, used by
    * ttg::device::coop()/TT::set_batch_matcher() in mra/tasks/multiply_broadcast.h.
    * The operator data (D, phibar, phi, quad_x, K) is the same for every node of the
-   * TT, so batching is unrestricted; the views, source keys and scratch of each node
-   * travel per member. The combined launch is flattened over the sum of each
-   * member's non-zero output functions, see compress_kernel_batched.
+   * TT, so batching is unrestricted; the views and source keys of each node travel
+   * per member. The combined launch is flattened over the sum of each member's
+   * non-zero output functions, see compress_kernel_batched; its scratch is one
+   * occupancy-sized region of the batch slot, indexed by block.
    */
   namespace detail {
 
@@ -176,8 +180,7 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,   // b_inh
       const Key<NDIM>*,              // inh_keys
       SparseTensorView<T, NDIM+1>,   // out
-      size_type,                     // N: this member's function count
-      T*                             // tmp: this member's scratch, indexed by local position
+      size_type                      // N: this member's function count
     >;
 
     struct MultiplyBroadcastBatchArgIdx {
@@ -189,7 +192,6 @@ namespace mra {
       static constexpr std::size_t inh_keys = 5;
       static constexpr std::size_t out      = 6;
       static constexpr std::size_t n        = 7;
-      static constexpr std::size_t tmp      = 8;
     };
 
     template <typename T, Dimension NDIM>
@@ -199,6 +201,7 @@ namespace mra {
       const size_type* member_offsets,          // device ptr, size == num_members+1
       size_type num_members,
       size_type total_nonzero,
+      T* shared_tmp,                            // occupancy-sized scratch of the batch slot, indexed by block
       const Domain<NDIM>& D,
       const concepts::TensorView<2> auto phibar,
       const concepts::TensorView<2> auto phi,
@@ -219,14 +222,14 @@ namespace mra {
                                                 std::get<idx::b_leaf>(arg), std::get<idx::b_inh>(arg),
                                                 std::get<idx::inh_keys>(arg), std::get<idx::out>(arg),
                                                 phibar, phi, quad_x, std::get<idx::n>(arg), K,
-                                                std::get<idx::tmp>(arg), local_pos);
+                                                shared_tmp, local_pos, blockIdx.x);
       }
     }
 
     /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(key, a_leaf, a_inh, b_leaf, b_inh,
-     * inh_keys, out_view, N, tmp, out, n_nonzero, ...)`; the leader marshals every member
+     * inh_keys, out_view, N, out, n_nonzero, ...)`; the leader marshals every member
      * and submits one combined launch. A member without non-zero output functions
      * (it only merges) takes part without contributing work. The sparsity of each
      * member's output is copied to its device buffer as part of the single H2D copy
@@ -249,7 +252,7 @@ namespace mra {
 
       const std::size_t nb = batch.size();
       size_type total_nonzero = 0;
-      for (std::size_t m = 0; m < nb; ++m) total_nonzero += batch[m].template get<10>();
+      for (std::size_t m = 0; m < nb; ++m) total_nonzero += batch[m].template get<9>();
       if (total_nonzero == 0) return;
 
       const auto device = ttg::device::current_device();
@@ -265,16 +268,16 @@ namespace mra {
 
       size_type total_sparsity_bytes = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        if (batch[m].template get<10>() > 0) total_sparsity_bytes += batch[m].template get<7>();
+        if (batch[m].template get<9>() > 0) total_sparsity_bytes += batch[m].template get<7>();
       }
       slot.sparsity.resize(total_sparsity_bytes);
 
       size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
         const size_type m_N = batch[m].template get<7>();
-        const size_type m_n_nonzero = batch[m].template get<10>();
+        const size_type m_n_nonzero = batch[m].template get<9>();
         if (m_n_nonzero > 0) {
-          auto& m_out_tensor = batch[m].template get<9>();
+          auto& m_out_tensor = batch[m].template get<8>();
           sparsity_to_bytes(m_out_tensor.sparsity(), reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset]), m_N);
           slot.extra_dsts.push_back(const_cast<T*>(m_out_tensor.buffer().device_ptr_on(device)));
           slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset]);
@@ -283,7 +286,7 @@ namespace mra {
         }
         slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<1>(), batch[m].template get<2>(),
                                batch[m].template get<3>(), batch[m].template get<4>(), batch[m].template get<5>(),
-                               batch[m].template get<6>(), m_N, batch[m].template get<8>());
+                               batch[m].template get<6>(), m_N);
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;
       }
 
@@ -291,8 +294,18 @@ namespace mra {
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
       Dim3 thread_dims = max_thread_dims(2*K);
       const size_type smem_size = multiply_broadcast_smem_size<T, NDIM>(K);
-      CALL_KERNEL((multiply_broadcast_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, D, phibar, phi, quad_x, K));
+      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+      /* cap the grid at occupancy (the kernel's grid-stride loop covers the rest) so the
+       * scratch is one region per slot, sized from the cap and not from this launch --
+       * see submit_compress_kernel_batched */
+      auto kernel = multiply_broadcast_kernel_batched<T, NDIM, std::decay_t<decltype(phibar)>,
+                                                      std::decay_t<decltype(phi)>, std::decay_t<decltype(quad_x)>>;
+      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
+      const size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * multiply_broadcast_tmp_size<NDIM>(K));
+      CALL_KERNEL((multiply_broadcast_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, shared_tmp, D,
+                   phibar, phi, quad_x, K));
       checkSubmit();
       pool.mark_submitted(slot, stream);
     }

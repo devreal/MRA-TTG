@@ -321,7 +321,13 @@ namespace mra {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(derivative_tmp_size<NDIM>(K)*n_nonzero, TempScope);
+        /* batched, the scratch is the batch slot's, see submit_derivative_batch_leader */
+#ifndef MRA_ENABLE_HOST
+        const std::size_t tmp_size = enable_batching ? 0 : derivative_tmp_size<NDIM>(K)*n_nonzero;
+#else
+        const std::size_t tmp_size = derivative_tmp_size<NDIM>(K)*n_nonzero;
+#endif
+        if (tmp_size > 0) tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, TempScope);
         /* per function, the nodes the coefficients of the left, center, and right nodes
          * belong to; the kernel projects them to the neighbors and to this node */
         src_keys = ttg::Buffer<key_type, DeviceAllocator<key_type>>(3*N);
@@ -333,7 +339,8 @@ namespace mra {
         }
 #ifndef MRA_ENABLE_HOST
         auto inputs = ttg::device::Input(db, result.coeffs().buffer(), operators.buffer(), phibar.buffer(),
-                                         phi.buffer(), quad_x.buffer(), tmp, src_keys);
+                                         phi.buffer(), quad_x.buffer(), src_keys);
+        if (tmp_size > 0) inputs.add(tmp);
         for (const node_type* n : {&center, &left, &right}) {
           if (!n->empty()) inputs.add(n->coeffs().buffer());
         }
@@ -344,12 +351,11 @@ namespace mra {
         auto left_view = left.coeffs().current_view(), center_view = center.coeffs().current_view();
         auto right_view = right.coeffs().current_view();
         const key_type* src_keys_ptr = src_keys.current_device_ptr();
-        T* tmp_ptr = tmp.current_device_ptr();
 #ifndef MRA_ENABLE_HOST
         if (enable_batching) {
           /* the result's sparsity is pushed by the leader along with the batch */
           auto batch = co_await ttg::device::coop<key_type>(key, src_keys_ptr, left_view, center_view, right_view,
-                                                            result_view, tmp_ptr, N, result.coeffs(), n_nonzero);
+                                                            result_view, N, result.coeffs(), n_nonzero);
           detail::submit_derivative_batch_leader<T, NDIM>(batch, *batch_pool, D, operators.current_view(),
                                                           phi.current_view(), phibar.current_view(),
                                                           quad_x.current_view(), K, T(0), T(0), axis,
@@ -363,7 +369,7 @@ namespace mra {
           submit_derivative_kernel(D, key, src_keys_ptr, left_view, center_view, right_view,
                                    operators.current_view(), result_view,
                                    phi.current_view(), phibar.current_view(), quad_x.current_view(),
-                                   tmp_ptr, N, n_nonzero, K, T(0), T(0), axis,
+                                   tmp.current_device_ptr(), N, n_nonzero, K, T(0), T(0), axis,
                                    FunctionData<T, NDIM>::BC_FREE, FunctionData<T, NDIM>::BC_FREE,
                                    ttg::device::current_stream());
         }
