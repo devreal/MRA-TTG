@@ -209,7 +209,8 @@ namespace mra {
        * host->device transfer instead of 8 small ones. A structurally-absent
        * child (a true leaf) has its row filled with zeros there, which the
        * "!= T(0)" check below already treats the same as the old per-child
-       * nullptr check did.
+       * nullptr check did. It is only read where the comparison can hold, so
+       * it may be nullptr where truncation is disabled or key.level() <= 1.
        */
       if (is_team_lead()) {
         if (key.level() > 1 && d_sumsq[tmp_pos] < trunc_tol*trunc_tol) {

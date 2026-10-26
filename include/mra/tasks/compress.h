@@ -334,8 +334,13 @@ namespace mra
           // structurally-absent child (kept_children[c]->empty(), i.e. a
           // true leaf) leaves its row zeroed, which compress_process_one's
           // "!= T(0)" check already treats the same as "not kept".
-          ttg::Buffer<T, DeviceAllocator<T>> child_kept_packed(N * num_children, ttg::scope::SyncIn);
-          {
+          // The kernel only reads it where it may truncate (see
+          // compress_process_one), so it is neither built nor moved to the
+          // device otherwise, and the kernel gets a nullptr instead.
+          const bool need_child_kept = enable_truncate && key.level() > 1;
+          ttg::Buffer<T, DeviceAllocator<T>> child_kept_packed;
+          if (need_child_kept) {
+            child_kept_packed.reset(N * num_children, ttg::scope::SyncIn);
             T* packed = child_kept_packed.host_ptr();
             std::fill(packed, packed + N * num_children, T(0));
             for (size_type c = 0; c < num_children; ++c) {
@@ -347,9 +352,9 @@ namespace mra
           }
 
 #ifndef MRA_ENABLE_HOST
-          auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(),
-                                          d_sumsq, child_kept_packed);
+          auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(), d_sumsq);
           if (tmp_size > 0) input.add(tmp_scratch);
+          if (need_child_kept) input.add(child_kept_packed);
           auto select_in = [&](const auto& in) {
             if (!in.empty()) {
               input.add(in.coeffs().buffer());
@@ -384,8 +389,9 @@ namespace mra
 
           // Single packed [num_children x N] "kept" device pointer, for the
           // in-kernel truncation decision -- valid right after select()
-          // above stages child_kept_packed onto the device.
-          const T* child_kept_ptr = child_kept_packed.current_device_ptr();
+          // above stages child_kept_packed onto the device; nullptr where the
+          // kernel cannot truncate.
+          const T* child_kept_ptr = need_child_kept ? child_kept_packed.current_device_ptr() : nullptr;
 
 #ifndef MRA_ENABLE_HOST
           if (enable_compress_batching) {
