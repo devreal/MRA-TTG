@@ -130,6 +130,97 @@ namespace mra {
       return find_nth_pred(N, pos, view, [](const ViewT& v, size_type i) { return v.is_allocated(i); });
     }
 
+#if defined(HAVE_DEVICE_ARCH)
+    /**
+     * Helpers for the warp-cooperative scans below (find_nth_*_warp): one
+     * step tests one entry per lane of the calling warp, whose lanes beyond
+     * the block size need not exist.
+     */
+    struct ScanWarp {
+#if defined(__CUDA_ARCH__)
+      using bits_type = unsigned;
+#else
+      using bits_type = unsigned long long;
+#endif
+      unsigned lane;
+      unsigned nlanes;  // existing lanes of the warp
+
+      DEVSCOPE ScanWarp() {
+        lane = thread_id() % MRA_WARP_SIZE;
+        const unsigned warp_base = thread_id() - lane;
+        nlanes = (block_size() - warp_base < MRA_WARP_SIZE) ? block_size() - warp_base : MRA_WARP_SIZE;
+      }
+
+      /* the lanes for which p is true */
+      DEVSCOPE bits_type ballot(bool p) const {
+#if defined(__CUDA_ARCH__)
+        return __ballot_sync((nlanes >= 32) ? 0xffffffffu : ((1u << nlanes) - 1), p);
+#else
+        return __ballot(p);
+#endif
+      }
+
+      DEVSCOPE static size_type popc(bits_type bits) {
+#if defined(__CUDA_ARCH__)
+        return __popc(bits);
+#else
+        return __popcll(bits);
+#endif
+      }
+
+      /* the lane of the k'th (0-indexed) set bit of bits */
+      DEVSCOPE static size_type nth_set_bit(bits_type bits, size_type k) {
+        for (; k > 0; --k) bits &= bits - 1;
+#if defined(__CUDA_ARCH__)
+        return __ffs(bits) - 1;
+#else
+        return __ffsll(bits) - 1;
+#endif
+      }
+    };
+#endif // HAVE_DEVICE_ARCH
+
+    /**
+     * Same as find_nth_pred, but computed cooperatively by the calling warp,
+     * testing one entry per lane per step (O(N/warp size) steps instead of
+     * O(N)): all existing lanes of the warp must call it, and all of them get
+     * the result. Intended for the first warp of a block, whose lanes beyond
+     * the block size need not exist. Serial on the host.
+     */
+    template<typename ViewT, typename PredT>
+    SCOPE size_type find_nth_pred_warp(size_type N, size_type pos,
+                                       const ViewT& view, PredT&& pred) {
+#if defined(HAVE_DEVICE_ARCH)
+      const ScanWarp sw;
+      size_type count = 0;
+      for (size_type base = 0; base < N; base += sw.nlanes) {
+        const size_type i = base + sw.lane;
+        const auto bits = sw.ballot((i < N) && pred(view, i));
+        const size_type c = ScanWarp::popc(bits);
+        if (pos < count + c) {
+          return base + ScanWarp::nth_set_bit(bits, pos - count);
+        }
+        count += c;
+      }
+      assert(false && "find_nth_pred_warp: pos out of range for the number of matching entries in view");
+      return N;
+#else  // HAVE_DEVICE_ARCH
+      return find_nth_pred(N, pos, view, std::forward<PredT>(pred));
+#endif // HAVE_DEVICE_ARCH
+    }
+
+    /** Warp-cooperative find_nth_nonzero, see find_nth_pred_warp. */
+    template<typename ViewT>
+    SCOPE size_type find_nth_nonzero_warp(size_type N, size_type pos, const ViewT& view) {
+      return find_nth_pred_warp(N, pos, view, [](const ViewT& v, size_type i) { return v.is_nonzero(i); });
+    }
+
+    /** Warp-cooperative find_nth_allocated, see find_nth_pred_warp. */
+    template<typename ViewT>
+    SCOPE size_type find_nth_allocated_warp(size_type N, size_type pos, const ViewT& view) {
+      return find_nth_pred_warp(N, pos, view, [](const ViewT& v, size_type i) { return v.is_allocated(i); });
+    }
+
     /**
      * Same as find_nth_nonzero, but for kernels whose skip condition ORs two
      * (or more) genuinely independent views' sparsity -- e.g. reconstruct's
@@ -190,6 +281,51 @@ namespace mra {
                                                       const ResultViewT& result_view, const ArrT& r_arr,
                                                       std::index_sequence<Is...>) {
       return find_nth_nonzero_any(N, pos, node_view, from_parent_view, result_view, r_arr[Is]...);
+    }
+
+    /**
+     * Warp-cooperative find_nth_nonzero_any, see find_nth_pred_warp for the
+     * calling convention. Written out rather than as find_nth_pred_warp with
+     * a predicate over the views pack, and with the same comma-fold as
+     * find_nth_nonzero_any, to steer clear of the nvcc pack-expansion issues
+     * described there.
+     */
+    template<typename ViewT, typename... MoreViews>
+    SCOPE size_type find_nth_nonzero_any_warp(size_type N, size_type pos, const ViewT& view, const MoreViews&... more) {
+#if defined(HAVE_DEVICE_ARCH)
+      const ScanWarp sw;
+      size_type count = 0;
+      for (size_type base = 0; base < N; base += sw.nlanes) {
+        const size_type i = base + sw.lane;
+        bool nz = false;
+        if (i < N) {
+          nz = view.is_nonzero(i);
+          ((nz = nz || more.is_nonzero(i)), ...);
+        }
+        const auto bits = sw.ballot(nz);
+        const size_type c = ScanWarp::popc(bits);
+        if (pos < count + c) {
+          return base + ScanWarp::nth_set_bit(bits, pos - count);
+        }
+        count += c;
+      }
+      assert(false && "find_nth_nonzero_any_warp: pos out of range for the number of non-zero entries in the views");
+      return N;
+#else  // HAVE_DEVICE_ARCH
+      return find_nth_nonzero_any(N, pos, view, more...);
+#endif // HAVE_DEVICE_ARCH
+    }
+
+    /** Warp-cooperative find_nth_nonzero_any_with_result, see find_nth_nonzero_any_warp. */
+    template<typename NodeViewT, typename FPViewT, typename ResultViewT, typename ArrT, std::size_t... Is>
+#if defined(__CUDA_ARCH__)
+    __forceinline__
+#endif
+    SCOPE size_type find_nth_nonzero_any_with_result_warp(size_type N, size_type pos,
+                                                           const NodeViewT& node_view, const FPViewT& from_parent_view,
+                                                           const ResultViewT& result_view, const ArrT& r_arr,
+                                                           std::index_sequence<Is...>) {
+      return find_nth_nonzero_any_warp(N, pos, node_view, from_parent_view, result_view, r_arr[Is]...);
     }
 
     /**

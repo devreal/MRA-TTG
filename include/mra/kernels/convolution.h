@@ -395,14 +395,10 @@ namespace mra{
       FT& f,
       InT& in,
       ResultT& result,
+      size_type fnid,
       size_type& i)
     {
-      // result_view has exactly n_nonzero non-zero entries, so this
-      // always finds a valid function id -- see submit_convolution_kernel.
-      // Excluded (zero) functions' resnorms entries are pre-filled with
-      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
-      // them here.
-      i = find_nth_allocated(N, tmp_pos, result_view);
+      i = fnid;
 
       const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
       const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
@@ -463,9 +459,22 @@ namespace mra{
       SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
 
+      // The function id of this position, searched for by the first warp.
+      // result_view has exactly n_nonzero non-zero entries, so this
+      // always finds a valid function id -- see submit_convolution_kernel.
+      // Excluded (zero) functions' resnorms entries are pre-filled with
+      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
+      // them here.
+      size_type fnid = N;
+#ifdef HAVE_DEVICE_ARCH
+      if (thread_id() < MRA_WARP_SIZE)
+#endif
+      {
+        fnid = find_nth_allocated_warp(N, tmp_pos, result_view);
+      }
       if (is_team_lead()) {
         convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos, tmp_slot,
-                                                f0, resultc, work1, work2, staged_in, f, in, result, i);
+                                                f0, resultc, work1, work2, staged_in, f, in, result, fnid, i);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {

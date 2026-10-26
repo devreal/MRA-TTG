@@ -105,12 +105,11 @@ namespace mra {
       NodeT& node,
       PT& p,
       DT& d,
+      size_type found_fnid,
       size_type& fnid)
     {
       const size_type TWOK2NDIM = std::pow(2*K,NDIM);
-      // p_in has exactly n_nonzero non-zero entries (that's how tmp_pos's
-      // range was sized), so this always finds a valid function id.
-      fnid = find_nth_nonzero(N, tmp_pos, p_in);
+      fnid = found_fnid;
       T* block_tmp = &tmp[tmp_slot*compress_tmp_size<NDIM>(K)];
       s = DenseTensorView<T, NDIM>(&block_tmp[0], DynamicDimensions<NDIM>(2*K, 2*K, 2*K));
       workspace = &block_tmp[TWOK2NDIM];
@@ -164,9 +163,19 @@ namespace mra {
       SHARED DenseTensorView<T, NDIM> s, p, d;
       SHARED size_type fnid;
 
+      // The function id of this position, searched for by the first warp.
+      // p_in has exactly n_nonzero non-zero entries (that's how tmp_pos's
+      // range was sized), so this always finds a valid function id.
+      size_type found_fnid = N;
+#ifdef HAVE_DEVICE_ARCH
+      if (thread_id() < MRA_WARP_SIZE)
+#endif
+      {
+        found_fnid = find_nth_nonzero_warp(N, tmp_pos, p_in);
+      }
       if (is_team_lead()) {
         compress_process_one_leader<T, NDIM>(node_in, p_in, result_in, in_views, tmp, K, N, tmp_pos, tmp_slot,
-                                              s, workspace, block_in_views, node, p, d, fnid);
+                                              s, workspace, block_in_views, node, p, d, found_fnid, fnid);
       }
       SYNCTHREADS();
       assert(!p.empty());

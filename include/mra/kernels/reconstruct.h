@@ -143,17 +143,10 @@ namespace mra {
       FromParentT& from_parent,
       BlockRArrT& block_r_arr,
       ResultT& result,
+      size_type found_fnid,
       size_type& fnid)
     {
-      // node_view/from_parent_view/result_view/r_arr[0..7] together have
-      // exactly n_nonzero positions where at least one is non-zero, so
-      // this always finds a valid function id -- see
-      // submit_reconstruct_kernel. result_view/r_arr must be included: a
-      // leaf/inner position can have an exactly-zero node/from_parent
-      // *value* yet still need its output slot visited (see
-      // mra/tasks/reconstruct.h's work_sparsity comment).
-      fnid = find_nth_nonzero_any_with_result(N, tmp_pos, node_view, from_parent_view, result_view, r_arr,
-                                              std::make_index_sequence<Key<NDIM>::num_children()>{});
+      fnid = found_fnid;
 
       T* block_tmp_ptr = &tmp_ptr[tmp_slot*reconstruct_tmp_size<NDIM>(K)];
       const size_type TWOK2NDIM = std::pow(2*K,NDIM);
@@ -212,9 +205,26 @@ namespace mra {
       SHARED DenseTensorView<T, NDIM> result;
       SHARED size_type fnid;
 
+      // The function id of this position, searched for by the first warp.
+      // node_view/from_parent_view/result_view/r_arr[0..7] together have
+      // exactly n_nonzero positions where at least one is non-zero, so
+      // this always finds a valid function id -- see
+      // submit_reconstruct_kernel. result_view/r_arr must be included: a
+      // leaf/inner position can have an exactly-zero node/from_parent
+      // *value* yet still need its output slot visited (see
+      // mra/tasks/reconstruct.h's work_sparsity comment).
+      size_type found_fnid = N;
+#ifdef HAVE_DEVICE_ARCH
+      if (thread_id() < MRA_WARP_SIZE)
+#endif
+      {
+        found_fnid = find_nth_nonzero_any_with_result_warp(N, tmp_pos, node_view, from_parent_view, result_view, r_arr,
+                                                           std::make_index_sequence<Key<NDIM>::num_children()>{});
+      }
       if (is_t0) {
         reconstruct_process_one_leader<T, NDIM>(node_view, tmp_ptr, from_parent_view, r_arr, result_view, N, K, tmp_pos, tmp_slot,
-                                                s, tmp_node, workspace, node, from_parent, block_r_arr, result, fnid);
+                                                s, tmp_node, workspace, node, from_parent, block_r_arr, result,
+                                                found_fnid, fnid);
       }
       SYNCTHREADS();
       reconstruct_kernel_impl(key, K, accumulate_NS, node, hg, from_parent, s, tmp_node, workspace, block_r_arr, result);
