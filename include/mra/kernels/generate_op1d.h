@@ -107,7 +107,7 @@ namespace mra {
     /// Ported from mra::Convolution::issmall (misc/convolutiondata.h).
     template <typename T>
     DEVSCOPE bool op1d_issmall(T expnt, Level n, Translation lx) {
-      T beta = expnt * std::exp2(T(-2) * T(n));
+      T beta = std::ldexp(expnt, -2 * int(n)); // expnt * 4^-n
       Translation l = lx == 0 ? 0 : std::abs(lx) - 1;
       return beta * T(l) * T(l) > T(49.0);
     }
