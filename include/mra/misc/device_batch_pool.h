@@ -14,6 +14,7 @@
 
 #ifndef MRA_ENABLE_HOST
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -191,8 +192,12 @@ namespace mra::detail {
       ~slot_t() {
         // dev_args frees itself (FixedDeviceRegion's destructor).
 #if defined(MRA_ENABLE_CUDA)
+        // the device regions are freed after this body runs: wait for the last
+        // copy or launch that used them
+        if (event_recorded) cudaEventSynchronize(event);
         cudaEventDestroy(event);
 #elif defined(MRA_ENABLE_HIP)
+        if (event_recorded) hipEventSynchronize(event);
         hipEventDestroy(event);
 #endif
       }
@@ -288,16 +293,40 @@ namespace mra::detail {
 
     BatchPool<Arg>& get(int device_id) {
       auto& e = entries[device_id];
-      std::call_once(e.once, [&]{ e.pool = std::make_unique<BatchPool<Arg>>(device_id); });
-      return *e.pool;
+      BatchPool<Arg>* p = e.pool.load(std::memory_order_acquire);
+      if (p == nullptr) {
+        std::lock_guard<std::mutex> lock(e.mtx);
+        p = e.pool.load(std::memory_order_relaxed);
+        if (p == nullptr) {
+          p = new BatchPool<Arg>(device_id);
+          e.pool.store(p, std::memory_order_release);
+        }
+      }
+      return *p;
+    }
+
+    /**
+     * Frees every device's pool. The pools' device memory comes from PaRSEC's
+     * zone (see FixedDeviceRegion), so a registry that outlives the TTs using
+     * it (a process-wide static, e.g. sparsity_pool_registry()) must release
+     * it before PaRSEC tears its devices down: mra::finalize() runs this via
+     * mra::detail::at_finalize. No task may use the registry concurrently; a
+     * later get() creates the pool anew.
+     */
+    void release() {
+      for (auto& e : entries) {
+        std::lock_guard<std::mutex> lock(e.mtx);
+        delete e.pool.exchange(nullptr, std::memory_order_acq_rel);
+      }
     }
 
     int get_max_batch_size() const { return max_batch_size; }
 
    private:
     struct entry_t {
-      std::once_flag once;
-      std::unique_ptr<BatchPool<Arg>> pool;
+      std::mutex mtx;
+      std::atomic<BatchPool<Arg>*> pool{nullptr};
+      ~entry_t() { delete pool.load(std::memory_order_relaxed); }
     };
     std::vector<entry_t> entries;
     int max_batch_size;
@@ -424,8 +453,12 @@ namespace mra::detail {
         // (FixedDeviceRegion's destructor, via the matching deallocator for
         // however they were actually allocated).
 #if defined(MRA_ENABLE_CUDA)
+        // the device regions are freed after this body runs: wait for the last
+        // copy or launch that used them
+        if (event_recorded) cudaEventSynchronize(event);
         cudaEventDestroy(event);
 #elif defined(MRA_ENABLE_HIP)
+        if (event_recorded) hipEventSynchronize(event);
         hipEventDestroy(event);
 #endif
       }

@@ -34,6 +34,7 @@ namespace mra {
 
   void finalize() {
     madness::finalize();
+    detail::run_finalize_hooks();
     ttg::finalize();
   }
 
