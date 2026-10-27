@@ -8,6 +8,7 @@
 #include <iostream>
 #include "mra/kernels.h"
 #include "mra/tasks/common.h"
+#include "mra/misc/batch_group.h"
 #include "mra/misc/batch_size.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
@@ -45,7 +46,8 @@ namespace mra
     const bool enable_truncate = false,
     const T thresh = T{},
     const int truncate_mode = 0,
-    const T cell_min_width = T{})
+    const T cell_min_width = T{},
+    const BatchGroup& batch_group = {})
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
     /**
@@ -90,7 +92,13 @@ namespace mra
     // with; it's unrestricted from the start.
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>> compress_pool;
     if (enable_compress_batching) {
-      compress_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      // shared by every instance of batch_group, whose batches may mix their
+      // tasks: the leader's K, is_ns and hgT (which only depends on K) apply
+      // to the whole batch
+      using registry_t = detail::GroupedBatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>;
+      compress_pool = batch_group.pool<registry_t>([]{
+        return std::make_shared<registry_t>(ttg::device::num_devices(), mra::get_batch_size());
+      }, K, is_ns);
     }
 #else
     // GroupedBatchPoolRegistry only exists on device builds; this placeholder
@@ -599,6 +607,7 @@ namespace mra
       std::get<2>(ttt)->set_batch_matcher(
           [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
           max_batch_size);
+      batch_group.add(std::get<2>(ttt));
     }
 #endif // MRA_ENABLE_HOST
 

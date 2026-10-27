@@ -7,6 +7,7 @@
  *  - make_square, and the density sum_i occ_i f_i^2 (square, compress, transform)
  *  - make_derivative, and the kinetic-energy matrix built from it
  *  - make_concat, and a transform over the concatenated set
+ *  - batching across instances of compress and concat sharing a mra::BatchGroup
  *  - make_transform with U computed in the graph from a reduction (matrix_inner)
  *
  * The functions are Gaussians with different centers and exponents so that
@@ -105,11 +106,13 @@ struct Graph {
   }
 
   /// MADNESS functions as compressed nodes on `out` (loaded reconstructed, compressed in the graph)
-  void load_compressed(vec_t& f, CompressedEdge& out, const std::string& name) {
+  void load_compressed(vec_t& f, CompressedEdge& out, const std::string& name,
+                       const mra::BatchGroup& batch_group = {}) {
     madness::reconstruct(f.front().world(), f);
     ReconstructedEdge reconstructed;
     add(mra::vmra::make_vmra_load(f, control, reconstructed, "load_" + name));
-    add(mra::make_compress(make_functions(f.size()), K, false, functiondata, reconstructed, out, "compress_" + name));
+    add(mra::make_compress(make_functions(f.size()), K, false, functiondata, reconstructed, out, "compress_" + name,
+                           ttg::Void{}, ttg::Void{}, false, T{}, 0, T{}, batch_group));
   }
 };
 
@@ -515,6 +518,44 @@ static void test_concat(madness::World& world, mra::size_type K, vec_t& f, vec_t
     madness::compress(world, ref);
     check_close("concat", max_diff_norm(world, ref, result), max_norm(world, ref));
     check_well_formed(world, result, "concat");
+  }
+
+  /* [f, g] and [g, f] at once, the two compress and the two concat instances each
+   * sharing a batch group so that their tasks are batched together */
+  {
+    mra::BatchGroup compress_group, concat_group;
+    Graph G(K);
+    CompressedEdge fe, ge, fg_e, gf_e;
+    G.load_compressed(f, fe, "f", compress_group);
+    G.load_compressed(g, ge, "g", compress_group);
+    G.add(mra::make_concat<T, NDIM>(make_functions(NA), make_functions(NB), K, fe, ge, fg_e, "concat_fg",
+                                    ttg::Void{}, ttg::Void{}, concat_group));
+    G.add(mra::make_concat<T, NDIM>(make_functions(NB), make_functions(NA), K, ge, fe, gf_e, "concat_gf",
+                                    ttg::Void{}, ttg::Void{}, concat_group));
+    vec_t result_fg = empty_like(f.front(), N), result_gf = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result_fg, fg_e, true /* add_leaves */));
+    G.add(mra::vmra::make_vmra_store(result_gf, gf_e, true /* add_leaves */));
+    G.execute();
+    vec_t gf = g;
+    gf.insert(gf.end(), f.begin(), f.end());
+    vec_t ref_fg = madness::copy(world, fg), ref_gf = madness::copy(world, gf);
+    madness::compress(world, ref_fg);
+    madness::compress(world, ref_gf);
+    check_close("grouped concat [f,g]", max_diff_norm(world, ref_fg, result_fg), max_norm(world, ref_fg));
+    check_close("grouped concat [g,f]", max_diff_norm(world, ref_gf, result_gf), max_norm(world, ref_gf));
+    check_well_formed(world, result_fg, "grouped concat [f,g]");
+    check_well_formed(world, result_gf, "grouped concat [g,f]");
+
+    /* instances that disagree on the shared batch parameters cannot join a group */
+    bool threw = false;
+    try {
+      CompressedEdge a, b, c;
+      mra::make_concat<T, NDIM>(make_functions(NA), make_functions(NB), K + 1, a, b, c, "concat_bad",
+                                ttg::Void{}, ttg::Void{}, concat_group);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    check(threw || !mra::batching_enabled(), "batch group rejects a different K", threw ? 0 : 1, 0);
   }
 
   /* a combination of functions of both sets: transform of the concatenated set */

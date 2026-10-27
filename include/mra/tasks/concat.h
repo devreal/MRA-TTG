@@ -5,6 +5,7 @@
 #include <ttg.h>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_group.h"
 #include "mra/misc/batch_size.h"
 #include "mra/tensor/sparsityinfo.h"
 #include "mra/tensor/sparsitymanager.h"
@@ -38,7 +39,8 @@ namespace mra {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
     const std::string& name = "concat",
     ProcMap procmap = {},
-    DeviceMap devicemap = {})
+    DeviceMap devicemap = {},
+    const BatchGroup& batch_group = {})
   {
     using node_type = mra::FunctionsCompressedNode<T, NDIM>;
     constexpr const int OUT = 0, BALANCE_A = 1, BALANCE_B = 2;
@@ -52,8 +54,11 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ConcatBatchArg<T, NDIM>>> batch_pool;
     if (enable_batching) {
-      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::ConcatBatchArg<T, NDIM>>>(
-                     ttg::device::num_devices(), max_batch_size);
+      /* shared by every instance of batch_group, whose batches may mix their tasks */
+      using registry_t = detail::GroupedBatchPoolRegistry<detail::ConcatBatchArg<T, NDIM>>;
+      batch_pool = batch_group.pool<registry_t>([&]{
+        return std::make_shared<registry_t>(ttg::device::num_devices(), max_batch_size);
+      }, K);
     }
 #else  // MRA_ENABLE_HOST
     std::nullptr_t batch_pool = nullptr; // never used, only captured
@@ -129,6 +134,7 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
     if (enable_batching) {
       tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; }, max_batch_size);
+      batch_group.add(tt);
     }
 #endif // MRA_ENABLE_HOST
     return tt;
