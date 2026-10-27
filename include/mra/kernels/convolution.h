@@ -815,8 +815,7 @@ namespace mra{
      * submit_convolution_kernel_batched -- unlike reconstruct's batched
      * check, this one must run after that transfer, since result_view's own
      * device bitfield (what's being checked here) is exactly what it just
-     * wrote (see submit_grouped_copy's comment for why no scatter kernel is
-     * needed for that anymore).
+     * scattered (see submit_grouped_copy).
      */
     template <typename T, Dimension NDIM>
     GLOBALSCOPE void convolution_verify_sparsity_kernel(
@@ -880,8 +879,7 @@ namespace mra{
 
     // Single combined H2D transfer for args/offsets, plus every member's
     // sparsity-scatter and resnorms-zero destination copy -- see
-    // submit_grouped_copy's comment for the CUDA-batched-memcpy vs. fallback
-    // split, and for why no separate scatter kernel is needed anymore.
+    // submit_grouped_copy.
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
 #if defined(MRA_CHECK_NORMS)
@@ -953,17 +951,16 @@ namespace mra{
      * sparsitymanager.h), and queue a direct copy from that staged slice
      * straight to `m_out`'s own device buffer -- which is exactly where its
      * inline sparsity bitfield starts (see submit_grouped_copy's comment) --
-     * as one of slot.extra_dsts/extra_srcs/extra_sizes' entries. No scatter
-     * kernel needed: submit_convolution_kernel_batched's single
-     * submit_grouped_copy call carries this straight to its final
-     * destination alongside slot.args/slot.offsets.
+     * as one of slot.extra_dsts/extra_srcs/extra_sizes' entries, which
+     * submit_convolution_kernel_batched's single submit_grouped_copy call
+     * scatters to its final destination before the compute kernel runs.
      *
      * resnorms: each member also now passes its own `resnorms` Tensor
      * (get<12>(), the real Tensor -- separate from resnorms_view, get<3>(),
      * which is what the compute kernel itself uses) through coop(), purely
-     * so this leader can queue a second extra-copy entry per member: from a
-     * shared, persistent, pre-zeroed pinned buffer (zero_source_pool_registry)
-     * to `m_resnorms`'s own device buffer, zero-filling positions
+     * so this leader can queue a second extra-copy entry per member: a
+     * zero-fill (nullptr source) of `m_resnorms`'s own device buffer,
+     * covering positions
      * convolution_process_one won't visit for this member (mirroring
      * convolution_kernel's unbatched tail pass -- see its comment). Skipped
      * for a non-last-key accumulate_tt member, which passes an empty
@@ -999,7 +996,6 @@ namespace mra{
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();
       auto& pool = registry.get(device);
-      auto& zero_pool = zero_source_pool_registry().get(device);
 
       // Args/offsets regions sized to a fixed upper bound (max_batch_size,
       // +1 for offsets), and the sparsity staging region to max_batch_size *
@@ -1057,7 +1053,7 @@ namespace mra{
 
         if (!m_resnorms.empty()) {
           slot.extra_dsts.push_back(const_cast<T*>(m_resnorms_tensor.buffer().device_ptr_on(device)));
-          slot.extra_srcs.push_back(zero_pool.get(n * sizeof(T)));
+          slot.extra_srcs.push_back(nullptr); // zero-fill, see GroupedBatchPool::slot_t::extra_srcs
           slot.extra_sizes.push_back(n * sizeof(T));
         }
 

@@ -540,8 +540,7 @@ namespace mra {
 
     // Single combined H2D transfer for args/offsets, plus every member's
     // r_arr[0..7]/result scatter destination copy -- see
-    // submit_grouped_copy's comment for the CUDA-batched-memcpy vs. fallback
-    // split, and for why no separate scatter kernel is needed anymore.
+    // submit_grouped_copy.
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
 #if defined(MRA_CHECK_NORMS)
@@ -607,10 +606,9 @@ namespace mra {
      * straight to that tensor's own device buffer, which coincides exactly
      * with where its inline sparsity bitfield starts (see
      * submit_grouped_copy's comment) -- as entries in slot.extra_dsts/
-     * extra_srcs/extra_sizes. No scatter kernel needed:
-     * submit_reconstruct_kernel_batched's single submit_grouped_copy call
-     * carries these straight to their final destinations alongside
-     * slot.args/slot.offsets.
+     * extra_srcs/extra_sizes, which submit_reconstruct_kernel_batched's
+     * single submit_grouped_copy call scatters to their final destinations
+     * before the compute kernel runs.
      *
      * Flattening: each member also passes its own n_nonzero (get<8>())
      * through coop() -- already computed independently of batching,

@@ -209,8 +209,7 @@ namespace mra {
        * host->device transfer instead of 8 small ones. A structurally-absent
        * child (a true leaf) has its row filled with zeros there, which the
        * "!= T(0)" check below already treats the same as the old per-child
-       * nullptr check did. It is only read where the comparison can hold, so
-       * it may be nullptr where truncation is disabled or key.level() <= 1.
+       * nullptr check did.
        */
       if (is_team_lead()) {
         if (key.level() > 1 && d_sumsq[tmp_pos] < trunc_tol*trunc_tol) {
@@ -485,9 +484,7 @@ namespace mra {
     const size_type num_members = static_cast<size_type>(slot.args.size());
 
     // Single combined H2D transfer for args/offsets, plus every member's
-    // p_in/result_in scatter destination copy -- see submit_grouped_copy's
-    // comment for the CUDA-batched-memcpy vs. fallback split, and for why no
-    // separate scatter kernel is needed anymore.
+    // p_in/result_in scatter destination copy -- see submit_grouped_copy.
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
     Dim3 thread_dims = max_thread_dims(2*K);
@@ -538,10 +535,10 @@ namespace mra {
      * copies per member -- from each staged slice straight to that tensor's
      * own device buffer, which coincides exactly with where its inline
      * sparsity bitfield starts (see submit_grouped_copy's comment) -- as
-     * entries in slot.extra_dsts/extra_srcs/extra_sizes. No scatter kernel
-     * needed: submit_compress_kernel_batched's single submit_grouped_copy
-     * call carries these straight to their final destinations alongside
-     * slot.args/slot.offsets. This is independent of the flattening below:
+     * entries in slot.extra_dsts/extra_srcs/extra_sizes, which
+     * submit_compress_kernel_batched's single submit_grouped_copy call
+     * scatters to their final destinations before the compute kernel runs.
+     * This is independent of the flattening below:
      * it scatters bytes across the tensor's own full structural N range
      * (needed so is_zero()/is_nonzero() reads on p_in/result_in stay correct
      * for every real function id), not just the compacted non-zero subset.
