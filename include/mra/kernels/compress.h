@@ -30,7 +30,8 @@ namespace mra {
 
   namespace detail {
 
-    template<typename T, Dimension NDIM, typename PT, typename DT, typename HgtT, typename ST, typename InViewsT>
+    template<typename T, Dimension NDIM, typename PT, typename DT, typename HgtT, typename ST, typename InViewsT,
+             typename NST>
     DEVSCOPE void compress_kernel_impl(
       Key<NDIM> key,
       size_type K,
@@ -41,7 +42,8 @@ namespace mra {
       ST& s,
       T* workspace,
       T* d_sumsq,
-      const InViewsT& in_views)
+      const InViewsT& in_views,
+      const NST& ns)
     {
 
       for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
@@ -51,6 +53,12 @@ namespace mra {
       }
 
       transform(s, hgT, d, workspace);
+
+      // compressing from non-standard form: add this node's own [s|d] block, whose
+      // scaling part then travels up with the children's (see make_compress_from_ns)
+      if (!ns.empty()) {
+        d += ns;
+      }
 
       auto child_slice = get_child_slice<NDIM>(key, K, 0);
       if (!p.empty()) {
@@ -88,12 +96,13 @@ namespace mra {
      * check_name_hiding_by_template_parameters".
      */
     template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename InViewsT,
-             typename ST, typename BlockInViewsT, typename NodeT, typename PT, typename DT>
+             typename NSInT, typename ST, typename BlockInViewsT, typename NodeT, typename PT, typename DT, typename NST>
     DEVSCOPE void compress_process_one_leader(
       const NodeInT& node_in,
       PInT& p_in,
       ResultInT& result_in,
       const InViewsT& in_views,
+      const NSInT& ns_in,
       T* tmp,
       size_type K,
       size_type N,
@@ -105,6 +114,7 @@ namespace mra {
       NodeT& node,
       PT& p,
       DT& d,
+      NST& ns,
       size_type found_fnid,
       size_type& fnid)
     {
@@ -125,6 +135,11 @@ namespace mra {
         d = result_in(fnid);
       }
       node = node_in(fnid);
+      if (!ns_in.is_zero(fnid)) {
+        ns = ns_in(fnid);
+      } else {
+        ns = DenseTensorView<const T, NDIM>(); // no non-standard input for this function
+      }
     }
 
     /**
@@ -139,7 +154,8 @@ namespace mra {
      * separate host-built index list/transfer needed), and shared with the
      * rest of the block via a SHARED variable.
      */
-    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT>
+    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT,
+             typename NSInT>
     DEVSCOPE void compress_process_one(
       Key<NDIM> key,
       size_type K,
@@ -151,6 +167,7 @@ namespace mra {
       T* tmp,
       T* d_sumsq,
       const InViewsT& in_views,
+      const NSInT& ns_in,
       size_type N,
       size_type tmp_pos,
       size_type tmp_slot,
@@ -159,7 +176,7 @@ namespace mra {
     {
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
       SHARED T* workspace;
-      SHARED DenseTensorView<const T, NDIM> node;
+      SHARED DenseTensorView<const T, NDIM> node, ns;
       SHARED DenseTensorView<T, NDIM> s, p, d;
       SHARED size_type fnid;
 
@@ -174,8 +191,8 @@ namespace mra {
         found_fnid = find_nth_nonzero_warp(N, tmp_pos, p_in);
       }
       if (is_team_lead()) {
-        compress_process_one_leader<T, NDIM>(node_in, p_in, result_in, in_views, tmp, K, N, tmp_pos, tmp_slot,
-                                              s, workspace, block_in_views, node, p, d, found_fnid, fnid);
+        compress_process_one_leader<T, NDIM>(node_in, p_in, result_in, in_views, ns_in, tmp, K, N, tmp_pos, tmp_slot,
+                                              s, workspace, block_in_views, node, p, d, ns, found_fnid, fnid);
       }
       SYNCTHREADS();
       assert(!p.empty());
@@ -187,7 +204,7 @@ namespace mra {
       }
       assert(!result_in.is_zero(fnid) && !p_in.is_zero(fnid) && "expected result_in and p_in to be non-zero!");
       compress_kernel_impl(key, K, is_ns, p, d, hgT, s, workspace,
-                           &d_sumsq[tmp_pos], block_in_views);
+                           &d_sumsq[tmp_pos], block_in_views, ns);
 
       /**
        * Optional in-line truncation, decided right here where d_sumsq[tmp_pos]
@@ -274,7 +291,8 @@ namespace mra {
     }
 #endif // MRA_CHECK_NORMS
 
-    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT>
+    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT,
+             typename NSInT>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
@@ -289,12 +307,13 @@ namespace mra {
       T* tmp,
       T* d_sumsq,
       const InViewsT in_views,
+      const NSInT ns_in,
       const T* child_kept,
       T trunc_tol)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         compress_process_one<T, NDIM>(key, K, is_ns, node_in, p_in, result_in, hgT,
-                                      tmp, d_sumsq, in_views, N, pos, pos, child_kept, trunc_tol);
+                                      tmp, d_sumsq, in_views, ns_in, N, pos, pos, child_kept, trunc_tol);
       }
     }
   } // namespace detail
@@ -313,6 +332,7 @@ namespace mra {
     T* tmp,
     T* d_sumsq,
     const InViewsT& in_views,
+    const InViewT& ns_view,
     const T* child_kept,
     T trunc_tol,
     ttg::device::Stream stream)
@@ -333,7 +353,8 @@ namespace mra {
     auto smem_size = mTxmq_shmem_size<T>(2*K);
     //CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::compress_kernel, n_nonzero, thread_dims, smem_size, stream,
-      (key, N, n_nonzero, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views, child_kept, trunc_tol));
+      (key, N, n_nonzero, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views, ns_view,
+       child_kept, trunc_tol));
     checkSubmit();
   }
 
@@ -381,7 +402,8 @@ namespace mra {
       // submit_compress_batch_leader/submit_grouped_copy's comments), not by
       // a device kernel reading an offset out of this struct.
       const T*,                                                         // child_kept: this member's own single packed [num_children x n] "kept" buffer (child-major, see compress_process_one), for the in-kernel truncation decision
-      T                                                                  // trunc_tol: this member's own truncate_tol(key, ...); 0 when truncation is disabled
+      T,                                                                 // trunc_tol: this member's own truncate_tol(key, ...); 0 when truncation is disabled
+      SparseTensorView<T, NDIM+1>                                        // ns_in: this node's own non-standard coeffs (make_compress_from_ns), empty otherwise
     >;
 
     /* Named indices into CompressBatchArg, so callers don't sprinkle magic
@@ -396,6 +418,7 @@ namespace mra {
       static constexpr std::size_t n               = 6;
       static constexpr std::size_t child_kept      = 7;
       static constexpr std::size_t trunc_tol       = 8;
+      static constexpr std::size_t ns_in           = 9;
     };
 
     /**
@@ -449,7 +472,8 @@ namespace mra {
                                       std::get<idx::node_in>(arg), std::get<idx::p_in>(arg),
                                       std::get<idx::result_in>(arg), hgT,
                                       shared_tmp, std::get<idx::d_sumsq>(arg),
-                                      std::get<idx::in_views>(arg), member_N, local_pos, blockIdx.x,
+                                      std::get<idx::in_views>(arg), std::get<idx::ns_in>(arg),
+                                      member_N, local_pos, blockIdx.x,
                                       std::get<idx::child_kept>(arg), std::get<idx::trunc_tol>(arg));
       }
     }
@@ -631,6 +655,7 @@ namespace mra {
         const size_type m_n_nonzero = batch[m].template get<8>();
         auto& m_child_kept = batch[m].template get<9>(); // this member's own single packed [num_children x n] "kept" device buffer
         const T m_trunc_tol = batch[m].template get<10>(); // this member's own truncate_tol(key, ...); 0 disables
+        auto& m_ns_in = batch[m].template get<11>(); // this node's own non-standard coeffs, empty unless compressing from non-standard form
         const size_type n = static_cast<size_type>(m_result_in.dim(0)); // structural N
 
         sparsity_to_bytes(m_p_tensor.sparsity(), reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset]), n);
@@ -643,7 +668,7 @@ namespace mra {
         slot.extra_sizes.push_back(n);
 
         slot.args.emplace_back(m_key, m_node_in, m_p_in, m_result_in,
-                               m_d_sumsq.current_device_ptr(), m_in_views, n, m_child_kept, m_trunc_tol);
+                               m_d_sumsq.current_device_ptr(), m_in_views, n, m_child_kept, m_trunc_tol, m_ns_in);
         sparsity_offset += 2 * n;
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;
@@ -671,6 +696,7 @@ void submit_compress_kernel<double, 3>(
     double* tmp,
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
+    const SparseTensorView<const double, 3+1>& ns_view,
     const double* child_kept,
     double trunc_tol,
     ttg::device::Stream stream);

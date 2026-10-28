@@ -30,26 +30,41 @@
 
 namespace mra
 {
-/// Make a composite operator that implements compression for a single function
-  template <typename T, mra::Dimension NDIM, typename FunctionSetT,
-            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  static auto make_compress(
+namespace detail {
+  /**
+   * Bottom-up compression, shared by make_compress and make_compress_from_ns.
+   *  - FromNS == false: `in` is a reconstructed tree, whose leaves are filtered upward.
+   *  - FromNS == true: `in` is a tree in non-standard form [s|d], e.g., the result of a
+   *    convolution. Contributions of coarser levels lie in V_n, which is orthogonal to W_n,
+   *    so the standard-form wavelets of a node only depend on the node and its subtree:
+   *    each node filters its children's scaling coefficients and adds its own [s|d] block,
+   *    whose scaling part travels up with the children's. This yields the same tree as
+   *    make_reconstruct(accumulate_NS = true) followed by make_compress, without the
+   *    top-down pass.
+   */
+  template <bool FromNS, typename T, mra::Dimension NDIM, typename FunctionSetT,
+            typename ProcMap, typename DeviceMap>
+  auto make_compress_impl(
     const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
     const bool is_ns,
     const mra::FunctionData<T, NDIM>& functiondata,
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>& in,
+    ttg::Edge<mra::Key<NDIM>, std::conditional_t<FromNS, mra::FunctionsCompressedNode<T, NDIM>,
+                                                         mra::FunctionsReconstructedNode<T, NDIM>>>& in,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
-    const std::string name = "compress",
-    ProcMap&& procmap = {},
-    DeviceMap&& devicemap = {},
-    const bool enable_truncate = false,
-    const T thresh = T{},
-    const int truncate_mode = 0,
-    const T cell_min_width = T{},
-    const BatchGroup& batch_group = {})
+    const std::string name,
+    ProcMap&& procmap,
+    DeviceMap&& devicemap,
+    const bool enable_truncate,
+    const T thresh,
+    const int truncate_mode,
+    const T cell_min_width,
+    const BatchGroup& batch_group)
   {
     static_assert(NDIM == 3); // TODO: worth fixing?
+    /* the node type of the input tree */
+    using in_node_type = std::conditional_t<FromNS, mra::FunctionsCompressedNode<T, NDIM>,
+                                                    mra::FunctionsReconstructedNode<T, NDIM>>;
     /**
      * Companion value type used to carry, for each function, whether a
      * node's own wavelet coefficients survived truncation -- flows up
@@ -108,7 +123,8 @@ namespace mra
     std::nullptr_t compress_pool = nullptr;
 #endif // MRA_ENABLE_HOST
 
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> filter_in(name + "-filter_in");
+    // from non-standard form every node goes to compress, so the input feeds it directly
+    ttg::Edge<mra::Key<NDIM>, in_node_type> filter_in = FromNS ? in : ttg::Edge<mra::Key<NDIM>, in_node_type>(name + "-filter_in");
 
     /**
      * A filter that only sends internal nodes to the compress task. Leaf nodes are sent up via the do_send_leafs_up task.
@@ -163,7 +179,7 @@ namespace mra
                           const kept_info_type &kept2, const kept_info_type &kept3,
                           const kept_info_type &kept4, const kept_info_type &kept5,
                           const kept_info_type &kept6, const kept_info_type &kept7,
-                          const mra::FunctionsReconstructedNode<T,NDIM> &in // the node from the prior op
+                          const in_node_type &in // the node from the prior op
                           ) -> TASKTYPE {
       //const typename ::detail::tree_types<T,K,NDIM>::compress_in_type& in,
       //typename ::detail::tree_types<T,K,NDIM>::compress_out_type& out) {
@@ -249,6 +265,8 @@ namespace mra
            * We only produce a result if at least one of the children is non-zero.
            */
           sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
+          // the node's own non-standard block contributes to the result as well
+          if constexpr (FromNS) sparsity.nonzero_if_any(in);
           //std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
 
           // allocate the result
@@ -278,7 +296,9 @@ namespace mra
            */
           sparsity.set_all_zero(); // reset
           sparsity.nonzero_if_any(result, in); // set based on result and our input (to catch any new leafs we pick up from the input)
-          mra::apply_leaf_info(p, in);
+          // from non-standard form, p stays inner: the parent marks this node as a child leaf
+          // of every function without coefficients here (see mark_truncated_children_leaf)
+          if constexpr (!FromNS) mra::apply_leaf_info(p, in);
 
           // NOTE: we don't care about leaf info for p since it is a temporary only
           //mra::apply_leaf_info(p, result); // set leaf info on p since that's what we send up
@@ -389,7 +409,9 @@ namespace mra
           auto input_views = std::array{in0.coeffs().current_view(), in1.coeffs().current_view(), in2.coeffs().current_view(), in3.coeffs().current_view(),
                                         in4.coeffs().current_view(), in5.coeffs().current_view(), in6.coeffs().current_view(), in7.coeffs().current_view()};
 
-          auto in_view = in.coeffs().current_view();
+          // the input node is either this node's reconstructed coefficients or its non-standard block
+          auto in_view = FromNS ? decltype(in.coeffs().current_view()){} : in.coeffs().current_view();
+          auto ns_view = FromNS ? in.coeffs().current_view() : decltype(in.coeffs().current_view()){};
 
           auto coeffs_view = p.coeffs().current_view();
           auto rcoeffs_view = d.current_view();
@@ -420,7 +442,7 @@ namespace mra
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
                                                                     d_sumsq, input_views,
                                                                     p.coeffs(), d, n_nonzero,
-                                                                    child_kept_ptr, trunc_tol);
+                                                                    child_kept_ptr, trunc_tol, ns_view);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
             detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view, total_functions);
           } else
@@ -431,7 +453,7 @@ namespace mra
             submit_compress_kernel(key, N, n_nonzero, K, is_ns,
                                   in_view, coeffs_view, rcoeffs_view, hgT_view,
                                   tmp_scratch.current_device_ptr(), d_sumsq.current_device_ptr(), input_views,
-                                  child_kept_ptr, trunc_tol,
+                                  ns_view, child_kept_ptr, trunc_tol,
                                   ttg::device::current_stream());
           }
           norms.compute();
@@ -578,23 +600,56 @@ namespace mra
         }
     };
 
-    auto ttt = std::make_tuple(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_leaves_up_edges, "send_leaves_up"),
-                               ttg::make_tt<Space>(&do_send_leafs_kept_up<T,NDIM>, edges(in), send_leaves_kept_up_edges, "send_leaves_kept_up"),
-                               ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, "compress"),
-                               ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), "filter"));
+    // set maps if provided
+    auto set_maps = [&](auto& tt) {
+      if constexpr (!std::is_same_v<std::decay_t<ProcMap>, ttg::Void>) tt->set_keymap(procmap);
+      if constexpr (!std::is_same_v<std::decay_t<DeviceMap>, ttg::Void>) tt->set_devicemap(devicemap);
+    };
+    std::vector<std::unique_ptr<ttg::TTBase>> ops;
+    auto add_op = [&](auto&& tt) {
+      set_maps(tt);
+      ops.push_back(std::move(tt));
+    };
 
-      // set maps if provided
-    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
-      std::get<0>(ttt)->set_keymap(procmap);
-      std::get<1>(ttt)->set_keymap(procmap);
-      std::get<2>(ttt)->set_keymap(procmap);
-      std::get<3>(ttt)->set_keymap(procmap);
-    }
-    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
-      std::get<0>(ttt)->set_devicemap(devicemap);
-      std::get<1>(ttt)->set_devicemap(devicemap);
-      std::get<2>(ttt)->set_devicemap(devicemap);
-      std::get<3>(ttt)->set_devicemap(devicemap);
+    auto compress_tt = ttg::make_tt<Space>(std::move(do_compress), send_to_compress_edges, compress_out_edges, "compress");
+    set_maps(compress_tt);
+    if constexpr (!FromNS) {
+      add_op(ttg::make_tt<Space>(&do_send_leafs_up<T,NDIM>, edges(in), send_leaves_up_edges, "send_leaves_up"));
+      add_op(ttg::make_tt<Space>(&do_send_leafs_kept_up<T,NDIM>, edges(in), send_leaves_kept_up_edges, "send_leaves_kept_up"));
+      add_op(ttg::make_tt<Space>(std::move(filter_fn), ttg::edges(in), ttg::edges(filter_in), "filter"));
+    } else {
+      /**
+       * Every node of the non-standard tree goes to compress. A child without a node
+       * (a leaf for all functions) contributes nothing: the node itself sends empty
+       * placeholders for it. This is a device task (without data) so that the node is not
+       * pulled to the host, see do_send_leafs_up.
+       */
+      auto send_leaf_children_fn = [fns](const mra::Key<NDIM>& key, const in_node_type& node) -> TASKTYPE {
+        const size_type N = fns->num_functions(key);
+        constexpr auto seq = std::make_index_sequence<mra::Key<NDIM>::num_children()>{};
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+#endif // MRA_ENABLE_HOST
+        for (const mra::Key<NDIM>& child : mra::KeyChildren<NDIM>(key)) {
+          if (!node.is_all_child_leaf(child)) continue;
+          mra::FunctionsReconstructedNode<T, NDIM> p(child, N);
+          p.set_all_leaf(LeafStatus::Leaf);
+          mra::KeptInfo<T> kept; // empty placeholder, see do_send_leafs_kept_up
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(select_send_up(child, std::move(p), seq, "send_leaf_children_up"));
+          sends.push_back(select_send_up<mra::Key<NDIM>::num_children()>(child, std::move(kept), seq, "send_leaf_children_kept_up"));
+#else
+          select_send_up(child, std::move(p), seq, "send_leaf_children_up");
+          select_send_up<mra::Key<NDIM>::num_children()>(child, std::move(kept), seq, "send_leaf_children_kept_up");
+#endif // MRA_ENABLE_HOST
+        }
+#ifndef MRA_ENABLE_HOST
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
+      };
+      auto send_leaf_children_edges = std::tuple_cat(p_edges, kept_edges);
+      add_op(ttg::make_tt<Space>(std::move(send_leaf_children_fn), ttg::edges(in), send_leaf_children_edges,
+                                 "send_leaf_children_up"));
     }
 
 #ifndef MRA_ENABLE_HOST
@@ -604,22 +659,71 @@ namespace mra
       // compress's only shared operator data (hgT) never varies by level or
       // position to begin with (see kernels/compress.h's batching-support
       // comment), unlike convolution which needed a similar relaxation.
-      std::get<2>(ttt)->set_batch_matcher(
+      compress_tt->set_batch_matcher(
           [](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
           max_batch_size);
-      batch_group.add(std::get<2>(ttt));
+      batch_group.add(compress_tt);
     }
 #endif // MRA_ENABLE_HOST
 
-    auto ins = std::make_tuple(std::get<3>(ttt)->template in<0>());
-    auto outs = std::make_tuple(std::get<2>(ttt)->template out<2*num_children>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(4);
-    ops[0] = std::move(std::get<0>(ttt));
-    ops[1] = std::move(std::get<1>(ttt));
-    ops[2] = std::move(std::get<2>(ttt));
-    ops[3] = std::move(std::get<3>(ttt));
+    auto ins = std::make_tuple(compress_tt->template in<2*num_children>());
+    auto outs = std::make_tuple(compress_tt->template out<2*num_children>());
+    ops.push_back(std::move(compress_tt));
 
     return make_ttg(std::move(ops), ins, outs, name);
+  }
+} // namespace detail
+
+/// Make a composite operator that implements compression for a single function
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  static auto make_compress(
+    const std::shared_ptr<FunctionSetT>& fns,
+    const std::size_t K,
+    const bool is_ns,
+    const mra::FunctionData<T, NDIM>& functiondata,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>>& in,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
+    const std::string name = "compress",
+    ProcMap&& procmap = {},
+    DeviceMap&& devicemap = {},
+    const bool enable_truncate = false,
+    const T thresh = T{},
+    const int truncate_mode = 0,
+    const T cell_min_width = T{},
+    const BatchGroup& batch_group = {})
+  {
+    return detail::make_compress_impl<false>(fns, K, is_ns, functiondata, in, out, name,
+                                             std::forward<ProcMap>(procmap), std::forward<DeviceMap>(devicemap),
+                                             enable_truncate, thresh, truncate_mode, cell_min_width, batch_group);
+  }
+
+  /**
+   * Compresses a tree in non-standard form (e.g., the result of make_convolution) into
+   * standard form in a single bottom-up pass, producing the same tree as
+   * make_reconstruct(accumulate_NS = true) followed by make_compress. Truncation and
+   * batch groups work as in make_compress.
+   */
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT,
+            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  static auto make_compress_from_ns(
+    const std::shared_ptr<FunctionSetT>& fns,
+    const std::size_t K,
+    const mra::FunctionData<T, NDIM>& functiondata,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& in,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>>& out,
+    const std::string name = "compress_from_ns",
+    ProcMap&& procmap = {},
+    DeviceMap&& devicemap = {},
+    const bool enable_truncate = false,
+    const T thresh = T{},
+    const int truncate_mode = 0,
+    const T cell_min_width = T{},
+    const BatchGroup& batch_group = {})
+  {
+    return detail::make_compress_impl<true>(fns, K, false, functiondata, in, out, name,
+                                            std::forward<ProcMap>(procmap), std::forward<DeviceMap>(devicemap),
+                                            enable_truncate, thresh, truncate_mode, cell_min_width, batch_group);
   }
 
 }

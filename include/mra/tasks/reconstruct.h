@@ -25,17 +25,29 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
-  template <typename T, mra::Dimension NDIM, typename FunctionSetT, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
-  auto make_reconstruct(
+namespace detail {
+  /**
+   * Top-down traversal of a compressed tree, shared by make_reconstruct and
+   * make_nonstandard. Each node combines its own coefficients with the scaling
+   * coefficients from its parent into [s|d] and unfilters that into its children.
+   *  - ToNS == false: emits the reconstructed leaves on `out`.
+   *  - ToNS == true: emits [s|d], the node's non-standard block, on `out` for every
+   *    internal node, which is what make_compress(is_ns = true) produces from the
+   *    reconstructed tree, without the bottom-up pass. Leaves are not emitted, and the
+   *    scaling coefficients of leaf children are not computed.
+   */
+  template <bool ToNS, typename T, mra::Dimension NDIM, typename FunctionSetT, typename ProcMap, typename DeviceMap>
+  auto make_reconstruct_impl(
     const std::shared_ptr<FunctionSetT>& fns,
     const std::size_t K,
     bool accumulate_NS,
     const mra::FunctionData<T, NDIM>& functiondata,
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
-    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out,
-    const std::string& name = "reconstruct",
-    ProcMap procmap = {},
-    DeviceMap devicemap = {})
+    ttg::Edge<mra::Key<NDIM>, std::conditional_t<ToNS, mra::FunctionsCompressedNode<T, NDIM>,
+                                                       mra::FunctionsReconstructedNode<T, NDIM>>> out,
+    const std::string& name,
+    ProcMap procmap,
+    DeviceMap devicemap)
   {
     // Batching is controlled process-wide via mra::set_batch_size(), not per
     // call here -- see mra/misc/batch_size.h. Read once, at graph-construction
@@ -144,7 +156,8 @@ namespace mra{
             //          << " node is child leaf so child is leaf" << std::endl;
             // parent is not a leaf/invalid, the compressed node has coefficients, and its child is empty, so we are the leaf
             r.set_leaf(i, LeafStatus::Leaf);
-            child_sparsity_arr[it.index()].set_nonzero(i);
+            // the non-standard form has no leaves, so their coefficients are not needed
+            if constexpr (!ToNS) child_sparsity_arr[it.index()].set_nonzero(i);
           } else {
             //std::cout << name << " " << key << " child " << child << " function " << i
             //          << " child is inner" << std::endl;
@@ -196,15 +209,40 @@ namespace mra{
        * We cannot forward the full child nodes because they might contain coefficients
        * for non-leaf nodes that we don't want to leave the reconstruct operation.
        */
-      SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
-      for (std::size_t i = 0; i < N; ++i) {
-        if (from_parent.is_leaf(i)) {
-          // leafs are nonzero
-          sparsity.set_nonzero(i);
+      mra::FunctionsReconstructedNode<T,NDIM> result(key, N);
+      // the non-standard node [s|d], only produced if ToNS
+      mra::FunctionsCompressedNode<T,NDIM> ns(key, N);
+      if constexpr (!ToNS) {
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero); // start with all zero, we'll set the non-zero ones as we go
+        for (std::size_t i = 0; i < N; ++i) {
+          if (from_parent.is_leaf(i)) {
+            // leafs are nonzero
+            sparsity.set_nonzero(i);
+          }
+        }
+        result.allocate(sparsity, K, ttg::scope::Allocate);
+        mra::apply_leaf_info(result, from_parent);
+      } else {
+        /**
+         * Functions for which this node is internal, as in make_compress(is_ns = true), which
+         * only produces coefficients where a child holds some. At inner nodes from_parent is
+         * non-zero for these, so the kernel's work sparsity (node or from_parent) covers them.
+         */
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+        for (std::size_t i = 0; i < N; ++i) {
+          if (from_parent.leaf_status(i) == LeafStatus::Inner && (!node.is_zero(i) || !from_parent.is_zero(i))) {
+            sparsity.set_nonzero(i);
+          }
+        }
+        ns.allocate(sparsity, K, ttg::scope::Allocate);
+        ns.set_ns(true);
+        // a child of the non-standard tree is a leaf for every function it is not internal for
+        for (std::size_t i = 0; i < N; ++i) {
+          for (std::size_t c = 0; c < mra::Key<NDIM>::num_children(); ++c) {
+            ns.set_child_leaf(i, c, ns.is_zero(i) || r_arr[c].leaf_status(i) != LeafStatus::Inner);
+          }
         }
       }
-      mra::FunctionsReconstructedNode<T,NDIM> result(key, sparsity, K, ttg::scope::Allocate);
-      mra::apply_leaf_info(result, from_parent);
 
       /* populate the vector of r's
       * TODO: TTG/PaRSEC supports only a limited number of inputs so for higher dimensions
@@ -293,6 +331,7 @@ namespace mra{
       if (!node.empty()) inputs.add(node.coeffs().buffer());
       if (!result.empty()) inputs.add(result.coeffs().buffer());
       if (!from_parent.empty()) inputs.add(from_parent.coeffs().buffer());
+      if (!ns.empty()) inputs.add(ns.coeffs().buffer());
       if (!norms.buffer().empty()) inputs.add(norms.buffer());
       /* select a device */
       co_await ttg::device::select(inputs);
@@ -307,6 +346,7 @@ namespace mra{
       auto hg_view = hg.current_view();
       auto from_parent_view = from_parent.coeffs().current_view();
       auto result_view = result.coeffs().current_view();
+      auto ns_view = ns.coeffs().current_view();
       // DEBUG: compare node's host-tracked sparsity (RangeSparsityBase,
       // set at allocation/producer time) against node_view's device-side
       // inline bitmap, right after select() and before coop() ever runs --
@@ -349,16 +389,21 @@ namespace mra{
         // launch (see submit_reconstruct_batch_leader).
         auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, node_view,
                                                                 from_parent_view, r_ptrs, result_view,
-                                                                r_arr, result, n_nonzero);
+                                                                r_arr, result, n_nonzero, ns_view, ns);
         // followers: the leader's batched launch already wrote our slice of r_arr/result.
         detail::submit_reconstruct_batch_leader<T, NDIM>(batch, *reconstruct_pool, K, accumulate_NS, hg_view, total_functions);
       } else
 #endif // MRA_ENABLE_HOST
       {
-        auto sparseman = make_sparsity_manager(r_arr, result);
-        sparseman.populate_device_sparsity();
+        if constexpr (ToNS) {
+          auto sparseman = make_sparsity_manager(r_arr, ns);
+          sparseman.populate_device_sparsity();
+        } else {
+          auto sparseman = make_sparsity_manager(r_arr, result);
+          sparseman.populate_device_sparsity();
+        }
         submit_reconstruct_kernel(key, N, n_nonzero, K, accumulate_NS, node_view, hg_view, from_parent_view,
-                                  r_ptrs, result_view, tmp_scratch.current_device_ptr(),
+                                  r_ptrs, result_view, ns_view, tmp_scratch.current_device_ptr(),
                                   ttg::device::current_stream());
       }
 
@@ -373,7 +418,11 @@ namespace mra{
 
       // send result to the output
       //std::cout << name << " " << key << " result " << result << std::endl;
-      do_send.template operator()<1>(key, std::move(result));
+      if constexpr (ToNS) {
+        do_send.template operator()<1>(key, std::move(ns));
+      } else {
+        do_send.template operator()<1>(key, std::move(result));
+      }
 
       /**
        * For each child, either recurse down (if there not all nodes are leaf/invalid) or send to the output (if they are all leaf/invalid).
@@ -386,7 +435,8 @@ namespace mra{
         //std::cout << name << " " << key << " child " << r << std::endl;
         if (r.is_all_leaf_or_invalid()) {
           // if the child is all leaf or invalid then we can send it directly to the output
-          do_send.template operator()<1>(child, std::move(r));
+          // (leaves are not part of the non-standard form)
+          if constexpr (!ToNS) do_send.template operator()<1>(child, std::move(r));
         } else {
           // recurse down
           do_send.template operator()<0>(child, std::move(r));
@@ -422,6 +472,42 @@ namespace mra{
     ops[1] = std::move(p);
 
     return ttg::make_ttg(std::move(ops), std::move(ins), std::move(outs), std::string(name));
+  }
+} // namespace detail
+
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_reconstruct(
+    const std::shared_ptr<FunctionSetT>& fns,
+    const std::size_t K,
+    bool accumulate_NS,
+    const mra::FunctionData<T, NDIM>& functiondata,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsReconstructedNode<T, NDIM>> out,
+    const std::string& name = "reconstruct",
+    ProcMap procmap = {},
+    DeviceMap devicemap = {})
+  {
+    return detail::make_reconstruct_impl<false>(fns, K, accumulate_NS, functiondata, std::move(in), std::move(out),
+                                                name, std::move(procmap), std::move(devicemap));
+  }
+
+  /**
+   * Converts a compressed (standard form) tree into non-standard form in a single top-down
+   * pass, producing the same tree as make_reconstruct followed by make_compress(is_ns = true).
+   */
+  template <typename T, mra::Dimension NDIM, typename FunctionSetT, typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+  auto make_nonstandard(
+    const std::shared_ptr<FunctionSetT>& fns,
+    const std::size_t K,
+    const mra::FunctionData<T, NDIM>& functiondata,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> in,
+    ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
+    const std::string& name = "nonstandard",
+    ProcMap procmap = {},
+    DeviceMap devicemap = {})
+  {
+    return detail::make_reconstruct_impl<true>(fns, K, false, functiondata, std::move(in), std::move(out),
+                                               name, std::move(procmap), std::move(devicemap));
   }
 } // namespace mra
 
