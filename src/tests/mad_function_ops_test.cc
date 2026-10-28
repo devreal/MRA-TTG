@@ -7,7 +7,7 @@
  *  - make_square, and the density sum_i occ_i f_i^2 (square, compress, transform)
  *  - make_derivative, and the kinetic-energy matrix built from it
  *  - make_concat, and a transform over the concatenated set
- *  - batching across instances of compress and concat sharing a mra::BatchGroup
+ *  - batching across instances of compress, concat and matrix_inner sharing a mra::BatchGroup
  *  - make_transform with U computed in the graph from a reduction (matrix_inner)
  *
  * The functions are Gaussians with different centers and exponents so that
@@ -430,8 +430,10 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
     check_well_formed(world, result, what);
   }
 
-  /* kinetic-energy matrix 1/2 sum_axis <d f_i|d f_j>, the three derivatives reading one input edge */
+  /* kinetic-energy matrix 1/2 sum_axis <d f_i|d f_j>, the three derivatives reading one input edge;
+   * the three compress and the three matrix_inner instances each share a batch group */
   {
+    mra::BatchGroup compress_group, inner_group;
     Graph G(K);
     ReconstructedEdge f_e;
     std::array<ReconstructedEdge, NDIM> d_e;
@@ -443,8 +445,10 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
     G.add(mra::vmra::make_vmra_load(f, G.control, f_e, "load"));
     for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
       G.add(mra::make_derivative<T, NDIM>(db, fns, G.functiondata, K, axis, f_e, d_e[axis]));
-      G.add(mra::make_compress(fns, K, false, G.functiondata, d_e[axis], c_e[axis], "compress"));
-      G.add(mra::make_matrix_inner<T, NDIM>(fns, fns, K, c_e[axis], c_e[axis], m_e[axis]));
+      G.add(mra::make_compress(fns, K, false, G.functiondata, d_e[axis], c_e[axis], "compress",
+                               ttg::Void{}, ttg::Void{}, false, T{}, 0, T{}, compress_group));
+      G.add(mra::make_matrix_inner<T, NDIM>(fns, fns, K, c_e[axis], c_e[axis], m_e[axis], "matrix_inner",
+                                            ttg::Void{}, ttg::Void{}, inner_group));
       G.add(ttg::make_tt([&](const mra::Key<NDIM>&, const mra::DenseTensor<T, 2>& r) {
         const T* data = r.current_view().data();
         std::lock_guard<std::mutex> lock(m);
@@ -460,6 +464,17 @@ static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
       ref += 0.5*madness::matrix_inner(world, d, d);
     }
     check_close("kinetic-energy matrix", (kin - ref).absmax(), ref.absmax());
+
+    /* make_inner cannot join a group of make_matrix_inner instances */
+    bool threw = false;
+    try {
+      CompressedEdge a, b;
+      ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> r;
+      mra::make_inner<T, NDIM>(fns, K, a, b, r, "inner_bad", ttg::Void{}, ttg::Void{}, inner_group);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    check(threw || !mra::batching_enabled(), "batch group rejects inner in a matrix_inner group", threw ? 0 : 1, 0);
   }
 }
 
