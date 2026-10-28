@@ -559,7 +559,7 @@ namespace mra {
           // The level's table once known. If we generate it ourselves, its
           // publication is deferred until this task completes (see below),
           // so we have to look up norms against it directly.
-          typename mra::GaussianConvolutionOperator<T, NDIM>::table_pointer_type level_table;
+          typename mra::GaussianConvolutionOperator<T, NDIM>::table_pointer_type level_table = nullptr;
           for (;;) {
             auto res = level_table ? op.try_get_op(key.level(), op_disp, level_table)
                                    : op.try_get_op(key.level(), op_disp);
@@ -590,8 +590,8 @@ namespace mra {
               /**
                * The operator is owned, so we need to assemble its norms on the host.
                */
-              auto assembled = op.finish_op_assembly(key.level(), op_disp, res.dims);
-              op.publish_op(key.level(), op_disp, assembled);
+              op.finish_op_assembly(key.level(), op_disp, res.dims);
+              op.publish_op(key.level(), op_disp);
               break;
             }
             // Pending: yield (a pure reschedule point, no kernel of ours to
@@ -616,16 +616,29 @@ namespace mra {
               -> std::uint64_t {
             return displacement.distsq_bc(mad_op->lattice_summed());
           };
+#ifndef MRA_ENABLE_HOST
+          // Operator norms per position in mad_disps. With a single operator
+          // every function walks the same displacement list, so each
+          // displacement's norms tensor (which covers every operator index)
+          // is looked up once per task rather than once per function.
+          std::vector<const DenseTensor<T, 4>*> disp_norms;
+#endif // MRA_ENABLE_HOST
           for (int i = 0; i < N; ++i) {
             // we may have either one operator for all functions or one operator per function
             int opnorm_index = (op.count() == 1) ? 0 : i;
             // safe because get_disp returns a reference that remains valid
             const auto& mad_disps = op.get_mad_displacements(opnorm_index, key.level());
             const auto& mad_op = op.get_mad_op(opnorm_index);
+#ifndef MRA_ENABLE_HOST
+            if (op.count() != 1 || disp_norms.empty()) {
+              disp_norms.assign(mad_disps.size(), nullptr);
+            }
+#endif // MRA_ENABLE_HOST
             int nused = 1, nvalid = 1;
             std::optional<double> real_last_distsq;
             std::optional<std::uint64_t> lattice_last_distsq;
-            for (auto& mad_disp : mad_disps) {
+            for (std::size_t disp_idx = 0; disp_idx < mad_disps.size(); ++disp_idx) {
+              const auto& mad_disp = mad_disps[disp_idx];
 
               // Screen out shells. We assume shells are grouped into shells so that the operator decays with shell index.
               // Shells are indexed by least distance from box to the central box.
@@ -671,17 +684,16 @@ namespace mra {
               // norms1d via .view_on(host), already valid -- no select() needed.
               // Just the norms tensor -- see try_get_op()'s OpResult comment
               // for why R/S (unused by screener_tt anyway) aren't cached.
-              std::shared_ptr<const DenseTensor<T, 4>> op_norms;
-              for (;;) {
+              const DenseTensor<T, 4>*& op_norms = disp_norms[disp_idx];
+              while (op_norms == nullptr) {
                 auto res2 = op.try_get_op(key.level(), disp_key, level_table);
                 if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
                   op_norms = res2.norms;
                   break;
                 }
                 if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned) {
-                  auto assembled = op.finish_op_assembly(key.level(), disp_key, res2.dims);
-                  op.publish_op(key.level(), disp_key, assembled);
-                  op_norms = assembled;
+                  op_norms = op.finish_op_assembly(key.level(), disp_key, res2.dims);
+                  op.publish_op(key.level(), disp_key);
                   break;
                 }
                 co_await ttg::device::suspend();
@@ -808,9 +820,9 @@ namespace mra {
         // make_norms_tensor()'s comments in conv_mad.h).
         auto gen_items = op.collect_generation_items(res); // empty if !need_generate
         auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-        std::shared_ptr<mra::DenseTensor<T, 4>> norms;
+        mra::DenseTensor<T, 4>* norms = nullptr; // owned by op's norms cache
         if (need_assemble) {
-          norms = op.make_norms_tensor();
+          norms = op.make_norms_tensor(key.level(), op_disp);
         }
 #endif // MRA_ENABLE_HOST
 
@@ -860,7 +872,7 @@ namespace mra {
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
                                         out.coeffs().buffer());
         if (tmp_size > 0) input.add(tmp);
-        op.add_convolution_op_buffers(input, res, items_buf, norms.get());
+        op.add_convolution_op_buffers(input, res, items_buf, norms);
         co_await ttg::device::select(input);
         if (need_generate) {
           op.submit_generation_kernel(res, gen_items, items_buf);
@@ -950,9 +962,9 @@ namespace mra {
           // runtime still holds our (written) device copies of the table and
           // norms, and other tasks must not stage them in.
           sends.push_back(ttg::device::on_complete(
-            [opp = &op, res, level = key.level(), op_disp, norms]() {
+            [opp = &op, res, level = key.level(), op_disp]() {
               opp->publish_generation_work(res); // no-op unless we generated the table
-              opp->publish_op(level, op_disp, norms);
+              opp->publish_op(level, op_disp);
             }));
         }
 #endif // MRA_ENABLE_HOST
@@ -1154,9 +1166,9 @@ namespace mra {
       const bool need_assemble = (res.status == OpStatus::Owned);
       auto gen_items = op.collect_generation_items(res); // empty if !need_generate
       auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-      std::shared_ptr<mra::DenseTensor<T, 4>> norms;
+      mra::DenseTensor<T, 4>* norms = nullptr; // owned by op's norms cache
       if (need_assemble) {
-        norms = op.make_norms_tensor();
+        norms = op.make_norms_tensor(key.level(), displacement);
       }
 #endif // MRA_ENABLE_HOST
 
@@ -1222,7 +1234,7 @@ namespace mra {
       auto input = ttg::device::Input(out.coeffs().buffer(), contribution.coeffs().buffer());
       if (!reuse_in_node) input.add(in_node.coeffs().buffer());
       if (tmp_size > 0) input.add(tmp);
-      op.add_convolution_op_buffers(input, res, items_buf, norms.get());
+      op.add_convolution_op_buffers(input, res, items_buf, norms);
       if (last_key) {
         // if this is the last we want to get the norms of the result back
         input.add(resnorms.buffer());
@@ -1310,9 +1322,9 @@ namespace mra {
         }
         // publish once this task has completed -- see shell0_tt
         sends.push_back(ttg::device::on_complete(
-          [opp = &op, res, level = key.level(), displacement, norms]() {
+          [opp = &op, res, level = key.level(), displacement]() {
             opp->publish_generation_work(res); // no-op unless we generated the table
-            opp->publish_op(level, displacement, norms);
+            opp->publish_op(level, displacement);
           }));
       }
       // wait for norms to come back

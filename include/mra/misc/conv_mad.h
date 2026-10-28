@@ -173,22 +173,6 @@ namespace mra {
       }
     };
 
-    /// Key for the level-wide 1D operator generation gate -- see
-    /// GaussianConvolutionOperator's header comment and try_get_op(). Exactly
-    /// one caller across an entire level (every dimension, every translation
-    /// in the bounded range) becomes responsible for generating the whole
-    /// detail::LevelOp1DTable for that level in a single kernel launch.
-    struct LevelKey {
-      Level n = 0;
-
-      LevelKey() = default;
-      explicit LevelKey(Level n) : n(n) { }
-
-      bool operator==(const LevelKey& other) const { return n == other.n; }
-
-      HashValue hash() const { return static_cast<HashValue>(static_cast<uint16_t>(n)); }
-    };
-
     /**
      * Hash functor bridging our own KeyT::hash() (returning HashValue, i.e. uint64_t) to
      * madness::ConcurrentHashMap's expected hashfunT (returning madness::hashT, i.e.
@@ -453,20 +437,20 @@ namespace mra {
     enum class AsyncCacheStatus { Available, Owned, Pending };
 
     /**
-     * Non-blocking, tri-state, memoizing cache -- the device-path replacement for
+     * Non-blocking, tri-state, memoizing slot -- the device-path replacement for
      * SharedComputeCache/Op1DCache's claim()+acquire() above. There is no acquire()
      * at all: try_get() always returns immediately with one of:
      *   Available -- value is ready, here it is.
-     *   Owned     -- the caller just became responsible for producing the value
-     *                (allocating the destination tensor(s), submitting the
-     *                generation kernel, and calling publish() once that kernel has
+     *   Owned     -- the caller just became responsible for producing the value:
+     *                installing the destination object via emplace(), submitting the
+     *                kernel(s) that fill it, and calling publish() once those have
      *                been awaited to completion -- see GaussianConvolutionOperator::
-     *                try_get_op). Ownership, once granted, cannot be
-     *                un-claimed; the caller must follow through.
+     *                try_get_op. Ownership, once granted, cannot be un-claimed; the
+     *                caller must follow through.
      *   Pending   -- someone else already owns it. The caller must yield --
-     *                co_await ttg::device::wait() with NO arguments (a pure
-     *                reschedule point; passing a buffer would force an unwanted
-     *                device->host transfer) -- and call try_get() again on resume.
+     *                co_await ttg::device::suspend() (a pure reschedule point; waiting
+     *                on a buffer would force an unwanted device->host transfer) --
+     *                and call try_get() again on resume.
      *
      * This intentionally does NOT try to synchronize with whichever task's kernel
      * is filling a Pending entry -- PaRSEC's per-buffer version tracking exists to
@@ -474,74 +458,124 @@ namespace mra {
      * kernels/tasks that share a buffer outside a normal TTG edge or a
      * ttg::device::coop() batch, and there is currently no cheaper TTG primitive
      * for that than a full stream-to-stream event (rejected here as too heavy for
-     * a per-entry cost -- see the design discussion this class grew out of).
-     * Instead: the OWNER is the only one who ever waits for the real GPU
-     * completion (via co_await ttg::device::wait(), the plain "wait for kernels
-     * this task itself submitted" form), and only calls publish() afterwards -- so
-     * "Available" is only ever observed once the value is genuinely, fully
-     * computed, at which point ordinary buffer placement (select()) is all a
-     * later, unrelated consumer needs.
+     * a per-entry cost). Instead: the OWNER is the only one who ever waits for the
+     * real GPU completion, and only calls publish() afterwards -- so "Available"
+     * is only ever observed once the value is genuinely, fully computed, at which
+     * point ordinary buffer placement (select()) is all a later, unrelated
+     * consumer needs.
+     *
+     * The slot owns its value for its own lifetime (slots are never evicted, and
+     * live as long as the GaussianConvolutionOperator holding them), so every
+     * lookup hands out a plain pointer -- no reference counting on the hot path.
+     * Only the owner ever writes m_value (emplace(), strictly between try_get()
+     * returning Owned and publish()), and nobody else reads it before observing
+     * Ready with acquire semantics, so m_value needs no synchronization of its own.
      */
-    template <typename KeyT, typename ValueT>
-    class AsyncCache {
+    template <typename ValueT>
+    class AsyncSlot {
     public:
-      using pointer_type = std::shared_ptr<const ValueT>;
-
       struct Result {
         AsyncCacheStatus status;
-        pointer_type value; // valid iff status == Available
+        const ValueT* value; // valid iff status == Available
       };
 
-    private:
-      struct Cell {
-        std::atomic<CacheEntryState> state{CacheEntryState::Empty}; // Empty/Requested/Ready reused from above
-        atomic_shared_ptr<pointer_type> value;
-      };
-      using cellptr_type = std::shared_ptr<Cell>;
-      using map_type = madness::ConcurrentHashMap<KeyT, cellptr_type, HashFunctor<KeyT>>;
-
-      mutable map_type m_map;
-
-      cellptr_type get_or_create_cell(const KeyT& key) const {
-        {
-          typename map_type::const_accessor cacc;
-          if (m_map.find(cacc, key)) {
-            return cacc->second;
-          }
-        }
-        typename map_type::accessor acc;
-        if (m_map.insert(acc, key)) {
-          acc->second = std::make_shared<Cell>();
-        }
-        return acc->second;
-      }
-
-    public:
-      Result try_get(const KeyT& key) const {
-        cellptr_type cell = get_or_create_cell(key);
-        auto st = cell->state.load(std::memory_order_acquire);
+      Result try_get() {
+        auto st = m_state.load(std::memory_order_acquire);
         if (st == CacheEntryState::Ready) {
-          return {AsyncCacheStatus::Available, cell->value.load(std::memory_order_acquire)};
+          return {AsyncCacheStatus::Available, m_value.get()};
         }
         CacheEntryState expected = CacheEntryState::Empty;
-        if (cell->state.compare_exchange_strong(expected, CacheEntryState::Requested,
-                                                 std::memory_order_acq_rel, std::memory_order_acquire)) {
+        if (m_state.compare_exchange_strong(expected, CacheEntryState::Requested,
+                                            std::memory_order_acq_rel, std::memory_order_acquire)) {
           return {AsyncCacheStatus::Owned, nullptr};
         }
         if (expected == CacheEntryState::Ready) {
-          return {AsyncCacheStatus::Available, cell->value.load(std::memory_order_acquire)};
+          return {AsyncCacheStatus::Available, m_value.get()};
         }
         return {AsyncCacheStatus::Pending, nullptr};
       }
 
-      /// Called by whoever try_get() told Owned == true, once the value has been
-      /// fully, genuinely computed (i.e. after co_await ttg::device::wait() on the
-      /// generation kernel this task itself submitted) -- never before.
-      void publish(const KeyT& key, pointer_type data) const {
-        cellptr_type cell = get_or_create_cell(key);
-        cell->value.store(std::move(data), std::memory_order_release);
-        cell->state.store(CacheEntryState::Ready, std::memory_order_release);
+      /// Owner only: installs the (not yet computed) value. The returned pointer
+      /// stays valid for the slot's whole lifetime.
+      ValueT* emplace(std::unique_ptr<ValueT> value) {
+        assert(m_state.load(std::memory_order_relaxed) == CacheEntryState::Requested && !m_value);
+        m_value = std::move(value);
+        return m_value.get();
       }
+
+      /// Owner only: the value installed by emplace(), before it is published.
+      ValueT* owned_value() const { return m_value.get(); }
+
+      /// Called by whoever try_get() told Owned, once the value has been fully,
+      /// genuinely computed (i.e. after its generating task has waited for its
+      /// own kernels) -- never before.
+      void publish() {
+        assert(m_value && "AsyncSlot::publish() without a prior emplace()");
+        m_state.store(CacheEntryState::Ready, std::memory_order_release);
+      }
+
+    private:
+      std::atomic<CacheEntryState> m_state{CacheEntryState::Empty};
+      std::unique_ptr<ValueT> m_value;
+    };
+
+    /**
+     * One AsyncSlot per (level, displacement), for displacements within the
+     * level-wide generation range [-max_op1d_displacement(n),
+     * max_op1d_displacement(n)]^NDIM (anything outside it is rejected up front --
+     * see GaussianConvolutionOperator::check_op_displacement). That range is
+     * small and dense (at most MRA_OP1D_NUM_DISPLACEMENTS^NDIM slots per level),
+     * so a lookup is plain array indexing: no hash map, no lock. Each level's
+     * slot array is allocated on first use and never freed before the
+     * container itself.
+     */
+    template <typename ValueT, Dimension NDIM>
+    class LevelDisplacementSlots {
+    public:
+      using slot_type = AsyncSlot<ValueT>;
+
+      LevelDisplacementSlots() = default;
+      LevelDisplacementSlots(const LevelDisplacementSlots&) = delete;
+      LevelDisplacementSlots& operator=(const LevelDisplacementSlots&) = delete;
+      ~LevelDisplacementSlots() {
+        for (auto& level : m_levels) {
+          delete[] level.load(std::memory_order_acquire);
+        }
+      }
+
+      slot_type& slot(Level n, const std::array<Translation, NDIM>& l) {
+        assert(n >= 0 && n <= MAX_LEVEL);
+        slot_type* slots = m_levels[n].load(std::memory_order_acquire);
+        if (slots == nullptr) slots = allocate(n);
+        return slots[index(n, l)];
+      }
+
+    private:
+      static size_type index(Level n, const std::array<Translation, NDIM>& l) {
+        const Translation max_disp = max_op1d_displacement(n);
+        const size_type width = num_op1d_displacements(n);
+        size_type idx = 0;
+        for (Dimension d = 0; d < NDIM; ++d) {
+          assert(l[d] >= -max_disp && l[d] <= max_disp);
+          idx = idx * width + (size_type)(l[d] + max_disp);
+        }
+        return idx;
+      }
+
+      slot_type* allocate(Level n) {
+        size_type num_slots = 1;
+        for (Dimension d = 0; d < NDIM; ++d) num_slots *= num_op1d_displacements(n);
+        slot_type* fresh = new slot_type[num_slots];
+        slot_type* expected = nullptr;
+        if (m_levels[n].compare_exchange_strong(expected, fresh, std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+          return fresh;
+        }
+        delete[] fresh; // lost the race; use the winner's array
+        return expected;
+      }
+
+      std::array<std::atomic<slot_type*>, MAX_LEVEL + 1> m_levels{};
     };
 
     /**
@@ -584,7 +618,7 @@ namespace mra {
 
     /**
      * A read-only, single-(dimension, translation) slice of a shared
-     * LevelOp1DTable. Cheap enough (a shared_ptr plus a couple of indices)
+     * LevelOp1DTable. Cheap enough (a pointer plus a couple of indices)
      * that GaussianConvolutionOperator::try_get_op() rebuilds a fresh one on
      * every call -- see OpResult::dims -- rather than caching it anywhere;
      * only the assembled norms tensor (which costs a kernel launch to
@@ -609,23 +643,21 @@ namespace mra {
         auto view_on(const ttg::device::Device& device) const { return tensor->view_on(device)(d, l_idx); }
       };
 
-      std::shared_ptr<const LevelOp1DTable<T, NDIM>> table; // keeps R/S/norms1d alive
+      // Owned by the GaussianConvolutionOperator's level table slot, which
+      // outlives every task using it -- no need to keep it alive from here.
+      const LevelOp1DTable<T, NDIM>* table = nullptr;
       FieldView<DenseTensor<T, 6>> R;
       FieldView<DenseTensor<T, 6>> S;
       FieldView<DenseTensor<T, 5>> norms1d;
 
       Op1DSliceView() = default;
-      Op1DSliceView(std::shared_ptr<const LevelOp1DTable<T, NDIM>> tbl, Dimension d, Translation l)
-      : table(std::move(tbl))
-      // table (declared first, above) is already fully constructed by the
-      // time these initializers run (member init order follows declaration
-      // order, not the order written here), so table->n -- NOT tbl, which
-      // has already been moved from by this point -- is safe to read: the
-      // offset must match the per-level width THIS table was actually
+      // The offset must match the per-level width THIS table was actually
       // allocated with (see LevelOp1DTable's comment), not the global ceiling.
-      , R{&table->R, d, (size_type)(l + max_op1d_displacement(table->n))}
-      , S{&table->S, d, (size_type)(l + max_op1d_displacement(table->n))}
-      , norms1d{&table->norms1d, d, (size_type)(l + max_op1d_displacement(table->n))}
+      Op1DSliceView(const LevelOp1DTable<T, NDIM>* tbl, Dimension d, Translation l)
+      : table(tbl)
+      , R{&tbl->R, d, (size_type)(l + max_op1d_displacement(tbl->n))}
+      , S{&tbl->S, d, (size_type)(l + max_op1d_displacement(tbl->n))}
+      , norms1d{&tbl->norms1d, d, (size_type)(l + max_op1d_displacement(tbl->n))}
       { }
 
       // Lets call sites write res.dims[d]->R... (matching the pointer-style
@@ -835,15 +867,18 @@ namespace mra {
     }
 
 #ifndef MRA_ENABLE_HOST
-    using table_pointer_type = std::shared_ptr<const detail::LevelOp1DTable<T, NDIM>>;
+    // Plain pointers: tables and norms tensors are owned by this operator's
+    // slots (_level_tables/_norms_slots), which are never evicted, and the
+    // operator outlives every convolution task using it.
+    using table_pointer_type = const detail::LevelOp1DTable<T, NDIM>*;
     // Only the assembled norms tensor is cached on the device path -- the
-    // R/S views (OpResult::dims) are cheap enough (a shared_ptr + a couple
+    // R/S views (OpResult::dims) are cheap enough (a pointer + a couple
     // of indices, see detail::Op1DSliceView) to rebuild fresh from the
     // level table on every try_get_op() call, so there's nothing else worth
     // caching per (level, displacement). What IS worth caching is the one
     // part that costs a kernel launch to assemble (see
     // submit_assemble_norms_kernel) -- exactly this tensor.
-    using norms_pointer_type = std::shared_ptr<const DenseTensor<T, 4>>;
+    using norms_pointer_type = const DenseTensor<T, 4>*;
 
     enum class Status { Available, Owned, Pending };
 
@@ -854,7 +889,7 @@ namespace mra {
                       //   make_norms_tensor(), fold its buffer into the
                       //   round's one select()
                       //   (see add_assembly_buffers()), submit_assemble_
-                      //   norms_kernel(), then publish_op(). Host path: call
+                      //   norms_kernel(), then publish_op(). Screener: call
                       //   finish_op_assembly() then publish_op().
                       // Pending: the norms tensor for this exact displacement
                       //   is still being assembled by an unrelated task
@@ -872,8 +907,8 @@ namespace mra {
                       // exact displacement's norms (status Owned) or not
                       // (status Pending/Available, decided from the same,
                       // not-yet-computed level_work table -- see dims below).
-      norms_pointer_type norms;                                // valid iff Available
-      std::shared_ptr<detail::LevelOp1DTable<T, NDIM>> level_work; // non-null iff THIS call must generate the level's table
+      norms_pointer_type norms = nullptr;                                // valid iff Available
+      detail::LevelOp1DTable<T, NDIM>* level_work = nullptr; // non-null iff THIS call must generate the level's table
       std::array<detail::Op1DSliceView<T, NDIM>, NDIM> dims{}; // populated whenever a table reference (level_work or an existing table) is known -- i.e. whenever status != Pending, OR status == Pending with level_work set
     };
 
@@ -910,19 +945,20 @@ namespace mra {
 
       OpResult out;
       table_pointer_type table;
-      auto level_res = _level_table_cache_async.try_get(detail::LevelKey(n));
+      auto& level_slot = _level_tables[n];
+      auto level_res = level_slot.try_get();
       if (level_res.status == detail::AsyncCacheStatus::Pending) {
         out.status = Status::Pending;
         return out;
       }
       if (level_res.status == detail::AsyncCacheStatus::Owned) {
-        out.level_work = std::make_shared<detail::LevelOp1DTable<T, NDIM>>(
-            n, m_mad_conv_sep_vec.size(), m_max_rank, m_K, ttg::scope::Allocate);
+        out.level_work = level_slot.emplace(std::make_unique<detail::LevelOp1DTable<T, NDIM>>(
+            n, m_mad_conv_sep_vec.size(), m_max_rank, m_K, ttg::scope::Allocate));
         table = out.level_work; // not yet computed, but a valid object to slice views into
       } else {
         table = level_res.value; // Available
       }
-      lookup_op_norms(out, std::move(table), n, disp);
+      lookup_op_norms(out, table, n, disp);
       return out;
     }
 
@@ -937,7 +973,7 @@ namespace mra {
       check_op_displacement(n, disp);
       assert(table && table->n == n);
       OpResult out;
-      lookup_op_norms(out, std::move(table), n, disp);
+      lookup_op_norms(out, table, n, disp);
       return out;
     }
 
@@ -975,7 +1011,7 @@ namespace mra {
     norms_pointer_type finish_op_assembly(Level n, Key<NDIM> disp,
                                            const std::array<detail::Op1DSliceView<T, NDIM>, NDIM>& dims) const {
       // Constructed as a named local (not forwarded straight through
-      // make_shared) to avoid make_shared's perfect-forwarding picking
+      // make_unique) to avoid make_unique's perfect-forwarding picking
       // Tensor's variadic Dims... constructor overload instead of the
       // intended (array, scope) one.
       const size_type norms_count = (size_type)m_mad_conv_sep_vec.size();
@@ -983,7 +1019,8 @@ namespace mra {
       const size_type norms_ndim = (size_type)NDIM;
       const size_type norms_kinds = (size_type)NormId::Count;
       DenseTensor<T, 4> norms_tensor(std::array{norms_count, norms_rank, norms_ndim, norms_kinds}, ttg::scope::SyncIn);
-      auto norms = std::make_shared<DenseTensor<T, 4>>(std::move(norms_tensor));
+      DenseTensor<T, 4>* norms = norms_slot(n, disp).emplace(
+          std::make_unique<DenseTensor<T, 4>>(std::move(norms_tensor)));
       auto norms_view = norms->view_on(ttg::device::Device::host());
       for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
         auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
@@ -1029,12 +1066,13 @@ namespace mra {
       return norms;
     }
 
-    /// Publishes the norms tensor assembled by finish_op_assembly() (host
-    /// path) or submit_assemble_norms_kernel() (device path) for (n, disp).
-    void publish_op(Level n, Key<NDIM> disp, norms_pointer_type data) const {
-      if (validate_ops_enabled()) validate_op_norms(n, disp, *data); // DEBUG
-      auto key = Key<NDIM>(0, n, disp.translation());
-      _norms_cache_async.publish(key, std::move(data));
+    /// Publishes the norms tensor for (n, disp) that finish_op_assembly()
+    /// (screener) or make_norms_tensor() + submit_assemble_norms_kernel()
+    /// (shell0/accumulate) installed in its slot.
+    void publish_op(Level n, Key<NDIM> disp) const {
+      auto& slot = norms_slot(n, disp);
+      if (validate_ops_enabled()) validate_op_norms(n, disp, *slot.owned_value()); // DEBUG
+      slot.publish();
     }
 
     /**
@@ -1057,12 +1095,12 @@ namespace mra {
      * convolution's own buffers (see add_convolution_op_buffers()):
      *   // loop on try_get_op() + ttg::device::suspend() while Pending
      *   bool need_assemble = (res.status == Status::Owned);
-     *   std::shared_ptr<DenseTensor<T,4>> norms;
+     *   DenseTensor<T,4>* norms = nullptr;
      *   if (need_assemble) {
-     *     norms = op.make_norms_tensor();
+     *     norms = op.make_norms_tensor(n, disp);
      *   }
      *   ttg::device::Input input(...convolution buffers...);
-     *   op.add_convolution_op_buffers(input, res, items_buf, norms.get());
+     *   op.add_convolution_op_buffers(input, res, items_buf, norms);
      *   co_await ttg::device::select(input);
      *   if (op.has_generation_work(res)) op.submit_generation_kernel(res, items, items_buf);
      *   if (need_assemble) op.submit_assemble_norms_kernel(res, n, disp, *norms);
@@ -1071,14 +1109,16 @@ namespace mra {
      *   // publishing -- screener_tt reads both there
      *   co_await ttg::device::wait(norms->buffer(), ...);
      *   if (op.has_generation_work(res)) op.publish_generation_work(res);
-     *   if (need_assemble) op.publish_op(n, disp, norms);
+     *   if (need_assemble) op.publish_op(n, disp);
      */
 
-    /// Allocates the norms tensor a device-path Owned result must finish
-    /// assembling -- device-resident garbage until submit_assemble_norms_
-    /// kernel() fills it. Call before the round's one select() -- its
-    /// buffer must be added to it (see add_assembly_buffers()).
-    std::shared_ptr<DenseTensor<T, 4>> make_norms_tensor() const {
+    /// Allocates the norms tensor a device-path Owned result for (n, disp)
+    /// must finish assembling -- device-resident garbage until submit_
+    /// assemble_norms_kernel() fills it -- and installs it in the norms slot
+    /// (owned there; the pointer stays valid as long as this operator).
+    /// Call before the round's one select() -- its buffer must be added to
+    /// it (see add_assembly_buffers()).
+    DenseTensor<T, 4>* make_norms_tensor(Level n, const Key<NDIM>& disp) const {
       // See finish_op_assembly()'s identical named-local workaround.
       const size_type norms_count = (size_type)m_mad_conv_sep_vec.size();
       const size_type norms_rank = (size_type)m_max_rank;
@@ -1086,7 +1126,7 @@ namespace mra {
       const size_type norms_kinds = (size_type)NormId::Count;
       DenseTensor<T, 4> norms_tensor(std::array{norms_count, norms_rank, norms_ndim, norms_kinds},
                                       ttg::scope::Allocate);
-      return std::make_shared<DenseTensor<T, 4>>(std::move(norms_tensor));
+      return norms_slot(n, disp).emplace(std::make_unique<DenseTensor<T, 4>>(std::move(norms_tensor)));
     }
 
     /// Adds the buffers submit_assemble_norms_kernel() needs -- the shared
@@ -1325,14 +1365,16 @@ namespace mra {
     void publish_generation_work(const OpResult& res) const {
       if (!res.level_work) return;
       if (validate_ops_enabled()) validate_level_table(*res.level_work); // DEBUG
-      _level_table_cache_async.publish(detail::LevelKey(res.level_work->n),
-                                        table_pointer_type(res.level_work));
+      _level_tables[res.level_work->n].publish();
     }
 #endif // !MRA_ENABLE_HOST
 
   private:
 #ifndef MRA_ENABLE_HOST
     static void check_op_displacement(Level n, const Key<NDIM>& disp) {
+      if (n < 0 || n > MAX_LEVEL) {
+        throw std::runtime_error("GaussianConvolutionOperator::try_get_op: level out of range");
+      }
       const Translation max_disp = max_op1d_displacement(n);
       for (Dimension d = 0; d < NDIM; ++d) {
         Translation l = disp.translation()[d];
@@ -1342,6 +1384,11 @@ namespace mra {
               "level-wide generation range for this level (see max_op1d_displacement)");
         }
       }
+    }
+
+    /// The norms slot for (n, disp); disp must have passed check_op_displacement().
+    detail::AsyncSlot<DenseTensor<T, 4>>& norms_slot(Level n, const Key<NDIM>& disp) const {
+      return _norms_slots.slot(n, disp.translation());
     }
 
     /**
@@ -1526,8 +1573,7 @@ namespace mra {
       for (Dimension d = 0; d < NDIM; ++d) {
         out.dims[d] = detail::Op1DSliceView<T, NDIM>(table, d, disp.translation()[d]);
       }
-      auto key = Key<NDIM>(0, n, disp.translation());
-      auto norms_res = _norms_cache_async.try_get(key);
+      auto norms_res = norms_slot(n, disp).try_get();
       if (norms_res.status == detail::AsyncCacheStatus::Available) {
         out.status = Status::Available;
         out.norms = norms_res.value;
@@ -1563,17 +1609,20 @@ namespace mra {
 
 #ifndef MRA_ENABLE_HOST
     // Device-path caches: try_get()/publish() only, no acquire()/MutexWaiter --
-    // see detail::AsyncCache's class comment and try_get_op() above.
+    // see detail::AsyncSlot's class comment and try_get_op() above. Both are
+    // plain arrays indexed by level (and displacement), owning their values
+    // for the operator's lifetime, so lookups take no lock and touch no
+    // reference count.
     // Exactly one caller per level generates the whole
     // detail::LevelOp1DTable (every dimension, every translation in
     // [-max_op1d_displacement(n), max_op1d_displacement(n)]) in a single
     // kernel launch; every other displacement at that level just reads it.
-    mutable detail::AsyncCache<detail::LevelKey, detail::LevelOp1DTable<T, NDIM>> _level_table_cache_async;
+    mutable std::array<detail::AsyncSlot<detail::LevelOp1DTable<T, NDIM>>, MAX_LEVEL + 1> _level_tables;
     // Caches only the assembled norms tensor per (level, displacement) --
     // not a whole aggregate -- since R/S (OpResult::dims) are cheap enough
     // to rebuild from the level table on every try_get_op() call; see
     // OpResult's comment.
-    mutable detail::AsyncCache<Key<NDIM>, DenseTensor<T, 4>> _norms_cache_async;
+    mutable detail::LevelDisplacementSlots<DenseTensor<T, 4>, NDIM> _norms_slots;
 
     // Shared (not per-term) tensors extracted once, at construction, from
     // MADNESS's Convolution1D base -- identical for every term/dimension of
