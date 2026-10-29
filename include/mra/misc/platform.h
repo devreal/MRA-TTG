@@ -248,14 +248,6 @@ using Dim3 = mra::detail::dim3;
 using Dim3 = dim3;
 #endif // HAVE_DEVICE_ARCH
 
-// current have to make sure we use scope::SyncIn for host
-// this will be fixed once TTG supports coros for host tasks
-#if defined(MRA_ENABLE_HOST)
-#define TempScope ttg::scope::SyncIn
-#else
-#define TempScope ttg::scope::Allocate
-#endif
-
 
 #if !defined(HAVE_DEVICE_ARCH)
 namespace mra {

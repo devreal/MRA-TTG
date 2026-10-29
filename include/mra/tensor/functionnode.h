@@ -74,21 +74,13 @@ namespace mra {
 
         FunctionNodeBase(const key_type& key, size_type N, size_type K, ttg::scope scope = ttg::scope::SyncIn)
         : m_key(key)
-#ifdef MRA_ENABLE_HOST
-        , m_coeffs(make_dims<ndim()+1>(N, K), ttg::scope::SyncIn) // make sure we allocate on host
-#else
         , m_coeffs(make_dims<ndim()+1>(N, K), scope)
-#endif
         , m_num_func(N)
         { }
 
         FunctionNodeBase(const key_type& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
         : m_key(key)
-#ifdef MRA_ENABLE_HOST
-        , m_coeffs(sparsity, K, ttg::scope::SyncIn) // make sure we allocate on host
-#else
         , m_coeffs(sparsity, K, scope)
-#endif
         , m_num_func(sparsity.dim(0))
         { }
 
@@ -106,11 +98,7 @@ namespace mra {
         void allocate(size_type K, ttg::scope scope = ttg::scope::SyncIn) {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
-#ifndef MRA_ENABLE_HOST
           m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), scope);
-#else
-          m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), ttg::scope::SyncIn); // make sure we allocate on host
-#endif
         }
 
 
@@ -121,13 +109,6 @@ namespace mra {
         void allocate(const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn) {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
-
-#ifdef MRA_ENABLE_HOST
-          /**
-           * Currently needed to ensure the buffer is allocated on the host.
-           */
-          scope = ttg::scope::SyncIn;
-#endif // MRA_ENABLE_HOST
           m_coeffs = tensor_type(sparsity, K, scope);
         }
 

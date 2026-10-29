@@ -29,7 +29,8 @@ endif()
 add_library(mra-host STATIC ${MRA_SOURCES} ${MRA_KERNEL_SOURCES})
 add_library(mra::host ALIAS mra-host)
 target_link_libraries(mra-host PUBLIC mra-base)
-target_compile_definitions(mra-host PUBLIC MRA_ENABLE_HOST=1)
+# host tasks access buffers directly on the host, so TTG must allocate host memory for every scope
+target_compile_definitions(mra-host PUBLIC MRA_ENABLE_HOST=1 TTG_ALWAYS_ALLOCATE_ON_HOST=1)
 
 # ── CUDA implementation ───────────────────────────────────────────────────────
 if (HAVE_CUDA)

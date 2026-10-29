@@ -611,8 +611,9 @@ namespace mra {
       : n(n)
       , R(std::array<size_type, 6>{(size_type)NDIM, num_op1d_displacements(n), count, rank, 2 * K, 2 * K}, scope)
       , S(std::array<size_type, 6>{(size_type)NDIM, num_op1d_displacements(n), count, rank, K, K}, scope)
+      // norms1d is read back on the host, so allocate its host memory up front
       , norms1d(std::array<size_type, 5>{(size_type)NDIM, num_op1d_displacements(n), count, rank, (size_type)5},
-                scope)
+                (scope == ttg::scope::Allocate) ? ttg::scope::SyncOut : scope)
       { }
     };
 

@@ -327,7 +327,7 @@ namespace mra {
 #else
         const std::size_t tmp_size = derivative_tmp_size<NDIM>(K)*n_nonzero;
 #endif
-        if (tmp_size > 0) tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, TempScope);
+        if (tmp_size > 0) tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, ttg::scope::Allocate);
         /* per function, the nodes the coefficients of the left, center, and right nodes
          * belong to; the kernel projects them to the neighbors and to this node */
         src_keys = ttg::Buffer<key_type, DeviceAllocator<key_type>>(3*N);

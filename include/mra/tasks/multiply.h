@@ -99,7 +99,7 @@ namespace mra {
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
         const std::size_t tmp_size = multiply_tmp_size<NDIM>(K)*n_nonzero;
-        ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+        ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, ttg::scope::Allocate);
         auto norms = FunctionNorms(name, t1, t2, out);
 
   #ifndef MRA_ENABLE_HOST

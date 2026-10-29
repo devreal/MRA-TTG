@@ -339,10 +339,10 @@ namespace detail {
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*n_nonzero;
 #endif
           ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
-          if (tmp_size > 0) tmp_scratch.reset(tmp_size, TempScope);
+          if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
           const auto& hgT = functiondata.get_hgT();
           /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
-          auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(n_nonzero, TempScope);
+          auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(n_nonzero, ttg::scope::SyncOut);
 
           // Computed up front (depends only on key/thresh/cell_min_width/
           // truncate_mode, all known before the kernel runs) so the kernel

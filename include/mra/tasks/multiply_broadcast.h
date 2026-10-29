@@ -202,7 +202,7 @@ namespace mra {
 #else
         const std::size_t tmp_size = multiply_broadcast_tmp_size<NDIM>(K)*n_leaf;
 #endif
-        if (tmp_size > 0) mul_tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, TempScope);
+        if (tmp_size > 0) mul_tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, ttg::scope::Allocate);
         /* the nodes the inherited coefficients belong to: a, then b_0..b_N-1 */
         inh_keys = ttg::Buffer<mra::Key<NDIM>, DeviceAllocator<mra::Key<NDIM>>>(1 + N);
         mra::Key<NDIM>* ik = inh_keys.host_ptr();

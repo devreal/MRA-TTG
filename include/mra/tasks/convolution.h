@@ -466,7 +466,7 @@ namespace mra {
         DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          cnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
+          cnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
@@ -818,7 +818,7 @@ namespace mra {
         // tail pass for the unbatched path, a queued zero-fill copy from
         // submit_convolution_batch_leader for the batched path (see their
         // comments in kernels/convolution.h).
-        DenseTensor<T, 1> resnorms(N, ttg::scope::Allocate);
+        DenseTensor<T, 1> resnorms(N, ttg::scope::SyncOut);
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
@@ -836,7 +836,7 @@ namespace mra {
         const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
 #endif
         auto tmp = ttg::Buffer<T>();
-        if (tmp_size > 0) tmp.reset(tmp_size, TempScope);
+        if (tmp_size > 0) tmp.reset(tmp_size, ttg::scope::Allocate);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -1189,7 +1189,7 @@ namespace mra {
       const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
 #endif
       auto tmp = ttg::Buffer<T>();
-      if (tmp_size > 0) tmp.reset(tmp_size, TempScope);
+      if (tmp_size > 0) tmp.reset(tmp_size, ttg::scope::Allocate);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -1199,7 +1199,7 @@ namespace mra {
         // tail pass for the unbatched path, a queued zero-fill copy from
         // submit_convolution_batch_leader for the batched path (see their
         // comments in kernels/convolution.h).
-        resnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
+        resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
       }
 #ifndef MRA_ENABLE_HOST
       // When reusing in_node's storage as out, in_node is already moved-from

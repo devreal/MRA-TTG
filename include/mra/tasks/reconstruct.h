@@ -284,7 +284,7 @@ namespace detail {
       const std::size_t tmp_size = reconstruct_tmp_size<NDIM>(K)*n_nonzero;
 #endif
       ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
-      if (tmp_size > 0) tmp_scratch.reset(tmp_size, TempScope);
+      if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
 
 #ifdef MRA_CHECK_NORMS
       // DEBUG: host-side breakdown of the exact same views the device-side

@@ -76,11 +76,7 @@ namespace mra{
       norm_vector_type norms;
       if (n_nonzero > 0) {
         /* the kernel writes every function's entry, no need to sync the tensor in */
-#ifndef MRA_ENABLE_HOST
-        auto norms_result = norm_tensor_type(N, ttg::scope::Allocate);
-#else  // MRA_ENABLE_HOST
-        auto norms_result = norm_tensor_type(N);
-#endif // MRA_ENABLE_HOST
+        auto norms_result = norm_tensor_type(N, ttg::scope::SyncOut);
         auto fnnorms = FunctionNorms(name, in);
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::select(norms_result.buffer(), in.coeffs().buffer(), fnnorms.buffer());
