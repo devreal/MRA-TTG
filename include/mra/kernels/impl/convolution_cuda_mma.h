@@ -251,29 +251,44 @@ namespace mra {
        * conflict-free 16-byte load. Tx and Tz fragments are indexed
        * i = mt*KS + ks, Ty fragments i = (mt2*MT + nt)*2 + r (see the
        * stages below for the element each fragment holds).
+       * Which element goes where is the same for every term, so each
+       * thread works out its copies once: element e = tid + j*block_size()
+       * of tbuf (Tx, Ty, Tz one after the other) comes from csrc[j] +
+       * mu*k*k. Full source pointers also keep the compiler from reloading
+       * the matrices' base pointers from the arguments in global memory
+       * for every copy (the "memory" clobber of each cp.async).
        */
+      constexpr int CJ = (3 * k * k + NW * MRA_WARP_SIZE - 1) / (NW * MRA_WARP_SIZE);  // copies per thread
       const size_type trans_rank = trans[0].dim(1);
+      const T* csrc[CJ];  // source of copy j for term 0, nullptr if none
+      #pragma unroll
+      for (int j = 0; j < CJ; ++j) {
+        /* unsigned: every divisor is a power of 2, so / and % are plain
+         * shifts and masks (int would add sign corrections) */
+        const unsigned e  = tid + j * block_size();
+        const unsigned m  = e / (k * k);
+        const unsigned i  = e % (k * k);
+        const unsigned fi = 2 * (i / 64) + i % 2;  // fragment index
+        const unsigned fl = (i % 64) / 2;          // lane holding it
+        const unsigned fg = fl / 4, ft = fl % 4;
+        unsigned row, col;
+        if (m == 1) {  // Ty[y = 2t+r+8nt][y' = g+8mt2]
+          row = 2 * ft + fi % 2 + 8 * ((fi / 2) % MT);
+          col = fg + 8 * (fi / (2 * MT));
+        } else {       // Tx[x = KS*t+ks][x' = g+8mt], Tz[z = KS*t+ks][z' = g+8mt]
+          row = KS * ft + fi % KS;
+          col = fg + 8 * (fi / KS);
+        }
+        const T* base = (m == 0) ? trans[2].data() : (m == 1) ? trans[1].data() : trans[0].data();
+        csrc[j] = (e < 3u * k * k) ? base + opid * trans_rank * k * k + row * k + col : nullptr;
+      }
       auto prefetch = [&](int mu, T* tbuf) {
-        const size_type offset = (opid * trans_rank + mu) * k * k;
-        for (int e = tid; e < 3 * k * k; e += block_size()) {
-          const int m  = e / (k * k);
-          const int i  = e % (k * k);
-          const int fi = 2 * (i / 64) + i % 2;  // fragment index
-          const int fl = (i % 64) / 2;          // lane holding it
-          const int fg = fl / 4, ft = fl % 4;
-          int row, col;
-          const T* src;
-          if (m == 1) { // Ty[y = 2t+r+8nt][y' = g+8mt2]
-            row = 2 * ft + fi % 2 + 8 * ((fi / 2) % MT);
-            col = fg + 8 * (fi / (2 * MT));
-            src = trans[1].data();
-          } else {      // Tx[x = KS*t+ks][x' = g+8mt], Tz[z = KS*t+ks][z' = g+8mt]
-            row = KS * ft + fi % KS;
-            col = fg + 8 * (fi / KS);
-            src = (m == 0) ? trans[2].data() : trans[0].data();
+        #pragma unroll
+        for (int j = 0; j < CJ; ++j) {
+          if (csrc[j] != nullptr) {
+            const unsigned dst = static_cast<unsigned>(__cvta_generic_to_shared(&tbuf[tid + j * block_size()]));
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" :: "r"(dst), "l"(csrc[j] + mu * k * k) : "memory");
           }
-          const unsigned dst = static_cast<unsigned>(__cvta_generic_to_shared(&tbuf[e]));
-          asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" :: "r"(dst), "l"(src + offset + row * k + col) : "memory");
         }
         asm volatile("cp.async.commit_group;" ::: "memory");
       };
