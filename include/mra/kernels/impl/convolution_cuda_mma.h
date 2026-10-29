@@ -33,23 +33,20 @@ namespace mra {
     inline constexpr int apply_conv_min_warps = 8;
 
     /**
-     * Same as apply_conv_min_warps for the two term functions of K=6:
-     * apply_conv_k6 (k = 12) gives each warp 2 of the 12 z-planes and 3 of
-     * the 18 8-wide column tiles, apply_conv_k6s (k = 6) every 6th term.
+     * Number of warps of the K=6 term functions: apply_conv_k6 (k = 12) gives
+     * each warp 2 of the 12 z-planes and 3 of the 18 column tiles,
+     * apply_conv_k6s (k = 6) every 6th term.
      */
     inline constexpr int apply_conv_k6_warps = 6;
 
     /**
-     * What the term function for k (see apply_term) needs from the block:
-     * the whole warps it splits the work among, and its shared memory in
-     * elements of T; {0, 0} if there is no term function for k. K has a
-     * tensor-core path if both its terms, k = 2K (R) and k = K (S), have one
-     * (see apply_conv_min_threads).
+     * Warps and shared memory (in elements of T) that the term function for
+     * k needs; {0, 0} if k has none. K takes the tensor-core path only if both
+     * k = 2K (R term) and k = K (S term) have one. Block size, launch bounds
+     * and shared memory are derived from this table.
      *
-     * Adding a K: its term functions in apply_term, their needs here, and
-     * K in detail::with_ct_K (kernels/convolution.h), which compiles the
-     * kernels with K as a compile-time constant. Block size, launch bounds
-     * and shared memory follow from this table.
+     * To add a K: write its term functions, call them from apply_term, list
+     * their needs here, and add K to detail::with_ct_K (kernels/convolution.h).
      */
     struct term_needs {
       int warps;
@@ -61,7 +58,7 @@ namespace mra {
         case 16:
         case 8:   // apply_conv_k: W (k^3) and two sets of {Tx, Ty, Tz} (k^2 each)
           return {apply_conv_min_warps, static_cast<int>(k * k * k + 2 * 3 * k * k)};
-        case 12:  // apply_conv_k6: W (rows padded to 16) and two sets of {Tx, Ty, Tz} A fragments (6 per lane, 32 lanes)
+        case 12:  // apply_conv_k6: W (rows padded to 16) and two sets of {Tx, Ty, Tz} A fragments (6 per lane)
           return {apply_conv_k6_warps, 12 * 12 * 16 + 2 * 3 * 6 * 32};
         case 6:   // apply_conv_k6s: a W (k^3) per warp
           return {apply_conv_k6_warps, apply_conv_k6_warps * 6 * 6 * 6};
@@ -179,16 +176,21 @@ namespace mra {
        * and a previous call may still be using the shared memory */
       SYNCTHREADS();
 
-      /* Stage-1 B fragments: fr[s][nt][ks] = f[z = ZS*w+s][y = g+8nt][x = KS*t+ks] */
+      /* Stage-1 B fragments: fr[s][nt][ks] = f[z = ZS*w+s][y = g+8nt][x = KS*t+ks],
+       * read 16 bytes (ks, ks+1) at a time; f must be 16-byte aligned */
       T fr[ZS][MT][KS];
       const T* fptr = f.data();
+      assert(reinterpret_cast<uintptr_t>(fptr) % alignof(double2) == 0);
       #pragma unroll
       for (int s = 0; s < ZS; ++s) {
         #pragma unroll
         for (int nt = 0; nt < MT; ++nt) {
+          const double2* frow = reinterpret_cast<const double2*>(fptr + ((ZS * w + s) * k + g + 8 * nt) * k + KS * t);
           #pragma unroll
-          for (int ks = 0; ks < KS; ++ks) {
-            fr[s][nt][ks] = fptr[((ZS * w + s) * k + g + 8 * nt) * k + KS * t + ks];
+          for (int h = 0; h < KS / 2; ++h) {
+            double2 v = frow[h];
+            fr[s][nt][2 * h]     = v.x;
+            fr[s][nt][2 * h + 1] = v.y;
           }
         }
       }
@@ -251,20 +253,18 @@ namespace mra {
        * conflict-free 16-byte load. Tx and Tz fragments are indexed
        * i = mt*KS + ks, Ty fragments i = (mt2*MT + nt)*2 + r (see the
        * stages below for the element each fragment holds).
-       * Which element goes where is the same for every term, so each
-       * thread works out its copies once: element e = tid + j*block_size()
-       * of tbuf (Tx, Ty, Tz one after the other) comes from csrc[j] +
-       * mu*k*k. Full source pointers also keep the compiler from reloading
-       * the matrices' base pointers from the arguments in global memory
-       * for every copy (the "memory" clobber of each cp.async).
+       * Thread tid copies the elements e = tid + j*block_size() of tbuf (Tx,
+       * Ty, Tz one after the other) from csrc[j] + mu*k*k; csrc[j], the
+       * source for term 0, is computed once. Full pointers also keep the
+       * compiler from reloading trans[].data() from global memory for every
+       * copy (each cp.async has a "memory" clobber).
        */
       constexpr int CJ = (3 * k * k + NW * MRA_WARP_SIZE - 1) / (NW * MRA_WARP_SIZE);  // copies per thread
       const size_type trans_rank = trans[0].dim(1);
       const T* csrc[CJ];  // source of copy j for term 0, nullptr if none
       #pragma unroll
       for (int j = 0; j < CJ; ++j) {
-        /* unsigned: every divisor is a power of 2, so / and % are plain
-         * shifts and masks (int would add sign corrections) */
+        /* unsigned: all divisors are powers of 2, so / and % become shifts and masks */
         const unsigned e  = tid + j * block_size();
         const unsigned m  = e / (k * k);
         const unsigned i  = e % (k * k);
@@ -299,10 +299,10 @@ namespace mra {
 
       T* tbufs = c_smem + k * k * k;  // 2 x {Tx, Ty, Tz}, after W
       int buf = 0;
-      /* mufac of term mu (sign-flipped for S), loaded along with its prefetch */
+      /* mufac of term mu, loaded along with its prefetch (the S term's sign is
+       * applied in stage 3, see sfac) */
       auto get_mufac = [&](int mu) {
-        T mufac = norm(mu, 0, NormId::Fac);
-        return (NormId::Snorm == Term) ? -mufac : mufac;
+        return norm(mu, 0, NormId::Fac);
       };
       int mu = next_kept(0);
       T mufac = 0.0;
@@ -425,8 +425,11 @@ namespace mra {
               for (int ks = 0; ks < KS; ++ks) {
                 dmma_8x8x4(c, tz[mt][ks], b[ks]);
               }
-              acc[mt][nt][0] = fma(mufac, c[0], acc[mt][nt][0]);
-              acc[mt][nt][1] = fma(mufac, c[1], acc[mt][nt][1]);
+              /* the S term's sign goes on the DFMA operand, where it is free: a
+               * separate negation is an extra FP64 op that waits behind the DMMAs */
+              const T sfac = (NormId::Snorm == Term) ? -mufac : mufac;
+              acc[mt][nt][0] = fma(sfac, c[0], acc[mt][nt][0]);
+              acc[mt][nt][1] = fma(sfac, c[1], acc[mt][nt][1]);
             }
           }
         }
@@ -453,13 +456,11 @@ namespace mra {
     }
 
     /**
-     * The applied terms mu of one (R or S) separated operator, as in
-     * apply_conv_k: a term is applied if MADNESS's screening keeps it
-     * (kept). For the first MaxMaskRank terms this is decided once, by the
-     * whole block, as a bitmask in shared memory, so that finding the next
-     * term (next) does not wait for global memory; terms beyond are tested
-     * on the fly. Raw indexing into opnorms (opid, mu, d, NormId), see
-     * apply_conv_k.
+     * The applied terms mu of one separated operator (R or S), as in
+     * apply_conv_k: a term is applied if MADNESS's screening keeps it. The
+     * first MaxMaskRank terms are decided once by the block, as a bitmask in
+     * shared memory; later terms are tested one by one. opnorms
+     * (opid, mu, d, NormId) is indexed by hand, as in apply_conv_k.
      */
     template<typename T, Dimension NDIM, NormId Term>
     class conv_terms {
@@ -467,8 +468,8 @@ namespace mra {
       static constexpr int MaxMaskRank = 1024;
       using mask_type = uint32_t[MaxMaskRank / 32];
 
-      /* Called by all threads of the block: computes the bitmask into mask
-       * (shared memory, owned by the caller) and synchronizes. */
+      /* Called by all threads of the block: builds the bitmask in mask (shared
+       * memory, owned by the caller) and synchronizes the block. */
       template<concepts::TensorView<4> ViewOpnorms>
       DEVSCOPE conv_terms(int opid, int rank, const T optol, const ViewOpnorms& opnorms, mask_type& mask)
       : m_norms(opnorms.data())
@@ -536,37 +537,26 @@ namespace mra {
     };
 
     /**
-     * apply_conv_k for the R term of K=6 (k = 12), which is not a multiple
-     * of the 8x8x4 tile (the S term, k = 6, is apply_conv_k6s). Same
-     * structure as apply_conv_k (stages 1+2 in registers per z-plane, one swizzled
-     * exchange through shared memory, stage 3 accumulated in registers
-     * across all mu, A fragments prefetched in usage order, kept-term
-     * bitmask), on apply_conv_k6_warps (NW) warps. Padding lanes get zero
-     * fragments, so the padded rows and columns of the tiles hold zeros
-     * that are never stored.
-     *
-     * Warp w owns the z-planes 2w and 2w+1 (p = 0, 1).
-     *  - Every contraction (x, y, z) takes three 4-deep steps j over the
-     *    index c(t, j) = 2t+j for j < 2 and 8+t for j = 2: steps 0 and 1
-     *    cover 0..7 the way a full tile's output columns (2t+r) do, step 2
-     *    covers 8..11.
-     *  - Stage 1 multiplies three B tiles per warp: y = 0..7 of either
-     *    plane, and one shared tile with y = 8..11 of both planes
-     *    interleaved (column n: plane n%2, y = 8+n/2). Its output column
-     *    2t+r is plane r, y = 8+t, i.e., step 2 of plane r in stage 2, so
-     *    none of its columns are padding. The output rows are x' = g, and
-     *    x' = 8+g/2 for the second row tile (rows duplicated in pairs).
+     * apply_conv_k for k = 12, the R term of K=6 (the S term is
+     * apply_conv_k6s). 12 is not a multiple of the 8-wide mma tile: tile rows
+     * and columns beyond 12 are padding, filled with zeros and never
+     * stored. Same structure as apply_conv_k, on NW = apply_conv_k6_warps
+     * warps; warp w computes the z-planes 2w and 2w+1 (p = 0, 1).
+     *  - Each contraction (x, y, z) takes three 4-deep steps j over the index
+     *    c(t, j) = 2t+j for j < 2 and 8+t for j = 2 (see cidx): steps 0 and 1
+     *    cover 0..7, step 2 covers 8..11.
+     *  - Stage 1 uses three B tiles per warp: y = 0..7 of plane 0, y = 0..7
+     *    of plane 1, and one tile with y = 8..11 of both planes (column n:
+     *    plane n%2, y = 8+n/2). Its output column 2t+r (plane r, y = 8+t) is
+     *    exactly step 2 of plane r in stage 2. The second output row tile
+     *    holds x' = 8+g/2 (rows duplicated in pairs, see orow).
      *  - Stage 2: x' = 0..7 get one accumulator per plane; x' = 8..11 of
-     *    both planes share one with column n: plane n%2, x' = 8+n/2, which
-     *    is where the duplicated stage-1 rows put them (each lane picks its
-     *    plane's stage-1 output). Its output columns 2t+r are plane r,
-     *    x' = 8+t, so every lane writes (z = 2w, 2w+1) pairs, as
-     *    apply_conv_k does with ZS == 2.
-     *  - Stage 3: warp w owns the columns n = y'*k + x' in [24w, 24w+24).
-     *  Only padding the output index of each stage to 16 is wasted: 324
-     *  mma per term, 75% useful (zero-padding every dimension: 444, 55%).
-     *  W has rows of 16 (8 16-byte slots) with slot s of row (x', y') at
-     *  s ^ h(x', y') (see widx), conflict-free for all stores and loads.
+     *    both planes share one (column n: plane n%2, x' = 8+n/2). Every lane
+     *    stores z pairs (2w, 2w+1), as apply_conv_k does with ZS == 2.
+     *  - Stage 3: warp w computes the columns n = y'*k + x' in [24w, 24w+24).
+     * W has rows of 16 (8 slots of 16 bytes); slot s of row (x', y') is
+     * stored at s ^ h(x', y') (see widx), so no store or load has bank
+     * conflicts.
      */
     template<typename T, Dimension NDIM, NormId Term,
              concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
@@ -614,21 +604,21 @@ namespace mra {
       const bool active = warp < NW;  // any extra warps only join the copies and barriers
       const int w      = active ? warp : 0;
 
-      /* the contraction index of step j on lane%4 = t (see above), k for padding */
+      /* contraction index c(t, j) of step j for lane%4 = t; k means padding */
       auto cidx = [](int t, int j) {
         return j < 2 ? 2 * t + j : (j == 2 ? 8 + t : k);
       };
-      /* the output index of A-fragment row g of tile mt, k for padding;
-       * dup: the duplicated stage-1 rows (see above) */
+      /* output index of A-fragment row g of tile mt; k means padding.
+       * dup: Tx in stage 1, whose second tile holds each row twice */
       auto orow = [](int mt, int g, bool dup) {
         if (mt == 0) return g < k ? g : k;
         return dup ? 8 + g / 2 : (g < 4 ? 8 + g : k);
       };
 
-      /* W[n][z] in shared memory, see above */
+      /* index of W[n = y'*k + x'][z] in rows of WROW */
       extern __shared__ T c_smem[];
       auto widx = [](int xp, int yp, int z) {
-        // permutation (0, 2, 3, 1) of x'%4 in bits 2:1, x'/4 in bit 1, y'%2 in bit 0
+        // h = 2 * (p[x'%4] ^ (x'/4)%2) + y'%2 with p = (0, 2, 3, 1)
         const int h = 2 * (((0x78 >> (2 * (xp % 4))) & 3) ^ ((xp / 4) % 2)) | (yp % 2);
         return (yp * k + xp) * WROW + 2 * ((z / 2) ^ h) + (z % 2);
       };
@@ -662,23 +652,22 @@ namespace mra {
         }
       }
 
-      /* the applied terms (computing their bitmask synchronizes the block) */
+      /* the applied terms; building their bitmask synchronizes the block */
       __shared__ typename conv_terms<T, NDIM, Term>::mask_type kept_mask;
       const conv_terms<T, NDIM, Term> terms(opid, rank, optol, opnorms, kept_mask);
 
       /**
-       * Copy the A fragments of Tx, Ty, Tz of term mu into tbuf
-       * (asynchronously) in the order they are loaded: first the pairs
+       * prefetch(mu, tbuf) copies the A fragments of Tx, Ty, Tz of term mu
+       * into tbuf with cp.async, in the order they are read: first the pairs
        * (j = 2h, 2h+1) of each tile mt, lane l's pair at
-       * [(mt*NP + h)*64 + 2*l + j%2] (one conflict-free 16-byte load), then
-       * the single fragments (j = KS-1 for odd KS) at
-       * [MT*NP*64 + mt*32 + l] (one conflict-free 8-byte load). Fragment j
-       * of tile mt holds T[c(t, j)][orow(mt, g)], zero-filled for padding.
-       * Which element goes where is the same for every term, so each
-       * thread's entries (tid + p*block_size() of each matrix) are worked
-       * out once, as one byte each: the element's offset in the k x k
-       * matrix, ZFill (zero-fill) or None (no entry). Tx has its own plan
-       * (duplicated rows), Ty and Tz share one.
+       * [(mt*NP + h)*64 + 2*l + j%2] (one 16-byte load), then the single
+       * fragment j = KS-1 at [MT*NP*64 + mt*32 + l] (one 8-byte load).
+       * Fragment j of tile mt holds T[c(t, j)][orow(mt, g)], zero for padding.
+       * Each thread copies the entries tid + p*block_size() of each matrix.
+       * Their sources are the same for every term up to an offset, so they
+       * are computed once, one byte per entry: the offset in the k x k
+       * matrix, ZFill (write zero) or None (no entry). Tx has its own plan
+       * (rows duplicated), Ty and Tz share one.
        */
       constexpr int PJ = (PM + NW * MRA_WARP_SIZE - 1) / (NW * MRA_WARP_SIZE);  // entries per thread and matrix
       constexpr uint32_t ZFill = 0xfe, None = 0xff;
@@ -884,18 +873,16 @@ namespace mra {
     }
 
     /**
-     * The S term of K=6 (k = 6). A term is too little work to split across
-     * the block (apply_conv_k6 would do 6 mma per warp between two block
-     * barriers), so each of the NW warps applies whole terms on its own:
-     * warp w takes every NW-th applied term, keeps its own sum in registers,
-     * and the NW sums are added up (in a fixed order) at the end. Per term
-     * and warp: stages 1+2 for all 6 z-planes (24 mma in 6 independent
-     * chains), the exchange through the warp's own W (laid out as in
-     * apply_conv_k6, z pairs stored together), synchronized with
-     * __syncwarp only, and stage 3 for the 5 8-wide column tiles of
-     * n = y'*k + x' (10 mma). Every dimension is zero-padded to 8
-     * (c(t, j) = 2t+j for t < 3). The A fragments of the warp's next term
-     * are loaded into registers while the current one is computed.
+     * The S term of K=6 (k = 6). Each of the NW warps applies whole terms on
+     * its own, since one term split across the block would be only a few mma
+     * per warp between two block barriers. Warp w takes every NW-th applied
+     * term and keeps its own sum in registers; the NW sums are added in a
+     * fixed order at the end. Per term, a warp computes stages 1+2 for all 6
+     * z-planes, exchanges the result through its own W (z pairs stored
+     * together, __syncwarp only), and computes stage 3 for the 5 column
+     * tiles of n = y'*k + x'. Every dimension is zero-padded to 8
+     * (c(t, j) = 2t+j for t < 3). The next term's A fragments are read into
+     * registers while the current term is computed.
      */
     template<typename T, Dimension NDIM, NormId Term,
              concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
@@ -932,7 +919,8 @@ namespace mra {
       const int w      = active ? warp : 0;
       const bool valid = t < 3 && g < k;  // the lane holds a contraction index 2t+j < k and an output row g < k
 
-      /* W[n][z] of warp w, see apply_conv_k6 */
+      /* index of this warp's W[n = y'*k + x'][z]; the three 16-byte slots of a
+       * row are rotated by 2x' */
       extern __shared__ T c_smem[];
       T* wbuf = c_smem + w * WS;
       auto widx = [](int xp, int yp, int z) {
@@ -961,7 +949,7 @@ namespace mra {
         acc[nt][0] = acc[nt][1] = 0.0;
       }
 
-      /* the applied terms (computing their bitmask synchronizes the block) */
+      /* the applied terms; building their bitmask synchronizes the block */
       __shared__ typename conv_terms<T, NDIM, Term>::mask_type kept_mask;
       const conv_terms<T, NDIM, Term> terms(opid, rank, optol, opnorms, kept_mask);
 
@@ -978,8 +966,8 @@ namespace mra {
           }
         }
       };
-      /* warp w applies the terms w, w + NW, ... of the applied terms; mufac
-       * is loaded along with the term's fragments */
+      /* warp w takes the applied terms w, w + NW, w + 2*NW, ...; the next
+       * one's fragments and mufac are read one term ahead */
       int mu = terms.advance(terms.next(0), w);
       T a[3][2], an[3][2];
       T mufac = 0.0;
@@ -1043,7 +1031,8 @@ namespace mra {
         }
       }
 
-      /* add up the warps' sums: each warp's goes where its W was */
+      /* add up the warps' sums: each warp stores its sum in its own W, then
+       * every thread adds up its elements over the warps */
       SYNCTHREADS();
       if (active) {
         #pragma unroll
@@ -1146,9 +1135,7 @@ namespace mra {
     {
 #ifdef MRA_HAVE_DMMA
       if constexpr (apply_conv_has_path<decltype(K)>()) {
-        // the term functions keep their share of the tensors in the registers
-        // of apply_conv_min_threads(K) whole warps -- guaranteed by launching
-        // with at least that many threads
+        // the term functions need at least apply_conv_min_threads(K) threads, in whole warps
         assert(block_size() % MRA_WARP_SIZE == 0 &&
                block_size() / MRA_WARP_SIZE >= apply_conv_min_threads(K) / MRA_WARP_SIZE);
         // get the rank of the operation

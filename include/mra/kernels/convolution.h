@@ -81,11 +81,9 @@ namespace mra{
 
     /**
      * The block size the convolution kernels are compiled for (their
-     * LAUNCH_BOUNDS): exactly conv_block_dims(K) for a compile-time K,
-     * which lets the compiler give each thread more registers at the same
-     * 2 blocks per SM if the block is smaller than MAX_THREADS_PER_BLOCK
-     * (K=6 on the mma path: 192 threads, up to 168 instead of 128
-     * registers), and MAX_THREADS_PER_BLOCK for a K known only at run time.
+     * LAUNCH_BOUNDS): conv_block_dims(K) for a compile-time K, so a block
+     * smaller than MAX_THREADS_PER_BLOCK gets more registers per thread at
+     * the same 2 blocks per SM; MAX_THREADS_PER_BLOCK for a run-time K.
      */
     template<typename KT>
     constexpr int conv_launch_threads() {
@@ -495,12 +493,11 @@ namespace mra{
       SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
 
-      // result_view has exactly n_nonzero non-zero entries, so this
-      // always finds a valid function id -- see submit_convolution_kernel.
-      // Excluded (zero) functions' resnorms entries are pre-filled with
-      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
-      // them here. Looked up by the whole first warp, 32 entries per step
-      // (see find_nth_allocated_warp), rather than by the team lead alone.
+      // function id of position tmp_pos: the tmp_pos-th non-zero entry of
+      // result_view (it has exactly n_nonzero, see submit_convolution_kernel),
+      // searched by the whole first warp, 32 entries at a time. Zero
+      // functions are never visited; their resnorms are set to 0 on the host
+      // (mra/tasks/convolution.h).
       size_type fn = 0;
       if (thread_id() < 32) {
         fn = find_nth_allocated_warp(N, tmp_pos, result_view);
