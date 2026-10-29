@@ -37,6 +37,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <mutex>
 
 #include <ttg/serialization/backends.h>
 #include <ttg/serialization/std/array.h>
@@ -175,7 +176,9 @@ namespace {
     T thresh, lo, mu, gamma, L;
     T cnorm, cspread;
     bool all_points;
+    bool checksum;
     bool with_resnorms;
+    bool launch_log;
     unsigned long seed;
   };
 
@@ -189,6 +192,16 @@ namespace {
     const T fac = vol_nsphere(NDIM, radius);
 
     std::unique_ptr<PointState> state;
+    /* -checksum: sum over tasks of sum_i (i+1)*resnorms[i], to compare builds */
+    std::mutex checksum_mutex;
+    double checksum = 0.0;
+    /* -launchlog: every convolution kernel launch, numbered per kernel the way ncu's
+     * --launch-skip counts the launches matching -k, with the point and rep it ran for.
+     * While logging, launches are issued under launch_mutex, so the numbers follow the
+     * order of the launch calls. */
+    std::mutex launch_mutex;
+    std::string launch_point;
+    unsigned long launch_seq_batched = 0, launch_seq_unbatched = 0;
 
     const bool enable_batching = mra::batching_enabled();
 #ifndef MRA_ENABLE_HOST
@@ -264,16 +277,41 @@ namespace {
         auto batch = co_await ttg::device::coop<int>(in_view, f_view, out_view, resnorms_view, tmp,
                                                      transr, transs, opnorms_view, tol, at, out.coeffs(),
                                                      n_nonzero, resnorms);
-        detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, N);
+        if (cfg.launch_log && batch.is_leader()) {
+          std::lock_guard<std::mutex> lock(launch_mutex);
+          size_type total = 0;
+          std::ostringstream per_member;
+          for (std::size_t m = 0; m < batch.size(); ++m) {
+            const size_type a = batch[m].template get<11>();
+            total += a;
+            per_member << (m ? "," : "") << a;
+          }
+          std::cout << "# launch convolution_kernel_batched " << launch_seq_batched++ << ": " << launch_point
+                    << " K=" << K << " members=" << batch.size() << " A=" << total
+                    << " A_per_member=" << per_member.str() << std::endl;
+          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, N);
+        } else {
+          detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, N);
+        }
       } else
 #endif // MRA_ENABLE_HOST
       {
         auto sparseman = make_sparsity_manager(out);
         sparseman.populate_device_sparsity();
-        submit_convolution_kernel<T, NDIM>(s.key, s.displacement, K, N, n_nonzero, fac, tol, in_view,
-                                           f_view, out_view, resnorms_view, transr, transs,
-                                           opnorms_view, at,
-                                           tmp.current_device_ptr(), ttg::device::current_stream());
+        auto submit = [&]() {
+          submit_convolution_kernel<T, NDIM>(s.key, s.displacement, K, N, n_nonzero, fac, tol, in_view,
+                                             f_view, out_view, resnorms_view, transr, transs,
+                                             opnorms_view, at,
+                                             tmp.current_device_ptr(), ttg::device::current_stream());
+        };
+        if (cfg.launch_log) {
+          std::lock_guard<std::mutex> lock(launch_mutex);
+          std::cout << "# launch convolution_kernel " << launch_seq_unbatched++ << ": " << launch_point
+                    << " K=" << K << " task=" << id << " A=" << n_nonzero << std::endl;
+          submit();
+        } else {
+          submit();
+        }
       }
 
 #ifndef MRA_ENABLE_HOST
@@ -281,6 +319,17 @@ namespace {
         co_await ttg::device::wait(resnorms.buffer());
       }
 #endif // MRA_ENABLE_HOST
+      if (cfg.checksum) {
+        auto rn = resnorms.view_on(ttg::device::Device::host());
+        double sum = 0.0;
+        for (size_type i = 0; i < N; ++i) sum += (i + 1) * rn(i);
+        std::lock_guard<std::mutex> lock(checksum_mutex);
+        if (checksum == 0.0) {
+          std::cerr << "# resnorms[0, N/2, N-1] of one task: " << std::setprecision(17) << rn(0) << " "
+                    << rn(N / 2) << " " << rn(N - 1) << std::defaultfloat << std::endl;
+        }
+        checksum += sum;
+      }
     }, ttg::edges(e), ttg::edges(), "conv-bench");
 
 #ifndef MRA_ENABLE_HOST
@@ -371,10 +420,19 @@ namespace {
             fill_random(ps->in, N, fnorms, rng);
           }
           state = std::move(ps);
+          checksum = 0.0;
 
           /* first iteration is warm-up: moves inputs and operator data to the device */
           std::vector<double> times;
           for (int r = 0; r < cfg.nreps + 1; ++r) {
+            if (cfg.launch_log && is_root) {
+              std::lock_guard<std::mutex> lock(launch_mutex);
+              std::ostringstream os;
+              os << opname << " level " << n << " disp " << disp_str(disp) << " rep " << r
+                 << (r == 0 ? " (warm-up)" : "");
+              launch_point = os.str();
+              std::cout << "# point " << launch_point << std::endl;
+            }
             auto beg = std::chrono::high_resolution_clock::now();
             if (is_root) start->invoke();
             ttg::execute();
@@ -390,6 +448,10 @@ namespace {
           for (auto t : times) t_mean += t;
           t_mean /= times.size();
           const double gflop = flops_per_task * cfg.ntasks * 1e-9;
+          if (is_root && cfg.checksum) {
+            std::cout << "# checksum " << opname << " level " << n << " disp " << disp_str(disp) << " "
+                      << std::setprecision(17) << checksum / (cfg.nreps + 1) << std::defaultfloat << std::endl;
+          }
 
           if (is_root) {
             std::cout << opname << "," << K << "," << N << "," << n << "," << disp_str(disp) << ","
@@ -415,7 +477,7 @@ int main(int argc, char **argv) {
   if (opt.exists("-h") || opt.exists("--help")) {
     std::cout << "Usage: " << argv[0] << " [options]\n"
               << "  -op <list>     operators: coulomb,bsh,slater (default: coulomb,bsh)\n"
-              << "  -K <k>         polynomial order (default: 8; K=8 uses the WMMA path on sm_80+)\n"
+              << "  -K <k>         polynomial order (default: 8; K=8 and K=6 use tensor cores on sm_80+)\n"
               << "  -N <n>         functions per node (default: 16)\n"
               << "  -p <p>         threshold 10^-p (default: 6)\n"
               << "  -lo <lo>       smallest length scale resolved by the operator (default: 1e-6)\n"
@@ -430,6 +492,9 @@ int main(int argc, char **argv) {
               << "  -r <reps>      timed repetitions per point, after one warm-up (default: 3)\n"
               << "  -B <b>         max batch size, <=1 disables batching (default: mra default)\n"
               << "  -resnorms      also compute result norms (as for the last contribution)\n"
+              << "  -checksum      print a checksum of the result norms per point (implies -resnorms)\n"
+              << "  -launchlog     print every convolution kernel launch, numbered per kernel as ncu's\n"
+              << "                 --launch-skip counts the launches matching -k, with its point, rep and batch\n"
               << "  -all           also run points where every function is screened out\n"
               << "  -s <seed>      random seed (default: 5551212)\n"
               << "  -c <cores>     number of cores (default: all)\n";
@@ -453,7 +518,9 @@ int main(int argc, char **argv) {
   cfg.cspread = opt.parse("-cspread", 0.0);
   cfg.ntasks = opt.parse("-n", 256);
   cfg.nreps = opt.parse("-r", 3);
-  cfg.with_resnorms = opt.exists("-resnorms");
+  cfg.checksum = opt.exists("-checksum");
+  cfg.launch_log = opt.exists("-launchlog");
+  cfg.with_resnorms = opt.exists("-resnorms") || cfg.checksum;
   cfg.all_points = opt.exists("-all");
   cfg.seed = opt.parse("-s", 5551212L);
   int cores = opt.parse("-c", -1);

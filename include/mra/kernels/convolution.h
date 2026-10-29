@@ -55,18 +55,61 @@ namespace mra{
      * mra::accel::apply_conv_min_threads(K) threads (the tensor-core path in
      * apply_conv relies on it).
      */
-    inline Dim3 conv_thread_dims(size_type K) {
+    constexpr Dim3 conv_block_dims(size_type K) {
       Dim3 dims = max_thread_dims(2*K);
       const unsigned min_threads = mra::accel::apply_conv_min_threads(K);
       const unsigned xz = dims.x * dims.z;
       if (dims.y * xz < min_threads) {
         dims.y = (min_threads + xz - 1) / xz;
       }
+      return dims;
+    }
+
+    /**
+     * conv_block_dims, checked against MAX_THREADS_PER_BLOCK, the most any
+     * convolution kernel is compiled for (see conv_launch_threads).
+     */
+    inline Dim3 conv_thread_dims(size_type K) {
+      const Dim3 dims = conv_block_dims(K);
       if (dims.x * dims.y * dims.z > MAX_THREADS_PER_BLOCK) {
         throw std::runtime_error("convolution: MAX_THREADS_PER_BLOCK is too small for the "
-                                 "tensor-core convolution (needs " + std::to_string(min_threads) + " threads)");
+                                 "tensor-core convolution (needs " +
+                                 std::to_string(mra::accel::apply_conv_min_threads(K)) + " threads)");
       }
       return dims;
+    }
+
+    /**
+     * The block size the convolution kernels are compiled for (their
+     * LAUNCH_BOUNDS): conv_block_dims(K) for a compile-time K, so a block
+     * smaller than MAX_THREADS_PER_BLOCK gets more registers per thread at
+     * the same 2 blocks per SM; MAX_THREADS_PER_BLOCK for a run-time K.
+     */
+    template<typename KT>
+    constexpr int conv_launch_threads() {
+      if constexpr (is_ct_integral_v<KT>) {
+        constexpr Dim3 dims = conv_block_dims(KT::value);
+        return dims.x * dims.y * dims.z;
+      } else {
+        return MAX_THREADS_PER_BLOCK;
+      }
+    }
+
+    /**
+     * Calls launch(K) with K as a compile-time constant (mra::Int) for the
+     * Ks that have a tensor-core path in the mma implementation (see
+     * mra::accel::mma::apply_term_needs), and with K as a run-time value
+     * otherwise. The kernels are compiled for these Ks on every backend;
+     * where the tensor-core path does not apply (WMMA: K=6; HIP and host:
+     * both), apply_conv falls back to the generic implementation.
+     */
+    template<typename LaunchFn>
+    void with_ct_K(size_type K, LaunchFn&& launch) {
+      switch (K) {
+        case 8:  launch(Int<8>{}); break;
+        case 6:  launch(Int<6>{}); break;
+        default: launch(K);        break;
+      }
     }
 
 
@@ -387,14 +430,11 @@ namespace mra{
       FT& f,
       InT& in,
       ResultT& result,
+      size_type fn,
       size_type& i)
     {
-      // result_view has exactly n_nonzero non-zero entries, so this
-      // always finds a valid function id -- see submit_convolution_kernel.
-      // Excluded (zero) functions' resnorms entries are pre-filled with
-      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
-      // them here.
-      i = find_nth_allocated(N, tmp_pos, result_view);
+      // fn: the function id of position tmp_pos, see convolution_process_one
+      i = fn;
 
       const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
       const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
@@ -415,8 +455,8 @@ namespace mra{
      * convolution_kernel_batched further down -- there is exactly one copy of
      * this logic to maintain instead of two near-identical grid-stride loops.
      * Returns the function index `i` it just processed (found via
-     * find_nth_allocated inside convolution_process_one_leader; same value on
-     * every thread in the block, courtesy of the SHARED `i`), so both callers
+     * find_nth_allocated_warp and set by convolution_process_one_leader; same
+     * value on every thread in the block, courtesy of the SHARED `i`), so both callers
      * can demote result_view's sparsity state for that position right after
      * the call, on the same team-lead thread that just wrote resnorms[i], if
      * the computed norm turned out to be exactly zero -- no extra
@@ -453,9 +493,18 @@ namespace mra{
       SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
 
+      // function id of position tmp_pos: the tmp_pos-th non-zero entry of
+      // result_view (it has exactly n_nonzero, see submit_convolution_kernel),
+      // searched by the whole first warp, 32 entries at a time. Zero
+      // functions are never visited; their resnorms are set to 0 on the host
+      // (mra/tasks/convolution.h).
+      size_type fn = 0;
+      if (thread_id() < 32) {
+        fn = find_nth_allocated_warp(N, tmp_pos, result_view);
+      }
       if (is_team_lead()) {
         convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos,
-                                                f0, resultc, work1, work2, f, in, result, i);
+                                                f0, resultc, work1, work2, f, in, result, fn, i);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -531,12 +580,13 @@ namespace mra{
               concepts::TensorView<1> ViewResnorms,
               concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
               concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
-              concepts::TensorView<4> ViewOpnorms>
-    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+              concepts::TensorView<4> ViewOpnorms,
+              typename KT>
+    LAUNCH_BOUNDS(conv_launch_threads<KT>())
     GLOBALSCOPE void convolution_kernel(
       Key<NDIM> key,
       Key<NDIM> displacement,
-      auto K,
+      KT K,
       size_type N,
       size_type n_nonzero,
       const T fac,
@@ -633,16 +683,12 @@ namespace mra{
     const size_type grid = (n_nonzero > 0 || resnorms.empty()) ? n_nonzero : size_type(1);
 
     //CONFIGURE_KERNEL((detail::convolution_kernel<T, NDIM>), smem_size);
-    if (K == 8) {
-      //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+    //auto in_view_k = make_ct_tensorview_from(in_view, in_view.dim(0), Int<16>{});
+    detail::with_ct_K(K, [&](auto ctK) {
       CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
-                  (key, displacement, Int<8>{}, N, n_nonzero, fac, tol, in_view, f_view, result_view,
+                  (key, displacement, ctK, N, n_nonzero, fac, tol, in_view, f_view, result_view,
                   resnorms, transr, transs, opnorms, at, tmp));
-    } else {
-      CALL_KERNEL((detail::convolution_kernel<T, NDIM>), grid, thread_dims, smem_size, stream,
-                  (key, displacement, K, N, n_nonzero, fac, tol, in_view, f_view, result_view,
-                  resnorms, transr, transs, opnorms, at, tmp));
-    }
+    });
     checkSubmit();
   }
 
@@ -728,14 +774,14 @@ namespace mra{
      * per-(node, function) body convolution_kernel itself uses
      * (convolution_process_one, defined above with convolution_kernel_impl).
      */
-    template <typename T, Dimension NDIM>
-    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    template <typename T, Dimension NDIM, typename KT>
+    LAUNCH_BOUNDS(conv_launch_threads<KT>())
     GLOBALSCOPE void convolution_kernel_batched(
       ConvolutionBatchArg<T, NDIM>* args,     // device ptr, size == num_members
       const size_type* member_offsets,        // device ptr, size == num_members+1
       size_type num_members,
       size_type total_nonzero,
-      auto K,
+      KT K,
       const T fac)
     {
       using idx = ConvolutionBatchArgIdx;
@@ -743,8 +789,14 @@ namespace mra{
       SHARED size_type local_pos;
 
       for (size_type pos = blockIdx.x; pos < total_nonzero; pos += gridDim.x) {
-        if (is_team_lead()) {
-          member = find_member_for_pos(member_offsets, num_members, pos, &local_pos);
+        // looked up by the whole first warp (see find_member_for_pos_warp)
+        if (thread_id() < 32) {
+          size_type lp;
+          const size_type m = find_member_for_pos_warp(member_offsets, num_members, pos, &lp);
+          if (is_team_lead()) {
+            member = m;
+            local_pos = lp;
+          }
         }
         SYNCTHREADS();
         auto& arg = args[member];
@@ -875,17 +927,12 @@ namespace mra{
     // to be exactly zero happens inline inside convolution_kernel_batched
     // itself (see convolution_process_one's comment) -- no separate
     // post-launch prune kernel needed.
-    if (K == 8) {
+    detail::with_ct_K(K, [&](auto ctK) {
       size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>, threads, smem_size));
+          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, decltype(ctK)>, threads, smem_size));
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<8>{}, fac));
-    } else {
-      size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, size_type>, threads, smem_size));
-      CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, fac));
-    }
+                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, ctK, fac));
+    });
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
