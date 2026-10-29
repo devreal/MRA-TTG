@@ -879,6 +879,8 @@ namespace mra {
     // part that costs a kernel launch to assemble (see
     // submit_assemble_norms_kernel) -- exactly this tensor.
     using norms_pointer_type = const DenseTensor<T, 4>*;
+    // Screener-only, host-only: per-operator Opnorm -- see try_get_opnorms().
+    using opnorms_pointer_type = const std::vector<T>*;
 
     enum class Status { Available, Owned, Pending };
 
@@ -889,8 +891,9 @@ namespace mra {
                       //   make_norms_tensor(), fold its buffer into the
                       //   round's one select()
                       //   (see add_assembly_buffers()), submit_assemble_
-                      //   norms_kernel(), then publish_op(). Screener: call
-                      //   finish_op_assembly() then publish_op().
+                      //   norms_kernel(), then publish_op(). (The
+                      //   screener never claims norms: it uses
+                      //   try_get_level_table()/try_get_opnorms().)
                       // Pending: the norms tensor for this exact displacement
                       //   is still being assembled by an unrelated task
                       //   (dims/level_work may still be set below if THIS
@@ -977,98 +980,104 @@ namespace mra {
       return out;
     }
 
+    /// Result of try_get_level_table(): the level's table once known, plus
+    /// level_work if THIS call must generate it (same contract as
+    /// OpResult::level_work).
+    struct LevelTableResult {
+      bool pending = false; // another task is generating the table: suspend and retry
+      table_pointer_type table = nullptr;
+      detail::LevelOp1DTable<T, NDIM>* level_work = nullptr;
+    };
+
     /**
-     * Host-path (screener_tt) norms assembly: builds just the norms tensor
-     * (not a whole ConvolutionData -- that bundling is a host/get_op()-only
-     * concept, see ConvolutionData's own comment) once the level's table is
-     * Available (i.e. after a try_get_op() call returned Owned). Caller must
-     * have already done co_await ttg::device::wait(dims[d]->norms1d.buffer())
-     * for every d (a small device->host transfer of the 5-float-per-(c,i)
-     * norms1d slice) before calling this, so the host view read below is
-     * valid -- this stays a plain (non-coroutine) function since only the
-     * caller's own device-task body can co_await (see this class's header
-     * comment).
-     *
-     * Mirrors get_op()'s norms-assembly loop above, but sources
-     * Rnorm/Snorm/Rnormf/Snormf/NSnormf from each dimension's own norms1d
-     * slice (already computed once, on-device, by the generation kernel)
-     * instead of a second, redundant MADNESS nonstandard() call. Fac is
-     * likewise already known (mad_ops[i].getfac(), extracted once at
-     * construction -- see extract_gaussian_terms()) rather than re-read
-     * here; kept as the mad_ops[i].getfac() call below only to stay
-     * obviously-identical to get_op()'s existing padding-loop structure.
-     *
-     * Opnorm/Rank are computed from values already on hand, NOT via
-     * SeparatedConvolution::norm(): that call would go through getop_ns()/
-     * getmuop() to Convolution1D::nonstandard() on a cold ns_cache -- which
-     * this device-generation path guarantees, since nothing here ever warms
-     * MADNESS's own cache -- silently forcing the exact host-side R/S
-     * regeneration (plus an SVD) that generating R/S on-device exists to
-     * avoid. Opnorm = sqrt(sum_mu MUnorm_mu^2) (MADNESS's own getop_ns()
-     * formula) is accumulated alongside MUnorm in the loop below; Rank is
-     * just mad_ops.size().
+     * Screener-only level table lookup. Unlike try_get_op(), it never claims
+     * the norms tensor of any displacement: those are consumed on the device
+     * by shell0_tt/accumulate_tt and always assembled there (see
+     * make_norms_tensor()), while the screener only needs each operator's
+     * Opnorm on the host, which try_get_opnorms() keeps in a separate cache.
+     * If level_work is set, the caller must generate the table
+     * (collect_generation_items() ... publish_generation_work()).
      */
-    norms_pointer_type finish_op_assembly(Level n, Key<NDIM> disp,
-                                           const std::array<detail::Op1DSliceView<T, NDIM>, NDIM>& dims) const {
-      // Constructed as a named local (not forwarded straight through
-      // make_unique) to avoid make_unique's perfect-forwarding picking
-      // Tensor's variadic Dims... constructor overload instead of the
-      // intended (array, scope) one.
-      const size_type norms_count = (size_type)m_mad_conv_sep_vec.size();
-      const size_type norms_rank = (size_type)m_max_rank;
-      const size_type norms_ndim = (size_type)NDIM;
-      const size_type norms_kinds = (size_type)NormId::Count;
-      DenseTensor<T, 4> norms_tensor(std::array{norms_count, norms_rank, norms_ndim, norms_kinds}, ttg::scope::SyncIn);
-      DenseTensor<T, 4>* norms = norms_slot(n, disp).emplace(
-          std::make_unique<DenseTensor<T, 4>>(std::move(norms_tensor)));
-      auto norms_view = norms->view_on(ttg::device::Device::host());
-      for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
-        auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
-        size_type i = 0;
-        // Opnorm = sqrt(sum_mu MUnorm_mu^2) -- MADNESS's own SeparatedConvolution::
-        // getop_ns() formula (operator.h), computed here from the MUnorm values
-        // this loop already assembles below, rather than via
-        // SeparatedConvolution::norm(): that call goes through getop_ns()/getmuop()
-        // to Convolution1D::nonstandard() on a cold ns_cache -- which this
-        // device-generation path guarantees, since nothing here ever warms MADNESS's
-        // own cache -- silently forcing the exact host-side R/S regeneration (plus an
-        // SVD) that generating R/S on-device was supposed to avoid.
-        T opnorm_sumsq = T(0);
-        for (; i < (size_type)mad_ops.size(); ++i) {
-          for (Dimension d = 0; d < NDIM; ++d) {
-            auto n1d = dims[d].norms1d.view_on(ttg::device::Device::host());
-            norms_view(c, i, d, (int)NormId::Rnorm) = n1d(c, i, 0);
-            norms_view(c, i, d, (int)NormId::Snorm) = n1d(c, i, 1);
-            norms_view(c, i, d, (int)NormId::Rnormf) = n1d(c, i, 2);
-            norms_view(c, i, d, (int)NormId::Snormf) = n1d(c, i, 3);
-            norms_view(c, i, d, (int)NormId::NSnormf) = n1d(c, i, 4);
-          }
-          auto fac = mad_ops[i].getfac();
-          norms_view(c, i, 0, (int)NormId::Fac) = fac;
-          T munorm = munorm2_ns(c, n, i, *norms) * std::abs(fac);
-          norms_view(c, i, 0, (int)NormId::MUnorm) = munorm;
-          opnorm_sumsq += munorm * munorm;
-        }
-        for (; i < (size_type)m_max_rank; ++i) {
-          for (Dimension d = 0; d < NDIM; ++d) {
-            norms_view(c, i, d, (int)NormId::Rnorm) = 0.0;
-            norms_view(c, i, d, (int)NormId::Snorm) = 0.0;
-            norms_view(c, i, d, (int)NormId::Rnormf) = 0.0;
-            norms_view(c, i, d, (int)NormId::Snormf) = 0.0;
-            norms_view(c, i, d, (int)NormId::NSnormf) = 0.0;
-          }
-          norms_view(c, i, 0, (int)NormId::Fac) = 0.0;
-          norms_view(c, i, 0, (int)NormId::MUnorm) = 0.0;
-        }
-        norms_view(c, 0, 0, (int)NormId::Opnorm) = std::sqrt(opnorm_sumsq);
-        norms_view(c, 0, 0, (int)NormId::Rank) = mad_ops.size();
+    LevelTableResult try_get_level_table(Level n) const {
+      check_level(n);
+      LevelTableResult out;
+      auto& level_slot = _level_tables[n];
+      auto level_res = level_slot.try_get();
+      if (level_res.status == detail::AsyncCacheStatus::Pending) {
+        out.pending = true;
+      } else if (level_res.status == detail::AsyncCacheStatus::Owned) {
+        out.level_work = level_slot.emplace(std::make_unique<detail::LevelOp1DTable<T, NDIM>>(
+            n, m_mad_conv_sep_vec.size(), m_max_rank, m_K, ttg::scope::Allocate));
+        out.table = out.level_work; // not yet computed
+      } else {
+        out.table = level_res.value;
       }
-      return norms;
+      return out;
     }
 
-    /// Publishes the norms tensor for (n, disp) that finish_op_assembly()
-    /// (screener) or make_norms_tensor() + submit_assemble_norms_kernel()
-    /// (shell0/accumulate) installed in its slot.
+    /**
+     * Screener-only: each operator's Opnorm (indexed by count-index) for
+     * (n, disp), from a host-only cache kept apart from the norms tensors
+     * shell0_tt/accumulate_tt select(). Were the screener to assemble those
+     * tensors on the host instead, every one of them would have to be pushed
+     * to the device by the first task consuming it.
+     *
+     * Computes the value on the spot from `table`'s norms1d if nobody has
+     * yet, so the table's norms1d must be current on the host (whoever
+     * generated the table pulls it back before publishing it -- see
+     * publish_generation_work()). Returns nullptr if another task is
+     * computing it right now: co_await ttg::device::suspend() and retry.
+     *
+     * Opnorm = sqrt(sum_mu MUnorm_mu^2) (MADNESS's own getop_ns() formula),
+     * with MUnorm from munorm2_ns()'s formula on the generated 1D norms --
+     * NOT via SeparatedConvolution::norm(), which would go through
+     * getop_ns()/getmuop() to Convolution1D::nonstandard() on a cold
+     * ns_cache (nothing on this path ever warms MADNESS's own cache),
+     * silently forcing the host-side R/S regeneration (plus an SVD) that
+     * generating R/S on-device exists to avoid.
+     */
+    opnorms_pointer_type try_get_opnorms(Level n, const Key<NDIM>& disp, table_pointer_type table) const {
+      check_op_displacement(n, disp);
+      assert(table && table->n == n);
+      auto& slot = _opnorm_slots.slot(n, disp.translation());
+      auto res = slot.try_get();
+      if (res.status == detail::AsyncCacheStatus::Available) return res.value;
+      if (res.status == detail::AsyncCacheStatus::Pending) return nullptr;
+
+      std::array<detail::Op1DSliceView<T, NDIM>, NDIM> dims;
+      for (Dimension d = 0; d < NDIM; ++d) {
+        dims[d] = detail::Op1DSliceView<T, NDIM>(table, d, disp.translation()[d]);
+      }
+      const size_type count = m_mad_conv_sep_vec.size();
+      auto opnorms = std::make_unique<std::vector<T>>(count);
+      for (size_type c = 0; c < count; ++c) {
+        auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+        T opnorm_sumsq = T(0);
+        for (size_type i = 0; i < (size_type)mad_ops.size(); ++i) {
+          double prod = 1.0, sum = 0.0;
+          for (Dimension d = 0; d < NDIM; ++d) {
+            auto n1d = dims[d].norms1d.view_on(ttg::device::Device::host());
+            const double a = n1d(c, i, (int)NormId::NSnormf);
+            const double b = n1d(c, i, (int)NormId::Snormf);
+            const double aa = std::min(a, b), bb = std::max(a, b);
+            prod *= bb;
+            if (bb > 0.0) sum += aa / bb;
+          }
+          if (n) prod *= sum;
+          const T munorm = prod * std::abs(mad_ops[i].getfac());
+          opnorm_sumsq += munorm * munorm;
+        }
+        (*opnorms)[c] = std::sqrt(opnorm_sumsq);
+      }
+      if (validate_ops_enabled()) validate_opnorms(n, disp, *opnorms); // DEBUG
+      opnorms_pointer_type result = slot.emplace(std::move(opnorms));
+      slot.publish();
+      return result;
+    }
+
+    /// Publishes the norms tensor for (n, disp) that make_norms_tensor() +
+    /// submit_assemble_norms_kernel() installed in its slot. If op
+    /// validation is enabled, the tensor must be current on the host.
     void publish_op(Level n, Key<NDIM> disp) const {
       auto& slot = norms_slot(n, disp);
       if (validate_ops_enabled()) validate_op_norms(n, disp, *slot.owned_value()); // DEBUG
@@ -1076,19 +1085,18 @@ namespace mra {
     }
 
     /**
-     * Device-path alternative to finish_op_assembly(): assembles just the
-     * norms tensor ON-DEVICE, via two small dedicated kernels
+     * Assembles the norms tensor for shell0_tt/accumulate_tt ON-DEVICE, via two small dedicated kernels
      * (detail::assemble_op1d_norms_kernel then detail::assemble_op1d_opnorm_
      * kernel), instead of a host-side copy that would require pulling the
      * level table's norms1d back to host first -- AND, critically, instead
      * of calling MADNESS's SeparatedConvolution::norm() for Opnorm, which
      * would (see submit_assemble_norms_kernel()'s comment) silently force
      * the exact host-side R/S regeneration this whole file exists to avoid.
-     * Needed because shell0_tt/accumulate_tt feed the result straight into
-     * an actual device convolution kernel (unlike screener_tt, which only
-     * ever reads Opnorm on the host, and so just uses finish_op_assembly()
-     * -- see that function's comment, which takes the analogous host-side
-     * shortcut). R/S for the kernel come straight from res.dims -- no
+     * shell0_tt/accumulate_tt feed the result straight into an actual
+     * device convolution kernel; screener_tt only ever reads Opnorm on the
+     * host and keeps its own host-only copy (see try_get_opnorms()), so a
+     * norms tensor never needs to travel host->device. R/S for the kernel
+     * come straight from res.dims -- no
      * separate "assembling" object needed for those, see OpResult's
      * comment. Call sequence (see shell0_tt/accumulate_tt) -- the operator
      * buffers ride along in the task's ONE select() together with the
@@ -1102,13 +1110,15 @@ namespace mra {
      *   ttg::device::Input input(...convolution buffers...);
      *   op.add_convolution_op_buffers(input, res, items_buf, norms);
      *   co_await ttg::device::select(input);
-     *   if (op.has_generation_work(res)) op.submit_generation_kernel(res, items, items_buf);
+     *   if (op.has_generation_work(res)) op.submit_generation_kernel(res.level_work, items, items_buf);
      *   if (need_assemble) op.submit_assemble_norms_kernel(res, n, disp, *norms);
      *   ... submit the convolution kernel ...
-     *   // pull norms (and norms1d, if generated) back to the host before
-     *   // publishing -- screener_tt reads both there
-     *   co_await ttg::device::wait(norms->buffer(), ...);
-     *   if (op.has_generation_work(res)) op.publish_generation_work(res);
+     *   // if generated, pull the table's norms1d back to the host before
+     *   // publishing -- try_get_opnorms() reads it there. The norms tensor
+     *   // itself stays on the device (pulled back only for validation).
+     *   if (op.has_generation_work(res)) co_await ttg::device::wait(res.level_work->norms1d.buffer());
+     *   // on task completion:
+     *   op.publish_generation_work(res.level_work); // no-op if nullptr
      *   if (need_assemble) op.publish_op(n, disp);
      */
 
@@ -1119,7 +1129,10 @@ namespace mra {
     /// Call before the round's one select() -- its buffer must be added to
     /// it (see add_assembly_buffers()).
     DenseTensor<T, 4>* make_norms_tensor(Level n, const Key<NDIM>& disp) const {
-      // See finish_op_assembly()'s identical named-local workaround.
+      // Constructed as a named local (not forwarded straight through
+      // make_unique) to avoid make_unique's perfect-forwarding picking
+      // Tensor's variadic Dims... constructor overload instead of the
+      // intended (array, scope) one.
       const size_type norms_count = (size_type)m_mad_conv_sep_vec.size();
       const size_type norms_rank = (size_type)m_max_rank;
       const size_type norms_ndim = (size_type)NDIM;
@@ -1163,7 +1176,7 @@ namespace mra {
       assert(res.status != Status::Pending);
       if (res.level_work) {
         // includes the table's R/S/norms1d
-        add_generation_buffers(input, res, items_buf);
+        add_generation_buffers(input, res.level_work, items_buf);
       } else {
         const auto& table = *res.dims[0].table;
         input.add(table.R.buffer());
@@ -1189,14 +1202,12 @@ namespace mra {
     /// explicit wait() between any of them. Reads norms1d directly from
     /// whichever table backs res.dims (res.dims[0].table -- valid whether
     /// that table was already Available or is the one THIS round just
-    /// generated) entirely on-device; no host round-trip, unlike
-    /// finish_op_assembly()'s norms1d.view_on(host) reads.
+    /// generated) entirely on-device; no host round-trip.
     ///
     /// Deliberately does NOT call MADNESS's SeparatedConvolution::norm() for
-    /// Opnorm (same reasoning as finish_op_assembly()'s host-side path,
-    /// which likewise no longer calls it, computing it from the MUnorm
-    /// values assembled a few lines earlier instead, to stay off MADNESS's
-    /// own cache entirely). That call would go through
+    /// Opnorm (same reasoning as try_get_opnorms(), which likewise computes
+    /// it from MUnorm values instead, to stay off MADNESS's own cache
+    /// entirely). That call would go through
     /// getop_ns()/getmuop() to Convolution1D::nonstandard() on MADNESS's
     /// own ns_cache -- and on this path nothing ever warms that cache (this
     /// file's whole point is generating R/S on-device instead), so it would
@@ -1232,22 +1243,23 @@ namespace mra {
      * (m_term_params, res.level_work->n), never a device view -- letting the
      * caller fold every buffer this generation round needs (the shared
      * generator tables, the level table's R/S/norms1d, and items_buf) into
-     * that single select() call alongside it. Typical call-site sequence
-     * when the caller (like screener_tt) needs norms1d back on the HOST
-     * afterward, via finish_op_assembly():
-     *   if (op.has_generation_work(res)) {
-     *     auto items = op.collect_generation_items(res);
+     * that single select() call alongside it. Call-site sequence for
+     * screener_tt, which needs norms1d back on the HOST afterward for
+     * try_get_opnorms():
+     *   auto lt = op.try_get_level_table(n);
+     *   if (lt.level_work) {
+     *     auto items = op.collect_generation_items(lt.level_work);
      *     auto items_buf = make_generate_op1d_items_buffer(items);
-     *     auto input = op.make_generation_input(res, items_buf);
+     *     auto input = op.make_generation_input(lt.level_work, items_buf);
      *     co_await ttg::device::select(input);
-     *     op.submit_generation_kernel(res, items, items_buf);
-     *     co_await ttg::device::wait(res.level_work->norms1d.buffer());
-     *     op.publish_generation_work(res);
+     *     op.submit_generation_kernel(lt.level_work, items, items_buf);
+     *     co_await ttg::device::wait(lt.level_work->norms1d.buffer());
+     *     // on task completion:
+     *     op.publish_generation_work(lt.level_work);
      *   }
-     * A caller that instead feeds the result into an actual device kernel
-     * (shell0_tt/accumulate_tt) never needs norms1d on the host at all --
-     * see make_assembling_data()'s comment for that variant, which folds
-     * table generation and aggregate assembly into the very same select().
+     * shell0_tt/accumulate_tt instead fold table generation and norms
+     * assembly into the convolution's own select() -- see
+     * add_convolution_op_buffers().
      */
     bool has_generation_work(const OpResult& res) const {
       return static_cast<bool>(res.level_work);
@@ -1260,30 +1272,30 @@ namespace mra {
     /// call its task is allowed. Call after collect_generation_items()/
     /// make_generate_op1d_items_buffer(), which are both host-only and need
     /// no prior select() of their own.
-    ttg::device::Input make_generation_input(const OpResult& res, ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
+    ttg::device::Input make_generation_input(detail::LevelOp1DTable<T, NDIM>* level_work, ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
       ttg::device::Input input;
-      add_generation_buffers(input, res, items_buf);
+      add_generation_buffers(input, level_work, items_buf);
       return input;
     }
 
     /// Same buffers as make_generation_input(), appended to an existing
-    /// `input`. Adds nothing unless res.level_work is set.
-    void add_generation_buffers(ttg::device::Input& input, const OpResult& res,
+    /// `input`. Adds nothing unless level_work is set.
+    void add_generation_buffers(ttg::device::Input& input, detail::LevelOp1DTable<T, NDIM>* level_work,
                                 ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
-      if (!res.level_work) return;
+      if (!level_work) return;
       input.add(m_shared_c.buffer());
       input.add(m_shared_hgT.buffer());
       input.add(m_shared_hgT2k.buffer());
       input.add(m_shared_quadx.buffer());
       input.add(m_shared_quadw.buffer());
-      input.add(res.level_work->R.buffer());
-      input.add(res.level_work->S.buffer());
-      input.add(res.level_work->norms1d.buffer());
+      input.add(level_work->R.buffer());
+      input.add(level_work->S.buffer());
+      input.add(level_work->norms1d.buffer());
       input.add(items_buf);
     }
 
     /// Builds the flat (dimension, count-index, term) work-item list
-    /// covering the table in res.level_work -- each item generates every
+    /// covering the table in level_work -- each item generates every
     /// translation in [-max_op1d_displacement(n), max_op1d_displacement(n)]
     /// for its own (d, c, i), which is narrower than the full
     /// [-MRA_OP1D_MAX_DISPLACEMENT, MRA_OP1D_MAX_DISPLACEMENT] ceiling at low
@@ -1306,12 +1318,12 @@ namespace mra {
     /// Host-only (no device view read) -- see has_generation_work()'s comment
     /// for why that matters here -- so safe to call before the round's one
     /// select().
-    std::vector<GenerateOp1DItem<T>> collect_generation_items(const OpResult& res) const {
+    std::vector<GenerateOp1DItem<T>> collect_generation_items(detail::LevelOp1DTable<T, NDIM>* level_work) const {
       std::vector<GenerateOp1DItem<T>> items;
-      if (!res.level_work) return items;
+      if (!level_work) return items;
       const size_type count = m_mad_conv_sep_vec.size();
       const size_type max_rank = (size_type)m_max_rank; // stride into m_term_params only -- see below
-      const Level n = res.level_work->n;
+      const Level n = level_work->n;
       const Translation max_disp = max_op1d_displacement(n);
       items.reserve((size_type)NDIM * count * max_rank); // upper bound; real count is usually smaller once per-count-index rank is applied below
       for (Dimension d = 0; d < NDIM; ++d) {
@@ -1339,10 +1351,10 @@ namespace mra {
     /// Call only after co_await-ing make_generation_input()'s select();
     /// `items`/`items_buf` must be the exact objects that went
     /// into that same select() call (via make_generation_input).
-    void submit_generation_kernel(const OpResult& res, const std::vector<GenerateOp1DItem<T>>& items,
+    void submit_generation_kernel(detail::LevelOp1DTable<T, NDIM>* level_work, const std::vector<GenerateOp1DItem<T>>& items,
                                    ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
       if (items.empty()) return;
-      auto& table = *res.level_work;
+      auto& table = *level_work;
       const Translation max_disp = max_op1d_displacement(table.n);
       submit_generate_op1d_kernel<T>(
           items_buf.current_device_ptr(), items.size(), num_op1d_displacements(table.n), m_K,
@@ -1362,19 +1374,33 @@ namespace mra {
     /// other tasks must not stage in. Publishes the whole
     /// table as Available so every other task at this level -- any
     /// dimension, any translation -- finds it immediately.
-    void publish_generation_work(const OpResult& res) const {
-      if (!res.level_work) return;
-      if (validate_ops_enabled()) validate_level_table(*res.level_work); // DEBUG
-      _level_tables[res.level_work->n].publish();
+    void publish_generation_work(detail::LevelOp1DTable<T, NDIM>* level_work) const {
+      if (!level_work) return;
+      if (validate_ops_enabled()) validate_level_table(*level_work); // DEBUG
+      _level_tables[level_work->n].publish();
     }
 #endif // !MRA_ENABLE_HOST
 
+    /// DEBUG: MRA_VALIDATE_OPS=1 checks every published table/norms tensor
+    /// against MADNESS (expensive -- forces MADNESS to build its own ops).
+    static bool validate_ops_enabled() {
+      static const bool enabled = [] {
+        const char* v = std::getenv("MRA_VALIDATE_OPS");
+        return v != nullptr && *v != '\0' && std::string(v) != "0";
+      }();
+      return enabled;
+    }
+
   private:
 #ifndef MRA_ENABLE_HOST
-    static void check_op_displacement(Level n, const Key<NDIM>& disp) {
+    static void check_level(Level n) {
       if (n < 0 || n > MAX_LEVEL) {
         throw std::runtime_error("GaussianConvolutionOperator::try_get_op: level out of range");
       }
+    }
+
+    static void check_op_displacement(Level n, const Key<NDIM>& disp) {
+      check_level(n);
       const Translation max_disp = max_op1d_displacement(n);
       for (Dimension d = 0; d < NDIM; ++d) {
         Translation l = disp.translation()[d];
@@ -1400,14 +1426,6 @@ namespace mra {
      * displacement) (norms). Expensive -- forces MADNESS to build its own
      * nonstandard ops.
      */
-    static bool validate_ops_enabled() {
-      static const bool enabled = [] {
-        const char* v = std::getenv("MRA_VALIDATE_OPS");
-        return v != nullptr && *v != '\0' && std::string(v) != "0";
-      }();
-      return enabled;
-    }
-
     struct ValidationError {
       double max_abs = 0.0, max_rel = 0.0, ref_at_max = 0.0;
       std::size_t nbad = 0, ntotal = 0;
@@ -1567,6 +1585,23 @@ namespace mra {
       std::cout << std::defaultfloat << std::endl;
     }
 
+    void validate_opnorms(Level n, const Key<NDIM>& disp, const std::vector<T>& opnorms) const {
+      ValidationError err;
+      const madness::Key<NDIM> mkey = Key<NDIM>(0, n, disp.translation()).to_madness_key();
+      for (size_type c = 0; c < opnorms.size(); ++c) {
+        err.update(opnorms[c], m_mad_conv_sep_vec[c]->norm(n, mkey, mkey),
+                   [&] { std::ostringstream oss; oss << "(c=" << c << ")"; return oss.str(); });
+      }
+      static std::mutex mtx;
+      std::lock_guard<std::mutex> lg(mtx);
+      std::cout << "MRA_VALIDATE_OPS opnorms n=" << n << " disp=[";
+      for (Dimension d = 0; d < NDIM; ++d) std::cout << disp.translation()[d] << (d + 1 < NDIM ? "," : "");
+      std::cout << "]" << std::scientific << std::setprecision(3)
+                << " | Opnorm bad " << err.nbad << "/" << err.ntotal << " max " << err.max_abs << "/" << err.max_rel;
+      if (err.max_abs > 0) std::cout << " at " << err.where << " (ref " << err.ref_at_max << ")";
+      std::cout << std::defaultfloat << std::endl;
+    }
+
     /// Slices out.dims from `table` and checks/claims the norms cache for
     /// (n, disp) -- the part of try_get_op() after the level table is known.
     void lookup_op_norms(OpResult& out, table_pointer_type table, Level n, const Key<NDIM>& disp) const {
@@ -1623,6 +1658,10 @@ namespace mra {
     // to rebuild from the level table on every try_get_op() call; see
     // OpResult's comment.
     mutable detail::LevelDisplacementSlots<DenseTensor<T, 4>, NDIM> _norms_slots;
+    // Screener-only, host-only Opnorm per (level, displacement) -- kept apart
+    // from _norms_slots so nothing host-assembled is ever a device input; see
+    // try_get_opnorms().
+    mutable detail::LevelDisplacementSlots<std::vector<T>, NDIM> _opnorm_slots;
 
     // Shared (not per-term) tensors extracted once, at construction, from
     // MADNESS's Convolution1D base -- identical for every term/dimension of
@@ -1818,9 +1857,7 @@ namespace mra {
     /// compute for 1 term, all dim, 1 disp, essentially for SeparatedConvolutionInternal
     ///
     /// Takes the norms tensor directly (not a whole ConvolutionData) so both
-    /// get_op()'s host-path aggregate and finish_op_assembly()'s
-    /// device-path norms-only tensor can share this without either needing
-    /// the other's bundling.
+    /// get_op()'s host-path aggregate and its validation can share it.
     double munorm2_ns(size_type c, Level n, size_type mu, const DenseTensor<T, 4>& norms) const {
 
         double prodR=1.0;

@@ -331,8 +331,9 @@ namespace mra {
     /// -- and evaluates the Gaussian and the whole Legendre sequence for it
     /// once (with a compile-time K the recurrence's n/(n+1) factors are
     /// constants). The per-p contributions are summed within each warp by
-    /// shuffles and kept in registers: lane q holds the warp's sums for
-    /// p == q (mod warp size). Boxes are visited in increasing order, so the
+    /// shuffles and accumulated in tmp by the warp's lane 0, which works for
+    /// any block size, including a partial last warp (e.g. 2K x min(256/2K, 2K)
+    /// = 240 threads for K == 10). Boxes are visited in increasing order, so the
     /// loop stops for the whole block (uniformly) once the first box of an
     /// iteration lies beyond argmax -- the same set of points as MADNESS's
     /// per-box early exit.
@@ -353,7 +354,6 @@ namespace mra {
         }
       }
 #endif // __CUDA_ARCH__
-      constexpr unsigned PerLane = (2 * MRA_MAX_K + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
       const unsigned tid = thread_id();
       const unsigned nthreads = block_size();
       const unsigned lane = tid % MRA_WARP_SIZE;
@@ -361,11 +361,15 @@ namespace mra {
       const unsigned nwarps = (nthreads + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
       const unsigned nlanes = (nthreads - warp * MRA_WARP_SIZE < MRA_WARP_SIZE)
                             ? nthreads - warp * MRA_WARP_SIZE : MRA_WARP_SIZE;
-      assert(P <= PerLane * MRA_WARP_SIZE);
+      /* this warp's partial sums, accumulated by its lane 0 only, so the
+       * block's last warp may be partial (nlanes < MRA_WARP_SIZE) */
+      T* wsum = tmp + warp * P;
 
-      T acc[PerLane];
-      #pragma unroll
-      for (unsigned j = 0; j < PerLane; ++j) acc[j] = T(0);
+      /* the barrier protects tmp from a previous use */
+      SYNCTHREADS();
+      if (lane == 0) {
+        for (size_type pp = 0; pp < P; ++pp) wsum[pp] = T(0);
+      }
 
       for (size_type base = 0; base < total_work; base += nthreads) {
         /* the first box of this iteration -- uniform across the block */
@@ -386,32 +390,17 @@ namespace mra {
 
         /* Legendre recurrence: pc = P_p(z), pm = P_{p-1}(z) */
         T pm = T(0), pc = T(1);
-        #pragma unroll
-        for (unsigned j = 0; j < PerLane; ++j) {
-          for (unsigned q = 0; q < MRA_WARP_SIZE && j * MRA_WARP_SIZE + q < P; ++q) {
-            const size_type pp = j * MRA_WARP_SIZE + q;
-            /* the warp's sum for this p, broadcast from lane 0 */
-            T c = reduce_warp(ee * pc, lane, nlanes);
-#if defined(__CUDA_ARCH__)
-            c = __shfl_sync((nlanes >= 32) ? 0xffffffffu : ((1u << nlanes) - 1), c, 0);
-#else
-            c = __shfl(c, 0);
-#endif
-            if (lane == q) acc[j] += c;
-            const T next = (z * pc - pm) * (T(pp) / T(pp + 1)) + z * pc;
-            pm = pc;
-            pc = next;
-          }
+        for (size_type pp = 0; pp < P; ++pp) {
+          /* the warp's sum for this p, valid in lane 0 */
+          const T c = reduce_warp(ee * pc, lane, nlanes);
+          if (lane == 0) wsum[pp] += c;
+          const T next = (z * pc - pm) * (T(pp) / T(pp + 1)) + z * pc;
+          pm = pc;
+          pc = next;
         }
       }
 
-      /* combine the warps' sums; the barrier also protects tmp from a previous use */
-      SYNCTHREADS();
-      #pragma unroll
-      for (unsigned j = 0; j < PerLane; ++j) {
-        const size_type pp = j * MRA_WARP_SIZE + lane;
-        if (pp < P) tmp[warp * P + pp] = acc[j];
-      }
+      /* combine the warps' sums */
       SYNCTHREADS();
       for (size_type pp = tid; pp < P; pp += nthreads) {
         T s = T(0);
@@ -1146,9 +1135,9 @@ namespace mra {
    * aggregate's own per-dimension translation (disp.translation()); `norms1d`
    * is the level table's full view (already select()-ed, and if this same
    * round also generated the table, already filled -- no wait() needed:
-   * this kernel reads it on-device, unlike finish_op_assembly's host-side
-   * equivalent for the MADNESS/host-cache path, which is what still needs
-   * norms1d pulled back to host). One block per (count, rank) pair -- `rank`
+   * this kernel reads it on-device, unlike the screener's host-side Opnorm
+   * computation (GaussianConvolutionOperator::try_get_opnorms), which is what
+   * still needs norms1d pulled back to host). One block per (count, rank) pair -- `rank`
    * here is the operator-wide m_max_rank (how the table's axes are
    * allocated), not any one count-index's own real rank; blocks beyond a
    * given count-index's real rank are no-ops (see the kernel's own comment on

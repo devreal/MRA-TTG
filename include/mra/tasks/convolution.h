@@ -542,61 +542,48 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
           /**
            * A device task may co_await ttg::device::select() only ONCE over its
-           * whole execution, but this task needs a DIFFERENT operator aggregate
-           * (and hence a different Opnorm) per mad_disp in the loop below --
-           * one select() per displacement is not an option. Instead, prime this
-           * level's shared 1D operator table ONCE here, up front, using an
-           * arbitrary in-range displacement purely to trigger/await generation
-           * (any displacement works: generation is level-wide, not
-           * per-displacement -- see GaussianConvolutionOperator::try_get_op).
-           * Once the table exists, try_get_op() for any OTHER displacement at
-           * this same level is guaranteed host-only (finish_op_assembly() only
-           * reads norms1d via .view_on(host), already valid once the table's
-           * norms1d has been pulled back once, right here) -- so the
-           * per-displacement loop below never needs another select().
+           * whole execution, but this task needs a DIFFERENT Opnorm per
+           * mad_disp in the loop below -- one select() per displacement is not
+           * an option. Instead, obtain (and if need be generate) this level's
+           * shared 1D operator table ONCE here, up front: generation is
+           * level-wide, not per-displacement. Once the table exists, each
+           * displacement's Opnorm is computed host-only from the table's
+           * norms1d (already current on the host, pulled back by whoever
+           * generated the table) -- so the loop below never needs another
+           * select(). The screener never claims the device-side norms tensors
+           * that shell0_tt/accumulate_tt consume (see try_get_opnorms()).
            */
-          mra::Key<NDIM> op_disp(key.batch(), key.level(), {0, 0, 0});
-          // The level's table once known. If we generate it ourselves, its
-          // publication is deferred until this task completes (see below),
-          // so we have to look up norms against it directly.
+          // If we generate the table ourselves, its publication is deferred
+          // until this task completes (see below), so the per-displacement
+          // lookups below take it explicitly.
           typename mra::GaussianConvolutionOperator<T, NDIM>::table_pointer_type level_table = nullptr;
           for (;;) {
-            auto res = level_table ? op.try_get_op(key.level(), op_disp, level_table)
-                                   : op.try_get_op(key.level(), op_disp);
-            if (op.has_generation_work(res)) {
+            auto lt = op.try_get_level_table(key.level());
+            if (lt.pending) {
+              // a pure reschedule point, no kernel of ours to wait for
+              co_await ttg::device::suspend();
+              continue;
+            }
+            if (lt.level_work) {
               /**
                * We need to generate the transition matrices for this level's operator.
                */
-              auto gen_items = op.collect_generation_items(res);
+              auto gen_items = op.collect_generation_items(lt.level_work);
               auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-              auto gen_input = op.make_generation_input(res, items_buf);
+              auto gen_input = op.make_generation_input(lt.level_work, items_buf);
               co_await ttg::device::select(gen_input);
-              op.submit_generation_kernel(res, gen_items, items_buf);
+              op.submit_generation_kernel(lt.level_work, gen_items, items_buf);
               // wait for the kernel and pull the table's norms back to the host
-              // for finish_op_assembly(); R/S are only ever used on the device
-              co_await ttg::device::wait(res.level_work->norms1d.buffer());
+              // for try_get_opnorms(); R/S are only ever used on the device
+              co_await ttg::device::wait(lt.level_work->norms1d.buffer());
               // Publish only once this task has completed: until then the
               // runtime still holds our (written) device copies of the table,
               // and other tasks must not stage them in.
-              sends.push_back(ttg::device::on_complete([opp = &op, res]() { opp->publish_generation_work(res); }));
+              sends.push_back(ttg::device::on_complete(
+                [opp = &op, level_work = lt.level_work]() { opp->publish_generation_work(level_work); }));
             }
-            if (res.status != mra::GaussianConvolutionOperator<T, NDIM>::Status::Pending) {
-              level_table = res.dims[0].table;
-            }
-            if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
-              break;
-            }
-            if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned) {
-              /**
-               * The operator is owned, so we need to assemble its norms on the host.
-               */
-              op.finish_op_assembly(key.level(), op_disp, res.dims);
-              op.publish_op(key.level(), op_disp);
-              break;
-            }
-            // Pending: yield (a pure reschedule point, no kernel of ours to
-            // wait for) and retry.
-            co_await ttg::device::suspend();
+            level_table = lt.table;
+            break;
           }
 #endif // MRA_ENABLE_HOST
 
@@ -617,11 +604,11 @@ namespace mra {
             return displacement.distsq_bc(mad_op->lattice_summed());
           };
 #ifndef MRA_ENABLE_HOST
-          // Operator norms per position in mad_disps. With a single operator
-          // every function walks the same displacement list, so each
-          // displacement's norms tensor (which covers every operator index)
-          // is looked up once per task rather than once per function.
-          std::vector<const DenseTensor<T, 4>*> disp_norms;
+          // Opnorms per position in mad_disps. With a single operator every
+          // function walks the same displacement list, so each displacement's
+          // Opnorms (one per operator index) are looked up once per task
+          // rather than once per function.
+          std::vector<typename mra::GaussianConvolutionOperator<T, NDIM>::opnorms_pointer_type> disp_opnorms;
 #endif // MRA_ENABLE_HOST
           for (int i = 0; i < N; ++i) {
             // we may have either one operator for all functions or one operator per function
@@ -630,8 +617,8 @@ namespace mra {
             const auto& mad_disps = op.get_mad_displacements(opnorm_index, key.level());
             const auto& mad_op = op.get_mad_op(opnorm_index);
 #ifndef MRA_ENABLE_HOST
-            if (op.count() != 1 || disp_norms.empty()) {
-              disp_norms.assign(mad_disps.size(), nullptr);
+            if (op.count() != 1 || disp_opnorms.empty()) {
+              disp_opnorms.assign(mad_disps.size(), nullptr);
             }
 #endif // MRA_ENABLE_HOST
             int nused = 1, nvalid = 1;
@@ -677,33 +664,19 @@ namespace mra {
 #ifdef MRA_ENABLE_HOST
               auto op_data = op.get_op(key.level(), disp_key);
               auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
+              auto opnorm = opnorm_view(opnorm_index, 0, 0, (int)NormId::Opnorm);
 #else
-              // The level's table was already primed (see above), so
-              // try_get_op() here is guaranteed host-only -- has_generation_work()
-              // is never true for this call, and finish_op_assembly() only reads
-              // norms1d via .view_on(host), already valid -- no select() needed.
-              // Just the norms tensor -- see try_get_op()'s OpResult comment
-              // for why R/S (unused by screener_tt anyway) aren't cached.
-              const DenseTensor<T, 4>*& op_norms = disp_norms[disp_idx];
-              while (op_norms == nullptr) {
-                auto res2 = op.try_get_op(key.level(), disp_key, level_table);
-                if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
-                  op_norms = res2.norms;
-                  break;
-                }
-                if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned) {
-                  op_norms = op.finish_op_assembly(key.level(), disp_key, res2.dims);
-                  op.publish_op(key.level(), disp_key);
-                  break;
-                }
-                co_await ttg::device::suspend();
+              // Host-only (the level's table is already known, see above):
+              // only Pending -- another screener computing the same Opnorms
+              // right now -- makes us wait.
+              auto& opnorms = disp_opnorms[disp_idx];
+              while (opnorms == nullptr) {
+                opnorms = op.try_get_opnorms(key.level(), disp_key, level_table);
+                if (opnorms == nullptr) co_await ttg::device::suspend();
               }
-
-              assert(op_norms->buffer().is_valid() && "op_norms buffer should be valid at this point");
-              auto opnorm_view = op_norms->view_on(ttg::device::Device::host());
+              auto opnorm = (*opnorms)[opnorm_index];
 #endif // MRA_ENABLE_HOST
 
-              auto opnorm = opnorm_view(opnorm_index, 0, 0, (int)NormId::Opnorm);
               //std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
               //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
               if (opnorm * cnorm_view(i) > tol / fac) {
@@ -818,7 +791,7 @@ namespace mra {
         const bool need_assemble = (res.status == OpStatus::Owned);
         // All host-side (safe before the select(), see has_generation_work()/
         // make_norms_tensor()'s comments in conv_mad.h).
-        auto gen_items = op.collect_generation_items(res); // empty if !need_generate
+        auto gen_items = op.collect_generation_items(res.level_work); // empty if !need_generate
         auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
         mra::DenseTensor<T, 4>* norms = nullptr; // owned by op's norms cache
         if (need_assemble) {
@@ -875,7 +848,7 @@ namespace mra {
         op.add_convolution_op_buffers(input, res, items_buf, norms);
         co_await ttg::device::select(input);
         if (need_generate) {
-          op.submit_generation_kernel(res, gen_items, items_buf);
+          op.submit_generation_kernel(res.level_work, gen_items, items_buf);
         }
         if (need_assemble) {
           // Same stream as submit_generation_kernel (if it ran) and the
@@ -944,26 +917,27 @@ namespace mra {
         }
 
 #ifndef MRA_ENABLE_HOST
-        // wait for the norms to come back. If we built the operator, also
-        // pull its norms (and the level table, if we generated it) back to
-        // the host before publishing: screener_tt reads the norms there
-        // (finish_op_assembly() / opnorm lookup). R/S are only ever used on
-        // the device, so they stay there.
+        // wait for the result norms to come back. If we generated the level
+        // table, also pull its norms1d back to the host before publishing:
+        // screener_tt computes its Opnorms from it there (try_get_opnorms()).
+        // R/S and the assembled norms tensor are only ever consumed on the
+        // device, so they stay there.
         // need_generate implies need_assemble (see the try_get_op() loop above).
         if (need_generate) {
-          co_await ttg::device::wait(resnorms.buffer(), norms->buffer(), res.level_work->norms1d.buffer());
-        } else if (need_assemble) {
-          co_await ttg::device::wait(resnorms.buffer(), norms->buffer());
+          co_await ttg::device::wait(resnorms.buffer(), res.level_work->norms1d.buffer());
         } else {
           co_await ttg::device::wait(resnorms.buffer());
+        }
+        if (need_assemble && op.validate_ops_enabled()) {
+          co_await ttg::device::wait(norms->buffer()); // DEBUG: publish_op() validates it on the host
         }
         if (need_assemble) {
           // Publish only once this task has completed: until then the
           // runtime still holds our (written) device copies of the table and
           // norms, and other tasks must not stage them in.
           sends.push_back(ttg::device::on_complete(
-            [opp = &op, res, level = key.level(), op_disp]() {
-              opp->publish_generation_work(res); // no-op unless we generated the table
+            [opp = &op, level_work = res.level_work, level = key.level(), op_disp]() {
+              opp->publish_generation_work(level_work); // no-op unless we generated the table
               opp->publish_op(level, op_disp);
             }));
         }
@@ -1164,7 +1138,7 @@ namespace mra {
       }
       const bool need_generate = op.has_generation_work(res);
       const bool need_assemble = (res.status == OpStatus::Owned);
-      auto gen_items = op.collect_generation_items(res); // empty if !need_generate
+      auto gen_items = op.collect_generation_items(res.level_work); // empty if !need_generate
       auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
       mra::DenseTensor<T, 4>* norms = nullptr; // owned by op's norms cache
       if (need_assemble) {
@@ -1241,7 +1215,7 @@ namespace mra {
       }
       co_await ttg::device::select(input);
       if (need_generate) {
-        op.submit_generation_kernel(res, gen_items, items_buf);
+        op.submit_generation_kernel(res.level_work, gen_items, items_buf);
       }
       if (need_assemble) {
         // same stream as the generation and convolution kernels, see shell0_tt
@@ -1311,19 +1285,19 @@ namespace mra {
       }
 
 #ifndef MRA_ENABLE_HOST
+      if (need_generate) {
+        // pull the generated table's norms1d back to the host for
+        // screener_tt before publishing -- see shell0_tt
+        co_await ttg::device::wait(res.level_work->norms1d.buffer());
+      }
+      if (need_assemble && op.validate_ops_enabled()) {
+        co_await ttg::device::wait(norms->buffer()); // DEBUG: publish_op() validates it on the host
+      }
       if (need_assemble) {
-        // Pull the operator norms (and the level table, if we generated it)
-        // back to the host before publishing -- see shell0_tt.
-        // need_generate implies need_assemble.
-        if (need_generate) {
-          co_await ttg::device::wait(norms->buffer(), res.level_work->norms1d.buffer());
-        } else {
-          co_await ttg::device::wait(norms->buffer());
-        }
         // publish once this task has completed -- see shell0_tt
         sends.push_back(ttg::device::on_complete(
-          [opp = &op, res, level = key.level(), displacement]() {
-            opp->publish_generation_work(res); // no-op unless we generated the table
+          [opp = &op, level_work = res.level_work, level = key.level(), displacement]() {
+            opp->publish_generation_work(level_work); // no-op unless we generated the table
             opp->publish_op(level, displacement);
           }));
       }
