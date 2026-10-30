@@ -232,11 +232,20 @@ namespace {
       }
       T tol = s.tol;
       std::array<bool, 2> at = s.at;
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, ttg::scope::Allocate);
+      // batched launches take their scratch from the batch pool (see
+      // submit_convolution_kernel_batched), as in mra/tasks/convolution.h
+#ifndef MRA_ENABLE_HOST
+      const std::size_t tmp_size = enable_batching ? 0 : convolution_tmp_size<NDIM>(K) * n_nonzero;
+#else
+      const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
+#endif
+      auto tmp = ttg::Buffer<T>();
+      if (tmp_size > 0) tmp.reset(tmp_size, ttg::scope::Allocate);
       const auto& op_data = s.op_data;
 
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(f_node.coeffs().buffer(), out.coeffs().buffer(), tmp);
+      auto input = ttg::device::Input(f_node.coeffs().buffer(), out.coeffs().buffer());
+      if (tmp_size > 0) input.add(tmp);
       if (!in_node.empty()) {
         input.add(in_node.coeffs().buffer());
       }
@@ -261,7 +270,7 @@ namespace {
 
 #ifndef MRA_ENABLE_HOST
       if (enable_batching) {
-        auto batch = co_await ttg::device::coop<int>(in_view, f_view, out_view, resnorms_view, tmp,
+        auto batch = co_await ttg::device::coop<int>(in_view, f_view, out_view, resnorms_view,
                                                      transr, transs, opnorms_view, tol, at, out.coeffs(),
                                                      n_nonzero, resnorms);
         detail::submit_convolution_batch_leader<T, NDIM>(batch, *conv_pool, K, fac, N);
@@ -277,8 +286,13 @@ namespace {
       }
 
 #ifndef MRA_ENABLE_HOST
+      // Do not end the task before its kernel has run: ending it destroys out
+      // (and tmp), and PaRSEC frees their device memory right away, so a later
+      // allocation can overwrite them while the kernel is still queued.
       if (s.with_resnorms) {
         co_await ttg::device::wait(resnorms.buffer());
+      } else {
+        co_await ttg::device::wait();
       }
 #endif // MRA_ENABLE_HOST
     }, ttg::edges(e), ttg::edges(), "conv-bench");
