@@ -236,6 +236,15 @@ namespace detail {
           }
         };
 
+
+        /**
+         * Buffer to pack child information into. Defined here so it
+         * is destroyed at the end of the task.
+         */
+        ttg::Buffer<T, DeviceAllocator<T>> child_kept_packed;
+        ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
+        ttg::Buffer<T, DeviceAllocator<T>> d_sumsq;
+
         /* check if all inputs are empty */
         bool all_empty = in.empty() && in0.empty() && in1.empty() && in2.empty() && in3.empty() &&
                          in4.empty() && in5.empty() && in6.empty() && in7.empty();
@@ -338,11 +347,10 @@ namespace detail {
 #else
           const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*n_nonzero;
 #endif
-          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
           if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
           const auto& hgT = functiondata.get_hgT();
           /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
-          auto d_sumsq = ttg::Buffer<T, DeviceAllocator<T>>(n_nonzero, ttg::scope::SyncOut);
+          d_sumsq.reset(n_nonzero, ttg::scope::SyncOut);
 
           // Computed up front (depends only on key/thresh/cell_min_width/
           // truncate_mode, all known before the kernel runs) so the kernel
@@ -366,7 +374,6 @@ namespace detail {
           // compress_process_one), so it is neither built nor moved to the
           // device otherwise, and the kernel gets a nullptr instead.
           const bool need_child_kept = enable_truncate && key.level() > 1;
-          ttg::Buffer<T, DeviceAllocator<T>> child_kept_packed;
           if (need_child_kept) {
             child_kept_packed.reset(N * num_children, ttg::scope::SyncIn);
             T* packed = child_kept_packed.host_ptr();
