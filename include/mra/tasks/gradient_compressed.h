@@ -70,18 +70,22 @@ namespace mra {
    * formed from them. The status of a function in S is that of the input tree: Inner
    * where it has children, Leaf at its leaf, Invalid below it.
    *
-   * Every node goes through one device task and two host tasks:
+   * Every node goes through four tasks, of which only compute does device work:
    *  - compute (device): from S of the node and of its six face neighbors decides per
    *    axis and function whether the derivative is formed here (Leaf) or below (Inner:
    *    the input continues here, or is finer at a neighbor along the axis), forms the
    *    derivatives, and, if the node has children, forms S of the children from S and
-   *    the compressed node in the same task. It tells its neighbors whether it has
-   *    children;
-   *  - spawn (host): once the neighbors have said whether they have children, tells
+   *    the compressed node in the same task;
+   *  - notify: tells the neighbors whether this node has children and sends the
+   *    children without a compressed node an empty one. These small messages are sent
+   *    here rather than by compute because a device task holds a data copy of every
+   *    value it sends until it completes, and PaRSEC limits their number per task
+   *    (MAX_PARAM_COUNT, including the inputs);
+   *  - spawn: once the neighbors have said whether they have children, tells
    *    every child which of its neighbors exist (its flags); without children, sends S
    *    to the children of the neighbors that have some, as the nearest node at the
    *    position of their missing neighbor;
-   *  - forward (host): sends S of the node, which the parent's compute sent once, to
+   *  - forward: sends S of the node, which the parent's compute sent once, to
    *    the node's compute and spawn and to the compute tasks of its existing neighbors
    *    (the siblings, and those across the parent's boundary that its flags name), and
    *    an invalid node in place of a neighbor beyond the boundary of the domain. It
@@ -105,8 +109,9 @@ namespace mra {
    * boundaries of the domain the boundary condition is free, as in make_derivative.
    *
    * The compute task uses up to 28 device buffers (S, six neighbors, three results,
-   * eight children, the compressed node, operator data and scratch), so PaRSEC must be
-   * built with PARSEC_MAX_PARAM_COUNT of at least 28.
+   * eight children, the compressed node, operator data and scratch) and holds up to 23
+   * data copies (10 inputs, 3 results, 8 children, the tags and the summary), so PaRSEC
+   * must be built with PARSEC_MAX_PARAM_COUNT of at least 28.
    */
   template <typename T, Dimension NDIM, typename FunctionSetT,
             typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
@@ -169,6 +174,8 @@ namespace mra {
       dec_e[i] = flag_edge(name + "-neighbor_has_children" + std::to_string(i));
     }
     ttg::Edge<key_type, cnode_type> cnode_balance(name + "-cnode_balance");
+    /* compute's summary for its notify task, see NOTIFY_* */
+    flag_edge notify_e(name + "-notify");
 
     /* batching of the compute task is controlled process-wide (mra/misc/batch_size.h),
      * read once here; the operator data is the same for every node, so any two tasks
@@ -269,8 +276,10 @@ namespace mra {
      * Compute: per axis and function the status of the derivative here, the derivatives
      * formed here, S of the children, and the decisions for the neighbors' spawn.
      */
-    constexpr const int C_CHILDREN = NDIM, C_DEC = NDIM + 1, C_NB = C_DEC + NB, C_S_CHILD = C_NB + NB,
-                        C_TAGS = C_S_CHILD + 1, C_CNODE = C_TAGS + 1;
+    constexpr const int C_NOTIFY = NDIM, C_NB = C_NOTIFY + 1, C_S_CHILD = C_NB + NB, C_TAGS = C_S_CHILD + 1;
+    /* bits of the summary compute sends to its notify task: the neighbor flags, whether the
+     * node has children, and which children have no compressed node */
+    constexpr const int NOTIFY_HAS_CHILDREN = 1 << NB, NOTIFY_PLACEHOLDER_SHIFT = NB + 1;
     auto compute_fn = [&db, &functiondata, fns, K, nb_index, at_boundary, children_on_side, has_coeffs,
                        enable_batching, deriv_pool, spawn_pool, max_functions](
                           const key_type& key, const node_type& S, const int& flags, const GradientTags& tags,
@@ -447,16 +456,21 @@ namespace mra {
       if (in_tree[0]) do_send.template operator()<0>(key, std::move(result[0]));
       if (in_tree[1]) do_send.template operator()<1>(key, std::move(result[1]));
       if (in_tree[2]) do_send.template operator()<2>(key, std::move(result[2]));
-      const int dec = has_children ? 1 : 0;
-      do_send.template operator()<C_CHILDREN>(key, dec);
+      /* the small messages go through the notify task: a device task holds a data copy of
+       * every value it sends until it completes, and PaRSEC limits their number per task
+       * (MAX_PARAM_COUNT, including the inputs); this keeps compute at 23 */
+      int summary = flags | (has_children ? NOTIFY_HAS_CHILDREN : 0);
+      if (has_children) {
+        for (size_type c = 0; c < num_children; ++c) {
+          /* a child without a compressed node, where the input has no children there */
+          bool any_inner = false;
+          for (size_type j = 0; j < N && !any_inner; ++j) any_inner = (child_s[c].leaf_status(j) == LeafStatus::Inner);
+          if (!any_inner) summary |= 1 << (NOTIFY_PLACEHOLDER_SHIFT + c);
+        }
+      }
+      do_send.template operator()<C_NOTIFY>(key, summary);
       for (Dimension a = 0; a < NDIM; ++a) {
         for (int s : {-1, 1}) {
-          /* the neighbor's spawn hears it on the opposite side; without a neighbor, our own */
-          if (exists(a, s)) {
-            MRA_GRAD_SEND_NB(C_DEC, nb_index(a, -s), key.neighbor(a, s), dec)
-          } else {
-            MRA_GRAD_SEND_NB(C_DEC, nb_index(a, s), key, 0)
-          }
           /* no neighbor here: our children take the coarser one we got in its place */
           if (has_children && !exists(a, s) && !at_boundary(key, a, s)) {
             for (const auto& child : children_on_side(key, a, s)) {
@@ -469,10 +483,6 @@ namespace mra {
         std::vector<key_type> child_keys;
         for (size_type c = 0; c < num_children; ++c) child_keys.push_back(key.child_at(c));
         for (size_type c = 0; c < num_children; ++c) {
-          /* a child without a compressed node, where the input has no children there */
-          bool any_inner = false;
-          for (size_type j = 0; j < N && !any_inner; ++j) any_inner = (child_s[c].leaf_status(j) == LeafStatus::Inner);
-          if (!any_inner) do_send.template operator()<C_CNODE>(child_keys[c], cnode_type(child_keys[c], N));
           do_send.template operator()<C_S_CHILD>(child_keys[c], std::move(child_s[c]));
         }
 #ifndef MRA_ENABLE_HOST
@@ -487,19 +497,52 @@ namespace mra {
                                           ttg::edges(s_compute, flags_compute, tags_compute,
                                                      ttg::fuse(in, cnode_balance),
                                                      nb_e[0], nb_e[1], nb_e[2], nb_e[3], nb_e[4], nb_e[5]),
-                                          ttg::edges(out[0], out[1], out[2], children_spawn,
-                                                     dec_e[0], dec_e[1], dec_e[2], dec_e[3], dec_e[4], dec_e[5],
+                                          ttg::edges(out[0], out[1], out[2], notify_e,
                                                      nb_e[0], nb_e[1], nb_e[2], nb_e[3], nb_e[4], nb_e[5],
-                                                     s_forward, tags_compute, cnode_balance),
+                                                     s_forward, tags_compute),
                                           name, {"s", "flags", "tags", "cnode",
                                                  "nb0", "nb1", "nb2", "nb3", "nb4", "nb5"},
-                                          {"out0", "out1", "out2", "has_children",
-                                           "dec0", "dec1", "dec2", "dec3", "dec4", "dec5",
+                                          {"out0", "out1", "out2", "notify",
                                            "nb0", "nb1", "nb2", "nb3", "nb4", "nb5",
-                                           "s_child", "tags_child", "cnode_child"});
+                                           "s_child", "tags_child"});
 
     /**
-     * Spawn (host only): the flags of the children, once the neighbors have decided; or,
+     * Notify (no device work): from compute's summary, tells the neighbors' spawn (or, without a
+     * neighbor, our own) whether this node has children, tells our own spawn, and sends
+     * the children without a compressed node an empty one.
+     */
+    constexpr const int N_CHILDREN = 0, N_DEC = 1, N_CNODE = N_DEC + NB;
+    auto notify_fn = [fns, nb_index](const key_type& key, const int& summary) -> TASKTYPE {
+      const bool has_children = summary & NOTIFY_HAS_CHILDREN;
+      const int dec = has_children ? 1 : 0;
+      MRA_GRAD_SENDS
+      do_send.template operator()<N_CHILDREN>(key, dec);
+      for (Dimension a = 0; a < NDIM; ++a) {
+        for (int s : {-1, 1}) {
+          /* the neighbor's spawn hears it on the opposite side; without a neighbor, our own */
+          if ((summary >> nb_index(a, s)) & 1) {
+            MRA_GRAD_SEND_NB(N_DEC, nb_index(a, -s), key.neighbor(a, s), dec)
+          } else {
+            MRA_GRAD_SEND_NB(N_DEC, nb_index(a, s), key, 0)
+          }
+        }
+      }
+      for (size_type c = 0; c < num_children; ++c) {
+        if (!((summary >> (NOTIFY_PLACEHOLDER_SHIFT + c)) & 1)) continue;
+        const key_type child = key.child_at(c);
+        do_send.template operator()<N_CNODE>(child, cnode_type(child, fns->num_functions(child)));
+      }
+      MRA_GRAD_FLUSH
+    };
+    auto notify_tt = ttg::make_tt<Space>(std::move(notify_fn), ttg::edges(notify_e),
+                                         ttg::edges(children_spawn,
+                                                    dec_e[0], dec_e[1], dec_e[2], dec_e[3], dec_e[4], dec_e[5],
+                                                    cnode_balance),
+                                         name + "-notify", {"summary"},
+                                         {"has_children", "dec0", "dec1", "dec2", "dec3", "dec4", "dec5", "cnode"});
+
+    /**
+     * Spawn (no device work): the flags of the children, once the neighbors have decided; or,
      * without children, this node's S to the children of the neighbors that have some.
      */
     constexpr const int S_FLAGS = 0, S_NB = 1;
@@ -550,6 +593,7 @@ namespace mra {
       primer_tt->set_keymap(procmap);
       forward_tt->set_keymap(procmap);
       compute_tt->set_keymap(procmap);
+      notify_tt->set_keymap(procmap);
       spawn_tt->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
@@ -564,11 +608,12 @@ namespace mra {
     auto ins = std::make_tuple(compute_tt->template in<3>());
     auto outs = std::make_tuple(compute_tt->template out<0>(), compute_tt->template out<1>(),
                                 compute_tt->template out<2>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(4);
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(5);
     ops[0] = std::move(primer_tt);
     ops[1] = std::move(forward_tt);
     ops[2] = std::move(compute_tt);
-    ops[3] = std::move(spawn_tt);
+    ops[3] = std::move(notify_tt);
+    ops[4] = std::move(spawn_tt);
     return make_ttg(std::move(ops), ins, outs, name);
   }
 

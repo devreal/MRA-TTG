@@ -225,10 +225,12 @@ namespace mra {
     using cnode_type = mra::FunctionsCompressedNode<T, NDIM>;
     using node_type = mra::FunctionsReconstructedNode<T, NDIM>;
     constexpr size_type num_children = mra::Key<NDIM>::num_children();
-    constexpr const int OUT = 0, S = 1, BALANCE_A = 2, BALANCE_B = 3;
+    constexpr const int OUT = 0, S = 1, BALANCE = 2;
 
     ttg::Edge<mra::Key<NDIM>, node_type> s_e(name + "-s"), primer_e(name + "-primer");
     ttg::Edge<mra::Key<NDIM>, cnode_type> balance_a(name + "-balance_a"), balance_b(name + "-balance_b");
+    /* which children get an empty compressed node of a (bits 0..7) and of b (bits 8..15) */
+    ttg::Edge<mra::Key<NDIM>, int> balance_e(name + "-balance");
 
     /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; the
      * operator data is the same for every node, so any two tasks may be batched */
@@ -331,46 +333,82 @@ namespace mra {
         }
       }
 
+      /* the empty compressed nodes for children where a tree has none are sent by the balance
+       * task: a device task holds a data copy of every value it sends until it completes, and
+       * PaRSEC limits their number per task (MAX_PARAM_COUNT, including the inputs); this
+       * keeps the task at 13 (3 inputs, the result, 8 children and the mask) */
+      int balance = 0;
+      for (size_type c = 0; c < num_children; ++c) {
+        if (plan.out[c].count() == 0 || !plan.task[c]) continue;
+        if (!plan.a_node_at[c]) balance |= 1 << c;
+        if (!plan.b_node_at[c]) balance |= 1 << (num_children + c);
+      }
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       sends.push_back(ttg::device::send<OUT>(key, std::move(plan.result)));
       for (size_type c = 0; c < num_children; ++c) {
         const mra::Key<NDIM> child = key.child_at(c);
         if (plan.out[c].count() == 0) continue; // nothing continues here
-        if (!plan.task[c]) {
-          sends.push_back(ttg::device::send<OUT>(child, std::move(plan.out[c])));
-          continue;
-        }
-        sends.push_back(ttg::device::send<S>(child, std::move(plan.out[c])));
-        if (!plan.a_node_at[c]) sends.push_back(ttg::device::send<BALANCE_A>(child, cnode_type(child, NA)));
-        if (!plan.b_node_at[c]) sends.push_back(ttg::device::send<BALANCE_B>(child, cnode_type(child, N)));
+        if (plan.task[c]) sends.push_back(ttg::device::send<S>(child, std::move(plan.out[c])));
+        else              sends.push_back(ttg::device::send<OUT>(child, std::move(plan.out[c])));
       }
+      if (balance != 0) sends.push_back(ttg::device::send<BALANCE>(key, balance));
       co_await std::move(sends);
 #else  // MRA_ENABLE_HOST
       ttg::send<OUT>(key, std::move(plan.result));
       for (size_type c = 0; c < num_children; ++c) {
         const mra::Key<NDIM> child = key.child_at(c);
         if (plan.out[c].count() == 0) continue; // nothing continues here
-        if (!plan.task[c]) {
-          ttg::send<OUT>(child, std::move(plan.out[c]));
-          continue;
-        }
-        ttg::send<S>(child, std::move(plan.out[c]));
-        if (!plan.a_node_at[c]) ttg::send<BALANCE_A>(child, cnode_type(child, NA));
-        if (!plan.b_node_at[c]) ttg::send<BALANCE_B>(child, cnode_type(child, N));
+        if (plan.task[c]) ttg::send<S>(child, std::move(plan.out[c]));
+        else              ttg::send<OUT>(child, std::move(plan.out[c]));
       }
+      if (balance != 0) ttg::send<BALANCE>(key, balance);
 #endif // MRA_ENABLE_HOST
     };
+
+    /**
+     * Balance (no device work): an empty compressed node for every child where a or b has none
+     * but the product continues, as compute's mask says.
+     */
+    auto balance_fn = [fnsA, fnsB](const mra::Key<NDIM>& key, const int& balance) -> TASKTYPE {
+#ifndef MRA_ENABLE_HOST
+      auto sends = ttg::device::forward();
+#endif // MRA_ENABLE_HOST
+      for (size_type c = 0; c < num_children; ++c) {
+        const mra::Key<NDIM> child = key.child_at(c);
+        if ((balance >> c) & 1) {
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::send<0>(child, cnode_type(child, fnsA->num_functions(child))));
+#else  // MRA_ENABLE_HOST
+          ttg::send<0>(child, cnode_type(child, fnsA->num_functions(child)));
+#endif // MRA_ENABLE_HOST
+        }
+        if ((balance >> (num_children + c)) & 1) {
+#ifndef MRA_ENABLE_HOST
+          sends.push_back(ttg::device::send<1>(child, cnode_type(child, fnsB->num_functions(child))));
+#else  // MRA_ENABLE_HOST
+          ttg::send<1>(child, cnode_type(child, fnsB->num_functions(child)));
+#endif // MRA_ENABLE_HOST
+        }
+      }
+#ifndef MRA_ENABLE_HOST
+      co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
+    };
+    auto balance_tt = ttg::make_tt<Space>(std::move(balance_fn), ttg::edges(balance_e),
+                                          ttg::edges(balance_a, balance_b), name + "-balance",
+                                          {"mask"}, {"balance_a", "balance_b"});
 
     auto multiply_tt = ttg::make_tt<Space>(std::move(multiply_fn),
                                            ttg::edges(ttg::fuse(balance_a, a), ttg::fuse(balance_b, b),
                                                       ttg::fuse(s_e, primer_e)),
-                                           ttg::edges(out, s_e, balance_a, balance_b),
-                                           name, {"a", "b", "s"}, {"out", "s", "balance_a", "balance_b"});
+                                           ttg::edges(out, s_e, balance_e),
+                                           name, {"a", "b", "s"}, {"out", "s", "balance"});
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       primer_tt->set_keymap(procmap);
       multiply_tt->set_keymap(procmap);
+      balance_tt->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       primer_tt->set_devicemap(devicemap);
@@ -385,9 +423,10 @@ namespace mra {
 
     auto ins = std::make_tuple(multiply_tt->template in<0>(), multiply_tt->template in<1>());
     auto outs = std::make_tuple(multiply_tt->template out<OUT>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(2);
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(3);
     ops[0] = std::move(primer_tt);
     ops[1] = std::move(multiply_tt);
+    ops[2] = std::move(balance_tt);
     return make_ttg(std::move(ops), ins, outs, name);
   }
 
