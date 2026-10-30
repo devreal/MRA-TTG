@@ -482,7 +482,9 @@ namespace mra {
           do_send.template operator()<C_S_CHILD>(child_keys[c], std::move(child_s[c]));
         }
 #ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::broadcast<C_TAGS>(child_keys, std::move(inner)));
+        /* moved: the broadcast happens after the task completes, and an lvalue keylist is
+         * only captured by reference, while child_keys dies at the end of this block */
+        sends.push_back(ttg::device::broadcast<C_TAGS>(std::move(child_keys), std::move(inner)));
 #else  // MRA_ENABLE_HOST
         ttg::broadcast<C_TAGS>(child_keys, std::move(inner));
 #endif // MRA_ENABLE_HOST
