@@ -184,10 +184,10 @@ namespace mra {
     const bool enable_batching = mra::batching_enabled();
     const size_type max_functions = fns->num_functions();
 #ifndef MRA_ENABLE_HOST
-    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::DerivativeBatchArg<T, NDIM>>> deriv_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::GradientDerivativeBatchArg<T, NDIM>>> deriv_pool;
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::GradientSpawnBatchArg<T, NDIM>>> spawn_pool;
     if (enable_batching) {
-      deriv_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::DerivativeBatchArg<T, NDIM>>>(
+      deriv_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::GradientDerivativeBatchArg<T, NDIM>>>(
                      ttg::device::num_devices(), max_batch_size);
       spawn_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::GradientSpawnBatchArg<T, NDIM>>>(
                      ttg::device::num_devices(), max_batch_size);
@@ -427,21 +427,17 @@ namespace mra {
         } else
 #endif // MRA_ENABLE_HOST
         {
-          size_type offset = 0;
+          /* all axes in one launch */
           for (Dimension a = 0; a < NDIM; ++a) {
             if (n_nonzero[a] == 0) continue;
             auto sparseman = make_sparsity_manager(result[a]);
             sparseman.populate_device_sparsity();
-            /* every coefficient is in S, so the "inherited" views are the same nodes */
-            submit_derivative_kernel(D, key, src_keys_ptr + 3*a*N, nb_views[nb_index(a, -1)], nb_views[nb_index(a, -1)],
-                                     center_view, center_view, nb_views[nb_index(a, 1)], nb_views[nb_index(a, 1)],
-                                     operators.current_view(), result_views[a],
-                                     phi.current_view(), phibar.current_view(), quad_x.current_view(),
-                                     tmp_ptr + offset*derivative_tmp_size<NDIM>(K), N, n_nonzero[a], K, T(0), T(0), a,
-                                     FunctionData<T, NDIM>::BC_FREE, FunctionData<T, NDIM>::BC_FREE,
-                                     ttg::device::current_stream());
-            offset += n_nonzero[a];
           }
+          submit_gradient_derivative_kernel<T, NDIM>(D, key, src_keys_ptr, nb_views, center_view, result_views,
+                                            operators.current_view(), phi.current_view(), phibar.current_view(),
+                                            quad_x.current_view(), tmp_ptr, N, n_nonzero, K,
+                                            FunctionData<T, NDIM>::BC_FREE, FunctionData<T, NDIM>::BC_FREE,
+                                            ttg::device::current_stream());
           if (has_children) {
             auto sparseman = make_sparsity_manager(child_s);
             sparseman.populate_device_sparsity();

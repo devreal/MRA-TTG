@@ -121,16 +121,141 @@ namespace mra {
     checkSubmit();
   }
 
+  namespace detail {
+    /**
+     * The derivatives along every axis at key in one launch: the blocks are flattened
+     * over the non-zero functions of the results of all axes, axis by axis
+     * (axis_offsets[a] is the first position of axis a, axis_offsets[NDIM] the total),
+     * so the axes run concurrently. Every coefficient is in the nodes themselves, so
+     * the "inherited" views of derivative_process_one are the same nodes. The views
+     * are named template parameters, see derivative_process_one.
+     */
+    template <typename T, Dimension NDIM, typename ViewT, typename OperatorsT,
+              typename PhiT, typename PhibarT, typename QuadXT>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void gradient_derivative_kernel(
+      const Domain<NDIM>& D,
+      const Key<NDIM> key,
+      const Key<NDIM>* src_keys,
+      const std::array<ViewT, 2*NDIM> neighbors,
+      const ViewT center,
+      std::array<ViewT, NDIM> results,
+      const OperatorsT operators,
+      const PhiT phi,
+      const PhibarT phibar,
+      const QuadXT quad_x,
+      T* tmp,
+      size_type N,
+      const std::array<size_type, NDIM+1> axis_offsets,
+      size_type K,
+      const int bc_left,
+      const int bc_right)
+    {
+      for (size_type pos = blockIdx.x; pos < axis_offsets[NDIM]; pos += gridDim.x) {
+        size_type a = 0;
+        while (pos >= axis_offsets[a+1]) ++a;
+        derivative_process_one<T, NDIM>(D, key, src_keys + 3*a*N, neighbors[2*a], neighbors[2*a], center, center,
+                                        neighbors[2*a+1], neighbors[2*a+1], operators, results[a],
+                                        phi, phibar, quad_x, tmp, N, pos - axis_offsets[a], pos, K,
+                                        T(0), T(0), a, bc_left, bc_right);
+      }
+    }
+  } // namespace detail
+
+  /**
+   * The derivatives along every axis at key, see detail::gradient_derivative_kernel:
+   * neighbors holds the left and right neighbor of each axis (2*a, 2*a+1), src_keys
+   * (device memory) 3*N keys per axis (see submit_derivative_kernel), n_nonzero the
+   * number of non-zero functions of each result, and tmp derivative_tmp_size(K) per
+   * non-zero function of all results together.
+   */
+  template <typename T, Dimension NDIM, typename ViewT, typename OperatorsT,
+            typename PhiT, typename PhibarT, typename QuadXT>
+  void submit_gradient_derivative_kernel(
+    const Domain<NDIM>& D,
+    const Key<NDIM>& key,
+    const Key<NDIM>* src_keys,
+    const std::array<ViewT, 2*NDIM>& neighbors,
+    const ViewT& center,
+    std::array<ViewT, NDIM>& results,
+    const OperatorsT& operators,
+    const PhiT& phi,
+    const PhibarT& phibar,
+    const QuadXT& quad_x,
+    T* tmp,
+    size_type N,
+    const std::array<size_type, NDIM>& n_nonzero,
+    size_type K,
+    const int bc_left,
+    const int bc_right,
+    ttg::device::Stream stream)
+  {
+    std::array<size_type, NDIM+1> axis_offsets{};
+    for (Dimension a = 0; a < NDIM; ++a) axis_offsets[a+1] = axis_offsets[a] + n_nonzero[a];
+    if (axis_offsets[NDIM] == 0) return;
+    const size_type smem_size = detail::derivative_smem_size<T, NDIM>(K);
+    CALL_KERNEL((detail::gradient_derivative_kernel<T, NDIM>), axis_offsets[NDIM], detail::derivative_thread_dims(K),
+      smem_size, stream,
+      (D, key, src_keys, neighbors, center, results, operators, phi, phibar, quad_x, tmp, N, axis_offsets, K,
+       bc_left, bc_right));
+    checkSubmit();
+  }
+
 #ifndef MRA_ENABLE_HOST
   /**
    * Batching support for the compute task of make_gradient_compressed. A task joins
-   * one batch only, so the leader issues every launch the members need: per axis one
-   * batched derivative launch (derivative_kernel_batched, the axis being a batch-wide
-   * parameter there) over the members that form derivatives along it, and one batched
-   * spawn launch over the members with children. The operator data is the same for
-   * every node, so batching is unrestricted.
+   * one batch only, so the leader issues every launch the members need: one batched
+   * derivative launch over every member and axis with derivatives (one entry per
+   * member and axis, the axis travelling with the entry), and one batched spawn
+   * launch over the members with children. The operator data is the same for every
+   * node, so batching is unrestricted.
    */
   namespace detail {
+
+    template <typename T, Dimension NDIM>
+    using GradientDerivativeBatchArg = std::tuple<
+      Key<NDIM>,                   // key
+      const Key<NDIM>*,            // src_keys of the axis
+      SparseTensorView<T, NDIM+1>, // left neighbor along the axis
+      SparseTensorView<T, NDIM+1>, // S
+      SparseTensorView<T, NDIM+1>, // right neighbor along the axis
+      SparseTensorView<T, NDIM+1>, // derivative along the axis
+      size_type,                   // N
+      size_type                    // axis
+    >;
+
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void gradient_derivative_kernel_batched(
+      GradientDerivativeBatchArg<T, NDIM>* args, // device ptr, size == num_entries
+      const size_type* entry_offsets,            // device ptr, size == num_entries+1
+      size_type num_entries,
+      size_type total_nonzero,
+      T* shared_tmp,                             // occupancy-sized scratch of the batch slot, indexed by block
+      const Domain<NDIM>& D,
+      const concepts::TensorView<3> auto operators,
+      const concepts::TensorView<2> auto phi,
+      const concepts::TensorView<2> auto phibar,
+      const concepts::TensorView<1> auto quad_x,
+      size_type K,
+      const int bc_left,
+      const int bc_right)
+    {
+      SHARED size_type entry;
+      SHARED size_type local_pos;
+      for (size_type pos = blockIdx.x; pos < total_nonzero; pos += gridDim.x) {
+        if (is_team_lead()) {
+          entry = find_member_for_pos(entry_offsets, num_entries, pos, &local_pos);
+        }
+        SYNCTHREADS();
+        auto& arg = args[entry];
+        derivative_process_one<T, NDIM>(D, std::get<0>(arg), std::get<1>(arg),
+                                        std::get<2>(arg), std::get<2>(arg), std::get<3>(arg), std::get<3>(arg),
+                                        std::get<4>(arg), std::get<4>(arg), operators, std::get<5>(arg),
+                                        phi, phibar, quad_x, shared_tmp, std::get<6>(arg), local_pos, blockIdx.x,
+                                        K, T(0), T(0), std::get<7>(arg), bc_left, bc_right);
+      }
+    }
 
     template <typename T, Dimension NDIM>
     using GradientSpawnBatchArg = std::tuple<
@@ -180,7 +305,7 @@ namespace mra {
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_gradient_compute_batch_leader(
       BatchView& batch,
-      GroupedBatchPoolRegistry<DerivativeBatchArg<T, NDIM>>& deriv_registry,
+      GroupedBatchPoolRegistry<GradientDerivativeBatchArg<T, NDIM>>& deriv_registry,
       GroupedBatchPoolRegistry<GradientSpawnBatchArg<T, NDIM>>& spawn_registry,
       const Domain<NDIM>& D,
       const concepts::TensorView<3> auto& operators,
@@ -219,49 +344,52 @@ namespace mra {
         slot.extra_sizes.clear();
       };
 
-      /* the derivatives, one launch per axis */
-      auto& deriv_pool = deriv_registry.get(device);
-      for (Dimension a = 0; a < NDIM; ++a) {
-        size_type bytes = 0;
-        std::size_t members = 0;
-        for (std::size_t m = 0; m < nb; ++m) {
+      /* the derivatives of every member and axis, one launch */
+      size_type deriv_bytes = 0;
+      std::size_t entries = 0;
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (Dimension a = 0; a < NDIM; ++a) {
           if (batch[m].template get<5>()[a] == 0) continue;
-          bytes += batch[m].template get<4>()[a].coeffs().dim(0);
-          ++members;
+          deriv_bytes += batch[m].template get<4>()[a].coeffs().dim(0);
+          ++entries;
         }
-        if (members == 0) continue;
-        auto& slot = deriv_pool.acquire(max_batch, max_batch + 1, max_batch * max_functions);
+      }
+      if (entries > 0) {
+        auto& deriv_pool = deriv_registry.get(device);
+        auto& slot = deriv_pool.acquire(NDIM * max_batch, NDIM * max_batch + 1, NDIM * max_batch * max_functions);
         reset(slot);
-        slot.sparsity.resize(bytes);
+        slot.sparsity.resize(deriv_bytes);
         size_type sparsity_offset = 0;
         for (std::size_t m = 0; m < nb; ++m) {
           const auto& n_nonzero = batch[m].template get<5>();
-          if (n_nonzero[a] == 0) continue;
           const size_type N = batch[m].template get<13>();
           auto& nbv = batch[m].template get<2>();
           auto& center = batch[m].template get<1>();
-          stage_sparsity(slot, batch[m].template get<4>()[a], sparsity_offset);
-          /* every coefficient is in S, so the "inherited" views are the same nodes */
-          slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<6>() + 3*a*N,
-                                 nbv[2*a], nbv[2*a], center, center, nbv[2*a + 1], nbv[2*a + 1],
-                                 batch[m].template get<3>()[a], N);
-          slot.offsets.push_back(slot.offsets.back() + n_nonzero[a]);
+          for (Dimension a = 0; a < NDIM; ++a) {
+            if (n_nonzero[a] == 0) continue;
+            stage_sparsity(slot, batch[m].template get<4>()[a], sparsity_offset);
+            slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<6>() + 3*a*N,
+                                   nbv[2*a], center, nbv[2*a + 1], batch[m].template get<3>()[a], N, size_type(a));
+            slot.offsets.push_back(slot.offsets.back() + n_nonzero[a]);
+          }
         }
         const size_type total = slot.offsets.back();
-        submit_grouped_copy<DerivativeBatchArg<T, NDIM>>(slot, members, slot.offsets.size(), deriv_pool.device_id, stream);
+        submit_grouped_copy<GradientDerivativeBatchArg<T, NDIM>>(slot, entries, slot.offsets.size(),
+                                                                 deriv_pool.device_id, stream);
         /* the scratch is the slot's, one region per block of the occupancy-capped grid,
          * see submit_derivative_batch_leader */
         const Dim3 thread_dims = derivative_thread_dims(K);
         const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
         const size_type smem_size = derivative_smem_size<T, NDIM>(K);
-        auto kernel = derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>, std::decay_t<decltype(phi)>,
-                                                std::decay_t<decltype(phibar)>, std::decay_t<decltype(quad_x)>>;
+        auto kernel = gradient_derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>,
+                                                         std::decay_t<decltype(phi)>, std::decay_t<decltype(phibar)>,
+                                                         std::decay_t<decltype(quad_x)>>;
         const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
         const size_type grid_x = std::min<size_type>(total, grid_cap);
         T* shared_tmp = deriv_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
-        CALL_KERNEL((derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, shared_tmp, D,
-                     operators, phi, phibar, quad_x, K, T(0), T(0), size_type(a), bc_left, bc_right));
+        CALL_KERNEL((gradient_derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(entries), total, shared_tmp, D,
+                     operators, phi, phibar, quad_x, K, bc_left, bc_right));
         checkSubmit();
         deriv_pool.mark_submitted(slot, stream);
       }
