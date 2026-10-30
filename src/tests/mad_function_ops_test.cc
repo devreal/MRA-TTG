@@ -5,7 +5,9 @@
  *  - FunctionVector (store, feed with and without keep)
  *  - make_multiply_broadcast
  *  - make_square, and the density sum_i occ_i f_i^2 (square, compress, transform)
+ *  - make_square_compressed, make_multiply_compressed (elementwise and broadcast)
  *  - make_derivative, and the kinetic-energy matrix built from it
+ *  - make_gradient_compressed, and the kinetic-energy matrix built from it
  *  - make_concat, and a transform over the concatenated set
  *  - make_transform with U computed in the graph from a reduction (matrix_inner)
  *
@@ -404,6 +406,152 @@ static void test_square(madness::World& world, mra::size_type K, vec_t& f) {
   }
 }
 
+/**
+ * Products of compressed inputs without reconstructing them (make_square_compressed,
+ * make_multiply_compressed), against MADNESS: reconstructed output, and compressed
+ * output through make_compress.
+ */
+static void test_multiply_compressed(madness::World& world, mra::size_type K, real_function_t& a, vec_t& f, vec_t& h) {
+  const mra::size_type N = f.size();
+  auto db = make_domain();
+
+  /* f_i^2 */
+  {
+    Graph G(K);
+    CompressedEdge f_e;
+    ReconstructedEdge sq_e;
+    G.load_compressed(f, f_e, "f");
+    G.add(mra::make_square_compressed<T, NDIM>(db, make_functions(N), G.functiondata, K, f_e, sq_e));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, sq_e));
+    G.execute();
+    vec_t ref = madness::square(world, f);
+    check_close("square_compressed", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "square_compressed");
+  }
+
+  /* f_i^2, compressed */
+  {
+    Graph G(K);
+    CompressedEdge f_e, c_e;
+    ReconstructedEdge sq_e;
+    G.load_compressed(f, f_e, "f");
+    G.add(mra::make_square_compressed<T, NDIM>(db, make_functions(N), G.functiondata, K, f_e, sq_e));
+    G.add(mra::make_compress(make_functions(N), K, false, G.functiondata, sq_e, c_e, "compress"));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, c_e, true /* add_leaves */));
+    G.execute();
+    vec_t ref = madness::square(world, f);
+    check_close("square_compressed, compressed output", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "square_compressed, compressed output");
+  }
+
+  /* f_i * h_i: trees differ per function */
+  {
+    Graph G(K);
+    CompressedEdge f_e, h_e;
+    ReconstructedEdge prod_e;
+    G.load_compressed(f, f_e, "f");
+    G.load_compressed(h, h_e, "h");
+    G.add(mra::make_multiply_compressed<T, NDIM>(db, make_functions(N), make_functions(N), G.functiondata, K,
+                                                 f_e, h_e, prod_e));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, prod_e));
+    G.execute();
+    madness::reconstruct(world, f);
+    madness::reconstruct(world, h);
+    vec_t ref = madness::mul(world, f, h);
+    check_close("multiply_compressed", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "multiply_compressed");
+  }
+
+  /* a * f_i: a is deeper than f in places and shallower in others */
+  {
+    vec_t av = {a};
+    Graph G(K);
+    CompressedEdge a_e, f_e, c_e;
+    ReconstructedEdge prod_e;
+    G.load_compressed(av, a_e, "a");
+    G.load_compressed(f, f_e, "f");
+    G.add(mra::make_multiply_compressed<T, NDIM>(db, make_functions(1), make_functions(N), G.functiondata, K,
+                                                 a_e, f_e, prod_e));
+    G.add(mra::make_compress(make_functions(N), K, false, G.functiondata, prod_e, c_e, "compress"));
+    vec_t result = empty_like(f.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, c_e, true /* add_leaves */));
+    G.execute();
+    madness::reconstruct(world, av);
+    madness::reconstruct(world, f);
+    vec_t ref = madness::mul(world, a, f);
+    check_close("multiply_compressed broadcast, compressed output", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, "multiply_compressed broadcast, compressed output");
+  }
+}
+
+/**
+ * The three derivatives of compressed inputs in one descent (make_gradient_compressed),
+ * against madness::Derivative, and the kinetic-energy matrix built from them.
+ */
+static void test_gradient_compressed(madness::World& world, mra::size_type K, vec_t& f, const std::string& label) {
+  const mra::size_type N = f.size();
+  auto db = make_domain();
+  auto fns = make_functions(N);
+  auto grad = madness::gradient_operator<double, 3>(world);
+
+  /* each axis */
+  {
+    Graph G(K);
+    CompressedEdge f_e;
+    std::array<ReconstructedEdge, NDIM> d_e;
+    G.load_compressed(f, f_e, "f");
+    G.add(mra::make_gradient_compressed<T, NDIM>(db, fns, G.functiondata, K, f_e, d_e));
+    std::array<vec_t, NDIM> result;
+    for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+      result[axis] = empty_like(f.front(), N);
+      G.add(mra::vmra::make_vmra_store(result[axis], d_e[axis]));
+    }
+    G.execute();
+    madness::reconstruct(world, f);
+    for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+      const std::string what = "gradient_compressed " + label + " axis " + std::to_string(axis);
+      vec_t ref = madness::apply(world, *grad[axis], f);
+      check_close(what, max_diff_norm(world, ref, result[axis]), max_norm(world, ref));
+      check_well_formed(world, result[axis], what);
+    }
+  }
+
+  /* kinetic-energy matrix 1/2 sum_axis <d f_i|d f_j> */
+  {
+    Graph G(K);
+    CompressedEdge f_e;
+    std::array<ReconstructedEdge, NDIM> d_e;
+    std::array<CompressedEdge, NDIM> c_e;
+    std::array<ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>>, NDIM> m_e;
+    madness::Tensor<double> kin(static_cast<long>(N), static_cast<long>(N));
+    std::mutex m;
+    G.load_compressed(f, f_e, "f");
+    G.add(mra::make_gradient_compressed<T, NDIM>(db, fns, G.functiondata, K, f_e, d_e));
+    for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+      G.add(mra::make_compress(fns, K, false, G.functiondata, d_e[axis], c_e[axis], "compress"));
+      G.add(mra::make_matrix_inner<T, NDIM>(fns, fns, K, c_e[axis], c_e[axis], m_e[axis]));
+      G.add(ttg::make_tt([&](const mra::Key<NDIM>&, const mra::DenseTensor<T, 2>& r) {
+        const T* data = r.current_view().data();
+        std::lock_guard<std::mutex> lock(m);
+        for (mra::size_type i = 0; i < N; ++i)
+          for (mra::size_type j = 0; j < N; ++j) kin(i, j) += 0.5*data[i*N + j];
+      }, ttg::edges(m_e[axis]), ttg::edges(), "sink"));
+    }
+    G.execute();
+    world.gop.sum(kin.ptr(), kin.size());
+    madness::reconstruct(world, f);
+    madness::Tensor<double> ref(static_cast<long>(N), static_cast<long>(N));
+    for (mra::Dimension axis = 0; axis < NDIM; ++axis) {
+      vec_t d = madness::apply(world, *grad[axis], f);
+      ref += 0.5*madness::matrix_inner(world, d, d);
+    }
+    check_close("gradient_compressed " + label + " kinetic-energy matrix", (kin - ref).absmax(), ref.absmax());
+  }
+}
+
 static void test_derivative(madness::World& world, mra::size_type K, vec_t& f) {
   const mra::size_type N = f.size();
   auto db = make_domain();
@@ -570,7 +718,14 @@ int main(int argc, char** argv) {
     test_function_vector(world, K, f);
     test_multiply_broadcast(world, K, a, f);
     test_square(world, K, f);
+    test_multiply_compressed(world, K, a, f, h);
     test_derivative(world, K, f);
+    test_gradient_compressed(world, K, f, "f");
+    test_gradient_compressed(world, K, g, "g");
+    {
+      vec_t av = {a};
+      test_gradient_compressed(world, K, av, "a");
+    }
     test_concat(world, K, f, g);
     test_transform_edge(world, K, f);
 

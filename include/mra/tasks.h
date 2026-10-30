@@ -22,6 +22,8 @@
 #include "mra/tasks/multiply_broadcast.h"
 #include "mra/tasks/square.h"
 #include "mra/tasks/concat.h"
+#include "mra/tasks/multiply_compressed.h"
+#include "mra/tasks/gradient_compressed.h"
 
 
 #endif // HAVE_TASKS_H

@@ -22,5 +22,7 @@
 #include "mra/kernels/square.h"
 #include "mra/kernels/merge.h"
 #include "mra/kernels/concat.h"
+#include "mra/kernels/multiply_compressed.h"
+#include "mra/kernels/gradient_compressed.h"
 
 #endif // MRA_KERNELS_H
