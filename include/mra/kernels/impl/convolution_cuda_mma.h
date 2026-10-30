@@ -9,6 +9,7 @@
 #include "mra/misc/types.h"
 #include "mra/tensor/tensorview.h"
 #include "mra/misc/conv_mad.h" // for NormId, used as a template parameter below
+#include "mra/ops/functions.h"  // reduce_warp
 
 
 /* Device-side availability: only true while compiling for sm_80 or newer
@@ -38,6 +39,12 @@ namespace mra {
      * apply_conv_k6s (k = 6) every 6th term.
      */
     inline constexpr int apply_conv_k6_warps = 6;
+
+    /**
+     * Warps per block of the separate k = K launch (see
+     * apply_conv_splits_s), one f per warp.
+     */
+    inline constexpr int apply_conv_s_warps = 4;
 
     /**
      * Warps and shared memory (in elements of T) that the term function for
@@ -490,6 +497,26 @@ namespace mra {
         SYNCTHREADS();
       }
 
+      /* Called by the 32 lanes of one warp alone: builds the bitmask in mask
+       * (owned by this warp) and synchronizes the warp. */
+      template<concepts::TensorView<4> ViewOpnorms>
+      DEVSCOPE conv_terms(int opid, int rank, const T optol, const ViewOpnorms& opnorms, mask_type& mask, unsigned lane)
+      : m_norms(opnorms.data())
+      , m_norms_rank(opnorms.dim(1))
+      , m_opid(opid)
+      , m_rank(rank)
+      , m_optol(optol)
+      , m_mask_rank(rank < MaxMaskRank ? rank : MaxMaskRank)
+      , m_mask(mask)
+      {
+        for (int base = 0; base < m_mask_rank; base += MRA_WARP_SIZE) {
+          const int mu = base + lane;
+          const uint32_t bits = __ballot_sync(0xffffffffu, mu < m_mask_rank && kept(mu));
+          if (lane == 0) mask[base / 32] = bits;
+        }
+        __syncwarp();
+      }
+
       /* the first applied term >= mu, or rank */
       DEVSCOPE int next(int mu) const {
         while (mu < m_mask_rank) {
@@ -509,8 +536,13 @@ namespace mra {
 
       /* the factor of term mu (sign-flipped for S) */
       DEVSCOPE T mufac(int mu) const {
-        T mufac = norm(mu, 0, NormId::Fac);
+        T mufac = fac(mu);
         return (NormId::Snorm == Term) ? -mufac : mufac;
+      }
+
+      /* the factor of term mu without the S sign (see apply_conv_k8w) */
+      DEVSCOPE T fac(int mu) const {
+        return norm(mu, 0, NormId::Fac);
       }
 
     private:
@@ -1056,6 +1088,203 @@ namespace mra {
     }
 
     /**
+     * ||f|| of the 4096 values at fptr, computed by one warp in the order
+     * normf uses in a 256-thread block, so the result is bit for bit the
+     * one convolution_kernel_impl gets: lane l plays threads l + 32j
+     * (j = 0..7) of sumabssq, then reduce_block's two reduce_warp stages.
+     */
+    __device__ __forceinline__
+    double normf_block256_by_warp(const double* fptr) {
+      constexpr unsigned BS = 256, N = 4096, NJ = BS / MRA_WARP_SIZE;
+      const unsigned lane = thread_id() % MRA_WARP_SIZE;
+      const double* p = fptr + lane;
+      double s[NJ];  // the sums of threads lane + 32j
+      #pragma unroll
+      for (unsigned j = 0; j < NJ; ++j) {
+        double a = 0.0;
+        #pragma unroll
+        for (unsigned i = MRA_WARP_SIZE * j; i < N; i += BS) {
+          double x = p[i];
+          a += x * x;
+        }
+        s[j] = mra::detail::reduce_warp(a, lane, MRA_WARP_SIZE);  // warp j's sum, in lane 0
+      }
+      double v = 0.0;  // warp j's sum in lane j, zero elsewhere
+      #pragma unroll
+      for (unsigned j = 0; j < NJ; ++j) {
+        const double sj = __shfl_sync(0xffffffffu, s[j], 0);
+        if (lane == j) v = sj;
+      }
+      v = mra::detail::reduce_warp(v, lane, MRA_WARP_SIZE);
+      return std::sqrt(__shfl_sync(0xffffffffu, v, 0));
+    }
+
+    /**
+     * In-register transpose for apply_conv_k8w, from stage 2's layout (lane
+     * (g, t) holds Z[y' = g][x' = 2t+r] of plane z in zz[z][r]) to stage 3's
+     * B fragments (lane (g', t') needs W[n = g'+8nt][z = 2t'+ks] =
+     * Z[y' = nt][x' = g'] of plane 2t'+ks). In bits: lane (y'2 y'1 y'0 x'2 x'1)
+     * and register (x'0, z2 z1 z0) become lane (x'2 x'1 x'0 z2 z1) and register
+     * (y'2 y'1 y'0, z0). Rounds 1-3 each swap a lane bit with a register bit:
+     * a lane sends the register whose bit differs from its own lane bit and
+     * receives the partner's into it. Round 4 permutes the lanes. Afterwards
+     * W[n = g'+8nt][z = 2t'+ks] is zz[4*((nt/2)%2) + 2*(nt%2) + ks][nt/4].
+     */
+    __device__ __forceinline__
+    void transpose_k8(double (&zz)[8][2], unsigned lane) {
+      auto exch = [&](double& lo, double& hi, unsigned bit) {
+        const bool b = (lane >> bit) & 1;
+        const double recv = __shfl_xor_sync(0xffffffffu, b ? lo : hi, 1u << bit);
+        if (b) lo = recv; else hi = recv;
+      };
+      /* round 1: lane bit 4 <-> x'0 */
+      #pragma unroll
+      for (int z = 0; z < 8; ++z) exch(zz[z][0], zz[z][1], 4);
+      /* round 2: lane bit 3 <-> z2 */
+      #pragma unroll
+      for (int z = 0; z < 4; ++z) {
+        exch(zz[z][0], zz[z + 4][0], 3);
+        exch(zz[z][1], zz[z + 4][1], 3);
+      }
+      /* round 3: lane bit 2 <-> z1, over the planes with z1 = 0 */
+      constexpr int z1lo[4] = {0, 1, 4, 5};
+      #pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        exch(zz[z1lo[i]][0], zz[z1lo[i] + 2][0], 2);
+        exch(zz[z1lo[i]][1], zz[z1lo[i] + 2][1], 2);
+      }
+      /* round 4: lane (x'2 x'1 x'0 z2 z1) reads lane (x'0 z2 z1 x'2 x'1) */
+      const unsigned src = (((lane >> 2) & 1) << 4) | (((lane >> 1) & 1) << 3) | ((lane & 1) << 2)
+                         | (((lane >> 4) & 1) << 1) | ((lane >> 3) & 1);
+      #pragma unroll
+      for (int z = 0; z < 8; ++z) {
+        zz[z][0] = __shfl_sync(0xffffffffu, zz[z][0], src);
+        zz[z][1] = __shfl_sync(0xffffffffu, zz[z][1], src);
+      }
+    }
+
+    /**
+     * apply_conv_k at k = 8 by one warp, with no block barriers: applies all
+     * terms of the S operator to f (the k^3 corner of the (2k)^3 tensor at
+     * fptr) and stores the sum into resultc (k^3, [z'][y'][x']). Each output
+     * value gets apply_conv_k's mma and FMA sequence, so the sum is bit for
+     * bit the same. Per term: stages 1+2 for all 8 z-planes, transpose_k8,
+     * stage 3 for the 8 column tiles of n = y'*k + x'. f stays in registers;
+     * the next term's fragments and mufac are read one term ahead.
+     */
+    template<typename T, Dimension NDIM, NormId Term,
+             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorView<4> ViewOpnorms>
+    DEVSCOPE void apply_conv_k8w(
+      int opid,
+      int rank,
+      const T optol,
+      const ViewTrans& trans,
+      const ViewOpnorms& opnorms,
+      const T* fptr,     // (2k)^3
+      T* resultc)        // k^3
+    {
+      static_assert(std::is_same_v<T, double>, "apply_conv_k8w: only double is supported");
+      static_assert(NDIM == 3, "apply_conv_k8w: only NDIM=3 is supported");
+      constexpr int k = 8;
+      const unsigned lane = thread_id() % MRA_WARP_SIZE;
+      const int warp = thread_id() / MRA_WARP_SIZE;
+      const int g = lane / 4;
+      const int t = lane % 4;
+
+      /* the applied terms; each warp builds its own bitmask */
+      __shared__ typename conv_terms<T, NDIM, Term>::mask_type kept_mask[apply_conv_s_warps];
+      const conv_terms<T, NDIM, Term> terms(opid, rank, optol, opnorms, kept_mask[warp], lane);
+
+      /* Stage-1 B fragments of all planes: fr[z][ks] = f[z][y = g][x = 2t+ks], 16 bytes per plane */
+      T fr[k][2];
+      #pragma unroll
+      for (int z = 0; z < k; ++z) {
+        double2 v = *reinterpret_cast<const double2*>(fptr + (z * 2 * k + g) * 2 * k + 2 * t);
+        fr[z][0] = v.x;
+        fr[z][1] = v.y;
+      }
+
+      /* this lane's A fragments of term mu: a[m][ks] = T[2t+ks][g] of Tx, Ty, Tz (m = 0, 1, 2) */
+      const size_type trans_rank = trans[0].dim(1);
+      auto load_frags = [&](int mu, T (&a)[3][2]) {
+        const size_type offset = (opid * trans_rank + mu) * k * k + 2 * t * k + g;
+        #pragma unroll
+        for (int m = 0; m < 3; ++m) {
+          #pragma unroll
+          for (int ks = 0; ks < 2; ++ks) {
+            a[m][ks] = __ldg(trans[2 - m].data() + offset + ks * k);
+          }
+        }
+      };
+
+      /* acc[nt][r] = result[z' = g][n = 2t+r+8nt] */
+      T acc[k][2];
+      #pragma unroll
+      for (int nt = 0; nt < k; ++nt) {
+        acc[nt][0] = acc[nt][1] = 0.0;
+      }
+
+      T a[3][2], an[3][2];
+      int mu = terms.next(0);
+      T mufac = 0.0;
+      if (mu < rank) {
+        load_frags(mu, a);
+        mufac = terms.fac(mu);
+      }
+      while (mu < rank) {
+        const int mu_next = terms.next(mu + 1);
+        T mufac_next = 0.0;
+        if (mu_next < rank) {
+          load_frags(mu_next, an);
+          mufac_next = terms.fac(mu_next);
+        }
+
+        /* Stages 1+2 for every plane z: zz[z][r] = Z[y' = g][x' = 2t+r] */
+        T zz[k][2];
+        #pragma unroll
+        for (int z = 0; z < k; ++z) {
+          T y[2] = {0.0, 0.0};
+          dmma_8x8x4(y, a[0][0], fr[z][0]);
+          dmma_8x8x4(y, a[0][1], fr[z][1]);
+          zz[z][0] = zz[z][1] = 0.0;
+          dmma_8x8x4(zz[z], a[1][0], y[0]);
+          dmma_8x8x4(zz[z], a[1][1], y[1]);
+        }
+
+        transpose_k8(zz, lane);
+
+        /* Stage 3 for the column tiles nt, B fragments from zz (see
+         * transpose_k8): sum up this term separately, then add it to acc
+         * scaled by mufac (the S term's sign on the DFMA operand, as in
+         * apply_conv_k) */
+        const T sfac = (NormId::Snorm == Term) ? -mufac : mufac;
+        #pragma unroll
+        for (int nt = 0; nt < k; ++nt) {
+          const int p = 4 * ((nt / 2) % 2) + 2 * (nt % 2);
+          T c[2] = {0.0, 0.0};
+          dmma_8x8x4(c, a[2][0], zz[p][nt / 4]);
+          dmma_8x8x4(c, a[2][1], zz[p + 1][nt / 4]);
+          acc[nt][0] = fma(sfac, c[0], acc[nt][0]);
+          acc[nt][1] = fma(sfac, c[1], acc[nt][1]);
+        }
+
+        mu = mu_next;
+        mufac = mufac_next;
+        #pragma unroll
+        for (int m = 0; m < 3; ++m) {
+          a[m][0] = an[m][0];
+          a[m][1] = an[m][1];
+        }
+      }
+
+      #pragma unroll
+      for (int nt = 0; nt < k; ++nt) {
+        *reinterpret_cast<double2*>(&resultc[g * k * k + 8 * nt + 2 * t]) = make_double2(acc[nt][0], acc[nt][1]);
+      }
+    }
+
+    /**
      * Applies all terms of one (R or S) separated operator to the k^3 tensor
      * f with the term function for k: apply_conv_k (k = 16 or 8, K = 8),
      * apply_conv_k6 (k = 12, the R term of K = 6) or apply_conv_k6s (k = 6,
@@ -1111,8 +1340,10 @@ namespace mra {
      * apply_term_needs (K=8: k = 16 and 8, K=6: k = 12 and 6). Works only if
      * K is a compile-time constant, because the work distribution is
      * configured at compile time. Returns false if it does not apply.
+     * With SDone the S term is skipped: resultc already holds it (see
+     * apply_conv_splits_s).
      */
-    template<typename T, Dimension NDIM,
+    template<typename T, Dimension NDIM, bool SDone = false,
              concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
              concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
              concepts::TensorView<4> ViewOpnorms,
@@ -1152,15 +1383,65 @@ namespace mra {
         }
         // convolution for f0
         if (at[1]) {
-          apply_term<T, NDIM, NormId::Snorm>(
-                      opid, K, rank, optol, transs, opnorms,
-                      f0, resultc);
+          if constexpr (!SDone) {
+            apply_term<T, NDIM, NormId::Snorm>(
+                        opid, K, rank, optol, transs, opnorms,
+                        f0, resultc);
+          }
         } else {
           resultc = 0.0;
         }
         return true;
       }
 #endif // MRA_HAVE_DMMA
+      return false;
+    }
+
+    /**
+     * The S term of one f by one warp (see apply_conv_splits_s): ||f||, the
+     * gate and optol as in convolution_kernel_impl and detail::apply_conv,
+     * then apply_conv_k8w into resultc.
+     */
+    template<typename T, Dimension NDIM,
+             concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+             concepts::TensorView<4> ViewOpnorms>
+    DEVSCOPE void apply_conv_s_warp(
+      int opid,
+      auto K,
+      const T fac,
+      const T tol,
+      const ViewTranss& transs,
+      const ViewOpnorms& opnorms,
+      const T* fptr,      // f, (2K)^3
+      T* resultc)         // K^3
+    {
+#ifdef MRA_HAVE_DMMA
+      static_assert(decltype(K)::value == 8, "apply_conv_s_warp: only K = 8 is split off");
+      /* ||f|| and the gate, as in convolution_kernel_impl */
+      const T cnorm = normf_block256_by_warp(fptr);
+      const T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
+      if (!((cnorm * opnorm) > (tol / fac))) return;
+      /* rank and optol, as in detail::apply_conv */
+      const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank);
+      const T tolc = tol / fac / cnorm;
+      const T optol = 0.01*tolc/rank;
+      apply_conv_k8w<T, NDIM, NormId::Snorm>(opid, rank, optol, transs, opnorms, fptr, resultc);
+#endif // MRA_HAVE_DMMA
+    }
+
+    /**
+     * Whether the S term (k = K) gets its own launch, one warp per f
+     * (detail::convolution_s_kernel_batched): K = 8, compile-time K only.
+     * Split across the block, a k = 8 term is only 6 mma per warp between
+     * two block barriers; one warp does all 48 with none.
+     */
+    template<typename KT>
+    SCOPE constexpr bool apply_conv_splits_s() {
+#ifdef MRA_ENABLE_CUDA
+      if constexpr (mra::is_ct_integral_v<KT>) {
+        return std::decay_t<KT>::value == 8;
+      }
+#endif // MRA_ENABLE_CUDA
       return false;
     }
 
