@@ -13,67 +13,33 @@
 
 namespace mra {
   namespace detail {
-    template <typename T, Dimension NDIM>
-    DEVSCOPE void norm_kernel_impl(
-      const concepts::TensorView<NDIM> auto& n,
-      T* result_norm,
-      const std::array<T, Key<NDIM>::num_children()>& child_norms,
-      size_type blockid,
-      size_type K,
-      bool is_root)
-    {
-      const bool is_t0 = (0 == thread_id());
-      /* norms are passed up the tree squared (a sum over all nodes of the
-       * compressed tree) and only the root takes the square root */
-      SHARED T node_normsq;
-      sumabssq(n, &node_normsq);
-      /* wait for all threads to contribute */
-      SYNCTHREADS();
-      if (is_t0) {
-        /* thread 0 adds the children's squared norms and publishes the result */
-        T normsq = node_normsq;
-        for (int i = 0; i < Key<NDIM>::num_children(); ++i) {
-          normsq += child_norms[i];
-        }
-        *result_norm = is_root ? std::sqrt(normsq) : normsq;
-      }
-    }
-
     /**
-     * Squared norm of function pos at this node plus the squared norms of its
-     * children (the norm itself at the root). Executed by one block; shared by
-     * norm_kernel and norm_kernel_batched.
+     * Squared norm of function pos at this node (zero where the function is zero
+     * here). Executed by one block; shared by norm_kernel and norm_kernel_batched.
+     * The squared norms are summed up the tree by the host-side reduction in
+     * mra/tasks/norm.h, which takes the square root at the root.
      */
     template <typename T, Dimension NDIM>
     DEVSCOPE void norm_process_one(
       const concepts::TensorView<NDIM+1> auto& node,
       T* result_norms,
-      const std::array<const T*, Key<NDIM>::num_children()>& child_norms,
-      const Key<NDIM>& key,
-      size_type K,
       size_type pos)
     {
       SHARED DenseTensorView<const T, NDIM> n;
-      SHARED std::array<T, Key<NDIM>::num_children()> block_child_norms;
-      SHARED size_type blockid;
       SHARED bool is_zero;
+      SHARED T node_normsq;
       if (is_team_lead()) {
-        blockid = pos;
-        is_zero = node.is_zero(blockid);
-        if (!is_zero) n = node(blockid);
-        for (size_type i = 0; i < Key<NDIM>::num_children(); ++i) {
-          block_child_norms[i] = (child_norms[i] != nullptr) ? child_norms[i][blockid] : T(0.0);
-        }
+        is_zero = node.is_zero(pos);
+        if (!is_zero) n = node(pos);
       }
       SYNCTHREADS();
       if (is_zero) {
-        if (is_team_lead()) {
-          T normsq = 0.0;
-          for (int i = 0; i < Key<NDIM>::num_children(); ++i) normsq += block_child_norms[i];
-          result_norms[blockid] = (key.level() == 0) ? std::sqrt(normsq) : normsq;
-        }
+        if (is_team_lead()) result_norms[pos] = T(0);
       } else {
-        norm_kernel_impl<T, NDIM>(n, &result_norms[blockid], block_child_norms, blockid, K, key.level() == 0);
+        sumabssq(n, &node_normsq);
+        /* wait for all threads to contribute */
+        SYNCTHREADS();
+        if (is_team_lead()) result_norms[pos] = node_normsq;
       }
       SYNCTHREADS(); // shared state is rewritten by the next call
     }
@@ -83,16 +49,13 @@ namespace mra {
     GLOBALSCOPE void norm_kernel(
       const concepts::TensorView<NDIM+1> auto node,
       T* result_norms,
-      std::array<const T*, Key<NDIM>::num_children()> child_norms,
       size_type N,
-      size_type n_nonzero,
-      size_type K,
-      const Key<NDIM> key)
+      size_type K)
     {
-      // One block per function, including functions that are zero at this node:
-      // their children can still carry coefficients, whose norms must be passed up.
+      // One block per function, including functions that are zero at this node,
+      // so that every entry of result_norms is written.
       for (size_type pos = blockIdx.x; pos < N; pos += gridDim.x) {
-        norm_process_one<T, NDIM>(node, result_norms, child_norms, key, K, pos);
+        norm_process_one<T, NDIM>(node, result_norms, pos);
       }
     }
   } // namespace detail
@@ -102,17 +65,15 @@ namespace mra {
   void submit_norm_kernel(
     const Key<NDIM>& key,
     size_type N,
-    size_type n_nonzero,
     size_type K,
     const concepts::TensorView<NDIM+1> auto& in,
     concepts::TensorView<1> auto& result_norms,
-    std::array<const T*, Key<NDIM>::num_children()>& child_norms,
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    CALL_KERNEL(detail::norm_kernel, N, thread_dims, 0, stream,
-        (in, result_norms.data(), child_norms, N, n_nonzero, K, key));
+    CALL_KERNEL((detail::norm_kernel<T, NDIM>), N, thread_dims, 0, stream,
+        (in, result_norms.data(), N, K));
     checkSubmit();
   }
 
@@ -128,10 +89,8 @@ namespace mra {
 
     template <typename T, Dimension NDIM>
     using NormBatchArg = std::tuple<
-      SparseTensorView<T, NDIM+1>,                        // node
-      T*,                                                 // result norms
-      std::array<const T*, Key<NDIM>::num_children()>,    // child norms
-      Key<NDIM>                                           // key (the root takes the square root)
+      SparseTensorView<T, NDIM+1>,   // node
+      T*                             // result norms
     >;
 
     template <typename T, Dimension NDIM>
@@ -151,14 +110,13 @@ namespace mra {
         }
         SYNCTHREADS();
         auto& arg = args[member];
-        norm_process_one<T, NDIM>(std::get<0>(arg), std::get<1>(arg), std::get<2>(arg), std::get<3>(arg),
-                                  K, local_pos);
+        norm_process_one<T, NDIM>(std::get<0>(arg), std::get<1>(arg), local_pos);
       }
     }
 
     /**
      * Called by every member of a batch with the batch_view returned by its
-     * `co_await ttg::device::coop<Key<NDIM>>(node_view, result, child_norms, key, N)`;
+     * `co_await ttg::device::coop<Key<NDIM>>(node_view, result, N)`;
      * the leader marshals every member and submits one combined launch.
      */
     template <typename T, Dimension NDIM, typename BatchView>
@@ -172,7 +130,7 @@ namespace mra {
 
       const std::size_t nb = batch.size();
       size_type total_blocks = 0;
-      for (std::size_t m = 0; m < nb; ++m) total_blocks += batch[m].template get<4>();
+      for (std::size_t m = 0; m < nb; ++m) total_blocks += batch[m].template get<2>();
       if (total_blocks == 0) return;
 
       const auto device = ttg::device::current_device();
@@ -187,8 +145,8 @@ namespace mra {
       slot.extra_sizes.clear();
       for (std::size_t m = 0; m < nb; ++m) {
         auto& b = batch[m];
-        slot.args.emplace_back(b.template get<0>(), b.template get<1>(), b.template get<2>(), b.template get<3>());
-        slot.offsets[m + 1] = slot.offsets[m] + b.template get<4>();
+        slot.args.emplace_back(b.template get<0>(), b.template get<1>());
+        slot.offsets[m + 1] = slot.offsets[m] + b.template get<2>();
       }
 
       auto stream = ttg::device::current_stream();

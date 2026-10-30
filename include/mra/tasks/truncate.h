@@ -142,9 +142,9 @@ namespace mra {
        * pre-fill with 0 -- matches the keep=false the kernel used to compute
        * for a zero node directly (this buffer is read back by real function id
        * below and forwarded to the parent); scope::SyncIn (rather than
-       * TempScope/Allocate) ensures this host fill reaches the device copy the
+       * Allocate) ensures this host fill reaches the device copy the
        * kernel reads/writes. */
-      kept_tensor_type kept(N, ttg::scope::Allocate);
+      kept_tensor_type kept(N, ttg::scope::SyncOut);
       std::array<const kept_tensor_type*, num_children> children =
             {&child0, &child1, &child2, &child3, &child4, &child5, &child6, &child7};
 

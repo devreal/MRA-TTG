@@ -11,6 +11,7 @@
 
 #ifndef MRA_ENABLE_HOST
 #include "mra/misc/device_batch_pool.h"
+#include "mra/misc/init.h"  // at_finalize
 #endif // !MRA_ENABLE_HOST
 
 namespace mra {
@@ -29,6 +30,10 @@ namespace mra {
      */
     inline BatchPoolRegistry<SparsityState>& sparsity_pool_registry() {
       static BatchPoolRegistry<SparsityState> registry(ttg::device::num_devices(), /* max_batch_size unused here */ 1);
+      /* its device memory is PaRSEC's, return it before PaRSEC is finalized
+       * (see BatchPoolRegistry::release) */
+      static const bool release_at_finalize = (at_finalize([]{ registry.release(); }), true);
+      (void)release_at_finalize;
       return registry;
     }
   } // namespace detail

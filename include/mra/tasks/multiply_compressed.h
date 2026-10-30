@@ -285,7 +285,7 @@ namespace mra {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_compressed_tmp_size<NDIM>(K)*n_items, TempScope);
+        tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_compressed_tmp_size<NDIM>(K)*n_items, ttg::scope::Allocate);
         work = ttg::Buffer<detail::MulCompressedWork<NDIM>, DeviceAllocator<detail::MulCompressedWork<NDIM>>>(n_items);
         std::copy(plan.work.begin(), plan.work.end(), work.host_ptr());
 #ifndef MRA_ENABLE_HOST
@@ -460,7 +460,7 @@ namespace mra {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_compressed_tmp_size<NDIM>(K)*n_items, TempScope);
+        tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_compressed_tmp_size<NDIM>(K)*n_items, ttg::scope::Allocate);
         work = ttg::Buffer<detail::MulCompressedWork<NDIM>, DeviceAllocator<detail::MulCompressedWork<NDIM>>>(n_items);
         std::copy(plan.work.begin(), plan.work.end(), work.host_ptr());
 #ifndef MRA_ENABLE_HOST

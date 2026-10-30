@@ -174,7 +174,8 @@ namespace mra {
      * children, unfilter, N)`: nb_views the six neighbors (left and right of each axis),
      * results/children the nodes (for their sparsity), n_nonzero the number of
      * derivatives along each axis, tmp the derivatives' scratch for the axes in order
-     * followed by the children's. max_functions bounds the number of functions of a node.
+     * followed by the children's (batched, only the children's is used: the derivatives'
+     * scratch is the batch slot's). max_functions bounds the number of functions of a node.
      */
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_gradient_compute_batch_leader(
@@ -237,23 +238,29 @@ namespace mra {
           const auto& n_nonzero = batch[m].template get<5>();
           if (n_nonzero[a] == 0) continue;
           const size_type N = batch[m].template get<13>();
-          size_type tmp_offset = 0;
-          for (Dimension b = 0; b < a; ++b) tmp_offset += n_nonzero[b];
           auto& nbv = batch[m].template get<2>();
           auto& center = batch[m].template get<1>();
           stage_sparsity(slot, batch[m].template get<4>()[a], sparsity_offset);
           /* every coefficient is in S, so the "inherited" views are the same nodes */
           slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<6>() + 3*a*N,
                                  nbv[2*a], nbv[2*a], center, center, nbv[2*a + 1], nbv[2*a + 1],
-                                 batch[m].template get<3>()[a],
-                                 batch[m].template get<7>() + tmp_offset*derivative_tmp_size<NDIM>(K), N);
+                                 batch[m].template get<3>()[a], N);
           slot.offsets.push_back(slot.offsets.back() + n_nonzero[a]);
         }
         const size_type total = slot.offsets.back();
         submit_grouped_copy<DerivativeBatchArg<T, NDIM>>(slot, members, slot.offsets.size(), deriv_pool.device_id, stream);
-        CALL_KERNEL((derivative_kernel_batched<T, NDIM>), total, derivative_thread_dims(K),
-                    derivative_smem_size<T, NDIM>(K), stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, D,
+        /* the scratch is the slot's, one region per block of the occupancy-capped grid,
+         * see submit_derivative_batch_leader */
+        const Dim3 thread_dims = derivative_thread_dims(K);
+        const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+        const size_type smem_size = derivative_smem_size<T, NDIM>(K);
+        auto kernel = derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>, std::decay_t<decltype(phi)>,
+                                                std::decay_t<decltype(phibar)>, std::decay_t<decltype(quad_x)>>;
+        const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
+        const size_type grid_x = std::min<size_type>(total, grid_cap);
+        T* shared_tmp = deriv_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
+        CALL_KERNEL((derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, shared_tmp, D,
                      operators, phi, phibar, quad_x, K, T(0), T(0), size_type(a), bc_left, bc_right));
         checkSubmit();
         deriv_pool.mark_submitted(slot, stream);

@@ -74,7 +74,7 @@ namespace mra {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(square_tmp_size<NDIM>(K)*n_nonzero, TempScope);
+        tmp = ttg::Buffer<T, DeviceAllocator<T>>(square_tmp_size<NDIM>(K)*n_nonzero, ttg::scope::Allocate);
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(db, phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp,
                                         node.coeffs().buffer(), result.coeffs().buffer());

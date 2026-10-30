@@ -5,6 +5,7 @@
 #include <ttg.h>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_group.h"
 #include "mra/misc/batch_size.h"
 #include "mra/tensor/tensor.h"
 #include "mra/tensor/functionnode.h"
@@ -32,6 +33,9 @@
  * make_compress(..., false, ...) or make_truncate: only the root holds scaling
  * coefficients, so the inner product is the sum over all nodes of the
  * coefficient dot products.
+ *
+ * Instances passing the same mra::BatchGroup may batch their reduction tasks
+ * together; make_inner and make_matrix_inner cannot share a group.
  */
 
 namespace mra {
@@ -52,7 +56,8 @@ namespace mra {
       Submit&& submit,
       const std::string& name,
       ProcMap procmap,
-      DeviceMap devicemap)
+      DeviceMap devicemap,
+      const BatchGroup& batch_group)
     {
       using node_type = mra::FunctionsCompressedNode<T, NDIM>;
       static constexpr const int num_children = mra::Key<NDIM>::num_children();
@@ -72,8 +77,12 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
       std::shared_ptr<GroupedBatchPoolRegistry<InnerBatchArg<T, NDIM>>> batch_pool;
       if (enable_batching) {
-        batch_pool = std::make_shared<GroupedBatchPoolRegistry<InnerBatchArg<T, NDIM>>>(
-                       ttg::device::num_devices(), max_batch_size);
+        /* shared by every instance of batch_group, whose batches may mix their tasks:
+         * the leader's K and kind of product (Matrix) apply to the whole batch */
+        using registry_t = GroupedBatchPoolRegistry<InnerBatchArg<T, NDIM>>;
+        batch_pool = batch_group.pool<registry_t>([&]{
+          return std::make_shared<registry_t>(ttg::device::num_devices(), max_batch_size);
+        }, K, Matrix);
       }
 #else  // MRA_ENABLE_HOST
       std::nullptr_t batch_pool = nullptr; // never used, only captured
@@ -210,6 +219,7 @@ namespace mra {
       if (enable_batching) {
         reduce_tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
                                      max_batch_size);
+        batch_group.add(reduce_tt);
       }
 #endif // MRA_ENABLE_HOST
 
@@ -235,7 +245,8 @@ namespace mra {
                   ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> result,
                   const std::string& name = "inner",
                   ProcMap procmap = {},
-                  DeviceMap devicemap = {})
+                  DeviceMap devicemap = {},
+                  const BatchGroup& batch_group = {})
   {
     using result_type = mra::DenseTensor<T, 1>;
     auto make_result = [](size_type NA, size_type NB) {
@@ -249,7 +260,7 @@ namespace mra {
       submit_inner_kernel<T, NDIM>(key, a, b, r, children, NA, K, stream);
     };
     return detail::make_inner_product_impl<T, NDIM, false, result_type>(
-      fns, fns, K, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap);
+      fns, fns, K, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap, batch_group);
   }
 
   /**
@@ -267,7 +278,8 @@ namespace mra {
                          ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>> result,
                          const std::string& name = "matrix_inner",
                          ProcMap procmap = {},
-                         DeviceMap devicemap = {})
+                         DeviceMap devicemap = {},
+                         const BatchGroup& batch_group = {})
   {
     using result_type = mra::DenseTensor<T, 2>;
     auto make_result = [](size_type NA, size_type NB) {
@@ -280,7 +292,7 @@ namespace mra {
       submit_matrix_inner_kernel<T, NDIM>(key, a, b, r, children, NA, NB, K, stream);
     };
     return detail::make_inner_product_impl<T, NDIM, true, result_type>(
-      fnsA, fnsB, K, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap);
+      fnsA, fnsB, K, a, b, result, std::move(make_result), std::move(submit), name, procmap, devicemap, batch_group);
   }
 
 } // namespace mra

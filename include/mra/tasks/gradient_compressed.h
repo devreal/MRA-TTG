@@ -352,7 +352,7 @@ namespace mra {
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
         const auto& hg = functiondata.get_hg();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(deriv_tmp + spawn_tmp, TempScope);
+        tmp = ttg::Buffer<T, DeviceAllocator<T>>(deriv_tmp + spawn_tmp, ttg::scope::Allocate);
         /* per axis and function: the nodes the coefficients at the left neighbor, here, and
          * at the right neighbor belong to; an ancestor where the input ended above, and a
          * coarser node (or its ancestor) where a neighbor does not exist */

@@ -14,6 +14,10 @@
 
 #ifndef MRA_ENABLE_HOST
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -25,12 +29,30 @@
                   // hit here from exactly that: "name followed by '::' must be a
                   // class or namespace name" on ttg::device::Stream, because this
                   // header used to be included before whatever transitively provided it).
+#include "ttg/parsec/device.h"  // ttg_parsec::detail::ttg_device_to_parsec_device/first_device_id --
+                                // for translating this pool's plain device id into PaRSEC's own
+                                // device-id space, the same translation Buffer::allocate_on uses.
+#include <parsec/mca/device/device_gpu.h>
+#include <parsec/utils/zone_malloc.h>
 #include "mra/misc/allocator.h"
 #include "mra/misc/platform.h"
 #include "mra/misc/types.h"  // for size_type -- see the ttg.h note above; do not
                              // rely on an includer having pulled this in already
 
 namespace mra::detail {
+
+  /**
+   * zone_malloc against the SAME per-GPU memory pool PaRSEC pre-reserves at
+   * startup and that ttg::Buffer's own device-side allocation already draws
+   * from (see ttg_parsec::Buffer::allocate_on in ttg/parsec/buffer.h) --
+   * `device_id` is this file's usual plain (TTG-space) device id, not
+   * PaRSEC's; translated here exactly as ttg_parsec::Buffer::allocate_on
+   * does.
+   */
+  inline parsec_device_gpu_module_t* parsec_gpu_device(int device_id) {
+    int parsec_id = device_id + ttg_parsec::detail::first_device_id;
+    return (parsec_device_gpu_module_t*)parsec_mca_device_get(parsec_id);
+  }
 
 #if defined(MRA_ENABLE_CUDA)
   inline void check_cuda_rt(cudaError_t err, const char* what) {
@@ -47,6 +69,112 @@ namespace mra::detail {
 #endif
 
   /**
+   * A single device allocation, requested once and never resized: the first
+   * call to ensure() allocates it -- preferring PaRSEC's zone_malloc (the
+   * same per-GPU pool ttg::Buffer's own device-side allocation draws from,
+   * see the comment on parsec_gpu_device above), falling back to a plain
+   * cudaMalloc/hipMalloc if the zone can't satisfy the request right now
+   * (e.g. temporarily exhausted) -- and every later call just returns that
+   * same buffer. A later call asking for MORE than the first one already
+   * provided throws rather than freeing and reallocating: zone_malloc/
+   * zone_free are plain host-side bookkeeping over the device's shared
+   * memory pool, with no awareness of which GPU kernels (on this buffer's
+   * own stream, or anyone else's) might still be running against a freed
+   * range, so handing it straight back to the zone for immediate reuse
+   * elsewhere has none of cudaFree's implicit synchronization safety net --
+   * safe only once nothing could possibly still be using the memory, which
+   * for every current owner (BatchPool::slot_t, GroupedBatchPool::slot_t)
+   * is exactly when this object itself is destroyed (process-lifetime pool
+   * teardown), never mid-run. The destructor frees via whichever allocator
+   * actually provided the memory (zone_free or cudaFree/hipFree), so PaRSEC
+   * isn't left thinking this range is still outstanding. Provides an
+   * implicit conversion to ElemT* so existing call sites that pass this
+   * object directly to a kernel launch or memcpy (expecting a raw pointer)
+   * keep working unchanged.
+   *
+   * grow() is the one exception to "never resized": an owner that can
+   * guarantee no device work still references the region (e.g. a
+   * GroupedBatchPool slot between acquire(), which only hands out a slot
+   * whose previous submission's event has completed, and its next
+   * copy/launch) may reallocate it to a larger size.
+   */
+  template <typename ElemT>
+  class FixedDeviceRegion {
+   public:
+    FixedDeviceRegion() = default;
+    FixedDeviceRegion(const FixedDeviceRegion&) = delete;
+    FixedDeviceRegion& operator=(const FixedDeviceRegion&) = delete;
+
+    ~FixedDeviceRegion() {
+      release();
+    }
+
+    ElemT* get() const { return ptr_; }
+    operator ElemT*() const { return ptr_; }
+    bool empty() const { return ptr_ == nullptr; }
+
+    void ensure(int device_id, std::size_t num_elems) {
+      if (ptr_ == nullptr) {
+        allocate(device_id, num_elems);
+      } else if (num_elems > capacity_) {
+        throw std::runtime_error(
+            "FixedDeviceRegion::ensure: requested size exceeds the fixed capacity allocated "
+            "at first use -- this region is sized once from a known fixed upper bound and "
+            "never regrown (see class comment for why growing it would be unsafe)");
+      }
+    }
+
+    /* Reallocates (discarding the contents) if num_elems exceeds the current
+     * capacity. Only valid while no device work references the region, see
+     * the class comment. */
+    void grow(int device_id, std::size_t num_elems) {
+      if (ptr_ != nullptr && num_elems <= capacity_) return;
+      release();
+      allocate(device_id, num_elems);
+    }
+
+   private:
+    void allocate(int device_id, std::size_t num_elems) {
+      device_id_ = device_id;
+      void* p = zone_malloc(parsec_gpu_device(device_id)->memory, num_elems*sizeof(ElemT));
+      if (p != nullptr) {
+        ptr_ = static_cast<ElemT*>(p);
+        from_zone_ = true;
+      } else {
+        // Zone exhausted right now -- fall back to a plain allocation
+        // rather than failing outright.
+#if defined(MRA_ENABLE_CUDA)
+        check_cuda_rt(cudaMalloc(&ptr_, num_elems*sizeof(ElemT)), "cudaMalloc (zone_malloc fallback)");
+#elif defined(MRA_ENABLE_HIP)
+        check_hip_rt(hipMalloc(&ptr_, num_elems*sizeof(ElemT)), "hipMalloc (zone_malloc fallback)");
+#endif
+        from_zone_ = false;
+      }
+      capacity_ = num_elems;
+    }
+
+    void release() {
+      if (!ptr_) return;
+      if (from_zone_) {
+        zone_free(parsec_gpu_device(device_id_)->memory, ptr_);
+      } else {
+#if defined(MRA_ENABLE_CUDA)
+        cudaFree(ptr_);
+#elif defined(MRA_ENABLE_HIP)
+        hipFree(ptr_);
+#endif
+      }
+      ptr_ = nullptr;
+      capacity_ = 0;
+    }
+
+    ElemT* ptr_ = nullptr;
+    std::size_t capacity_ = 0;
+    int device_id_ = -1;
+    bool from_zone_ = false;
+  };
+
+  /**
    * Per-device pool of pinned host / device arrays of `Arg` used to build ONE
    * batched kernel launch. Memory is per-device, not per-stream: any slot may
    * be reused for any stream submitted on this pool's device. There is no
@@ -61,8 +189,7 @@ namespace mra::detail {
   struct BatchPool {
     struct slot_t {
       std::vector<Arg, DeviceAllocator<Arg>> host_args; // pinned host storage
-      Arg* dev_args = nullptr;
-      std::size_t dev_capacity = 0;
+      FixedDeviceRegion<Arg> dev_args;
 #if defined(MRA_ENABLE_CUDA)
       cudaEvent_t event;
 #elif defined(MRA_ENABLE_HIP)
@@ -91,11 +218,14 @@ namespace mra::detail {
       slot_t& operator=(const slot_t&) = delete;
 
       ~slot_t() {
+        // dev_args frees itself (FixedDeviceRegion's destructor).
 #if defined(MRA_ENABLE_CUDA)
-        if (dev_args) cudaFree(dev_args);
+        // the device regions are freed after this body runs: wait for the last
+        // copy or launch that used them
+        if (event_recorded) cudaEventSynchronize(event);
         cudaEventDestroy(event);
 #elif defined(MRA_ENABLE_HIP)
-        if (dev_args) hipFree(dev_args);
+        if (event_recorded) hipEventSynchronize(event);
         hipEventDestroy(event);
 #endif
       }
@@ -167,21 +297,7 @@ namespace mra::detail {
 #endif
 
     void ensure_capacity(slot_t& s, std::size_t num_members) {
-      if (num_members > s.dev_capacity) {
-        if (s.dev_args) {
-#if defined(MRA_ENABLE_CUDA)
-          check_cuda_rt(cudaFree(s.dev_args), "cudaFree");
-#elif defined(MRA_ENABLE_HIP)
-          check_hip_rt(hipFree(s.dev_args), "hipFree");
-#endif
-        }
-#if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaMalloc(&s.dev_args, num_members*sizeof(Arg)), "cudaMalloc");
-#elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipMalloc(&s.dev_args, num_members*sizeof(Arg)), "hipMalloc");
-#endif
-        s.dev_capacity = num_members;
-      }
+      s.dev_args.ensure(device_id, num_members);
       s.host_args.reserve(num_members);
     }
 
@@ -205,16 +321,40 @@ namespace mra::detail {
 
     BatchPool<Arg>& get(int device_id) {
       auto& e = entries[device_id];
-      std::call_once(e.once, [&]{ e.pool = std::make_unique<BatchPool<Arg>>(device_id); });
-      return *e.pool;
+      BatchPool<Arg>* p = e.pool.load(std::memory_order_acquire);
+      if (p == nullptr) {
+        std::lock_guard<std::mutex> lock(e.mtx);
+        p = e.pool.load(std::memory_order_relaxed);
+        if (p == nullptr) {
+          p = new BatchPool<Arg>(device_id);
+          e.pool.store(p, std::memory_order_release);
+        }
+      }
+      return *p;
+    }
+
+    /**
+     * Frees every device's pool. The pools' device memory comes from PaRSEC's
+     * zone (see FixedDeviceRegion), so a registry that outlives the TTs using
+     * it (a process-wide static, e.g. sparsity_pool_registry()) must release
+     * it before PaRSEC tears its devices down: mra::finalize() runs this via
+     * mra::detail::at_finalize. No task may use the registry concurrently; a
+     * later get() creates the pool anew.
+     */
+    void release() {
+      for (auto& e : entries) {
+        std::lock_guard<std::mutex> lock(e.mtx);
+        delete e.pool.exchange(nullptr, std::memory_order_acq_rel);
+      }
     }
 
     int get_max_batch_size() const { return max_batch_size; }
 
    private:
     struct entry_t {
-      std::once_flag once;
-      std::unique_ptr<BatchPool<Arg>> pool;
+      std::mutex mtx;
+      std::atomic<BatchPool<Arg>*> pool{nullptr};
+      ~entry_t() { delete pool.load(std::memory_order_relaxed); }
     };
     std::vector<entry_t> entries;
     int max_batch_size;
@@ -228,29 +368,25 @@ namespace mra::detail {
    * submission use one acquire()/mark_submitted() pair (one event to record
    * and later query) rather than several.
    *
-   * Two co-allocated device-backed regions: the per-member Arg array and the
-   * (num_members+1)-entry member-offsets array (always size_type). Plus one
-   * host-only pinned staging region, `sparsity` (raw bytes, not
+   * Host side: the per-member Arg array, the (num_members+1)-entry
+   * member-offsets array (always size_type) and a pinned staging region,
+   * `sparsity` (raw bytes, not
    * detail::SparsityState, so this header does not need to know about
    * SparsityState -- defined in mra/tensor/sparsity.h, not included here,
    * see the ttg.h/size_type note at the top of this file for why), used to
    * gather each member's sparsity bytes from its host-side
-   * RangeSparsityBase before they're copied straight to their own final
-   * destination tensors (see submit_grouped_copy's comment) -- no device-side
-   * counterpart of its own anymore, since those destinations already exist
-   * (they're each member's own, separately-allocated tensor buffer).
+   * RangeSparsityBase before they're scattered to their own final
+   * destination tensors.
    *
    * `extra_dsts`/`extra_srcs`/`extra_sizes` name every one of those
    * point-to-point destination copies (rebuilt fresh every launch, unlike
-   * the other regions -- see their own comment on slot_t). All regions --
-   * args, offsets, and every extra copy -- are transferred host->device with
-   * a single call (see submit_grouped_copy below): on CUDA >= 12.8 that is
-   * one cudaMemcpyBatchAsync describing every copy; otherwise (older CUDA
-   * toolkits, or HIP, which has no batched-copy API) it falls back to that
-   * many ordinary async copies issued back-to-back on the same stream --
-   * either way only ONE event is recorded for the whole slot, so the
-   * one-slot/one-event bookkeeping win holds on every platform even where
-   * the copy itself isn't literally batched.
+   * the other regions -- see their own comment on slot_t). submit_grouped_copy
+   * packs args, offsets, a descriptor table of the extra copies and their
+   * source bytes into one pinned buffer (`packed`), transfers it with ONE
+   * async copy into one device region (`dev_packed`), and scatters the extra
+   * copies with one small kernel -- see submit_grouped_copy for why this
+   * replaced cudaMemcpyBatchAsync. Only ONE event is recorded for the whole
+   * slot.
    *
    * Each kernel family gets its own GroupedBatchPoolRegistry<XxxBatchArg<T,NDIM>>
    * (the Arg region's element type differs per family); unlike the old
@@ -266,9 +402,8 @@ namespace mra::detail {
       std::vector<size_type, DeviceAllocator<size_type>> offsets;        // pinned host storage
       // Pinned host staging for each member's per-tensor sparsity bytes,
       // gathered from host-side RangeSparsityBase (via sparsity_to_bytes).
-      // Source-only now -- see submit_grouped_copy's comment: bytes are
-      // copied directly from here to each destination tensor's own device
-      // buffer (no intermediate device-side sparsity buffer anymore).
+      // Source-only: submit_grouped_copy packs these bytes and scatters them
+      // to each destination tensor's own device buffer.
       std::vector<unsigned char, DeviceAllocator<unsigned char>> sparsity;
 
       // Per-launch list of additional point-to-point H2D copies folded into
@@ -278,31 +413,44 @@ namespace mra::detail {
       // args/offsets/sparsity). Typically one entry per member per
       // destination tensor (scattering `sparsity` above into each member's
       // own, separately-allocated sparsity bitfield -- see
-      // submit_grouped_copy's comment for why this replaced a dedicated
-      // scatter kernel), plus, for families that need it (e.g. convolution's
-      // resnorms), entries sourced from a shared zero buffer (see
-      // zero_source_pool_registry) instead of `sparsity`.
+      // submit_grouped_copy), plus, for families that need it (e.g.
+      // convolution's resnorms), zero-fill entries: a nullptr source
+      // zero-fills extra_sizes[k] bytes at extra_dsts[k]. Any non-null
+      // source must be host memory that stays valid until
+      // submit_grouped_copy returns (it is packed into `packed` there).
       std::vector<void*> extra_dsts;
       std::vector<const void*> extra_srcs;
       std::vector<std::size_t> extra_sizes;
 
-#if defined(MRA_ENABLE_CUDA) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
-      // Scratch descriptor arrays for submit_grouped_copy's single
-      // cudaMemcpyBatchAsync call -- cached here instead of being freshly
-      // allocated and destroyed on every submit_grouped_copy call. Like
-      // extra_dsts/extra_srcs/extra_sizes above, these are cleared and
-      // rebuilt every launch (not persisted/grown via ensure_capacity), but
-      // clear() retains the underlying capacity, so steady-state launches
-      // reallocate nothing here either.
-      std::vector<const void*> batch_dsts;
-      std::vector<const void*> batch_srcs;
-      std::vector<std::size_t> batch_sizes;
-#endif
+      // Pinned host staging for submit_grouped_copy's single H2D transfer:
+      // [args | offsets | GroupedCopyDesc table | source bytes]. Only ever
+      // grows (never cleared), so steady-state launches neither reallocate
+      // nor re-zero it.
+      std::vector<unsigned char, DeviceAllocator<unsigned char>> packed;
+      // Device counterpart of `packed`. Grown in submit_grouped_copy while
+      // the slot is checked out -- safe because acquire() only hands out a
+      // slot once its previous submission has completed (see
+      // FixedDeviceRegion::grow).
+      FixedDeviceRegion<unsigned char> dev_packed;
 
+      // Point into dev_packed; set by submit_grouped_copy, so they are only
+      // valid for kernels launched after it.
       Arg* dev_args = nullptr;
       size_type* dev_offsets = nullptr;
-      std::size_t args_capacity = 0;
-      std::size_t offsets_capacity = 0;
+
+      // Persistent, zone_malloc-backed scratch region shared by every launch
+      // of this kernel family on this device -- NOT per-member. Paired with
+      // kernel_grid_cap (platform.h): once the launch grid is capped at
+      // actual device occupancy instead of one block per work item, each
+      // kernel's own per-block scratch only needs occupancy-many slots
+      // (indexed by blockIdx.x inside the kernel), not one per item -- see
+      // e.g. submit_convolution_kernel_batched. Tied to this slot (not a
+      // single pool-wide buffer) so the SAME non-blocking event-based reuse
+      // that already protects dev_args/dev_offsets from two concurrent
+      // launches aliasing the same memory also protects this region: a slot
+      // is never handed out by acquire() until its previous submission's
+      // event has completed.
+      FixedDeviceRegion<unsigned char> dev_scratch;
 
 #if defined(MRA_ENABLE_CUDA)
       cudaEvent_t event;
@@ -325,13 +473,16 @@ namespace mra::detail {
       slot_t& operator=(const slot_t&) = delete;
 
       ~slot_t() {
+        // dev_packed/dev_scratch each free themselves
+        // (FixedDeviceRegion's destructor, via the matching deallocator for
+        // however they were actually allocated).
 #if defined(MRA_ENABLE_CUDA)
-        if (dev_args) cudaFree(dev_args);
-        if (dev_offsets) cudaFree(dev_offsets);
+        // the device regions are freed after this body runs: wait for the last
+        // copy or launch that used them
+        if (event_recorded) cudaEventSynchronize(event);
         cudaEventDestroy(event);
 #elif defined(MRA_ENABLE_HIP)
-        if (dev_args) hipFree(dev_args);
-        if (dev_offsets) hipFree(dev_offsets);
+        if (event_recorded) hipEventSynchronize(event);
         hipEventDestroy(event);
 #endif
       }
@@ -339,17 +490,30 @@ namespace mra::detail {
 
     explicit GroupedBatchPool(int device_id) : device_id(device_id) { }
 
+    // Delegates to FixedDeviceRegion::ensure (see its class comment) for this
+    // slot's shared scratch region. Callers are expected to size num_elems
+    // from kernel_grid_cap (platform.h) -- a fixed bound for a given
+    // kernel/device, independent of any particular launch's batch size -- so
+    // the first call already requests the one size every later call will
+    // also need; exceeding it indicates that assumption broke (e.g. K
+    // changed at runtime). No locking: the slot is already exclusively
+    // checked_out to whoever is calling this (between their own
+    // acquire()/mark_submitted() pair), same as slot.args/slot.offsets being
+    // mutated without extra locking elsewhere.
+    template <typename ElemT>
+    ElemT* ensure_scratch(slot_t& s, std::size_t num_elems) {
+      s.dev_scratch.ensure(device_id, num_elems * sizeof(ElemT));
+      return reinterpret_cast<ElemT*>(s.dev_scratch.get());
+    }
+
     GroupedBatchPool(const GroupedBatchPool&) = delete;
     GroupedBatchPool& operator=(const GroupedBatchPool&) = delete;
 
     /* Never blocks -- same reuse policy as BatchPool::acquire (one non-
-     * blocking event query covering both regions at once). Each region is
-     * grown independently (only if its own requested capacity exceeds what
-     * is already allocated), so growing one region never reallocates the
-     * other. num_sparsity only resizes the pinned host staging vector (no
-     * device-side counterpart anymore -- see slot_t's comment); extra_dsts/
-     * extra_srcs/extra_sizes are rebuilt fresh every launch by the caller,
-     * not sized here. */
+     * blocking event query covering every region at once). Only reserves the
+     * host-side vectors; the device region is sized by submit_grouped_copy
+     * from what a launch actually packs. extra_dsts/extra_srcs/extra_sizes
+     * are rebuilt fresh every launch by the caller, not sized here. */
     slot_t& acquire(std::size_t num_args, std::size_t num_offsets, std::size_t num_sparsity) {
       std::lock_guard<std::mutex> lock(mtx);
       for (auto& sp : slots) {
@@ -401,27 +565,7 @@ namespace mra::detail {
     }
 #endif
 
-    template <typename ElemT>
-    static void grow(ElemT*& dev_ptr, std::size_t& capacity, std::size_t num_elems) {
-      if (num_elems <= capacity) return;
-      if (dev_ptr) {
-#if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaFree(dev_ptr), "cudaFree");
-#elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipFree(dev_ptr), "hipFree");
-#endif
-      }
-#if defined(MRA_ENABLE_CUDA)
-      check_cuda_rt(cudaMalloc(&dev_ptr, num_elems*sizeof(ElemT)), "cudaMalloc");
-#elif defined(MRA_ENABLE_HIP)
-      check_hip_rt(hipMalloc(&dev_ptr, num_elems*sizeof(ElemT)), "hipMalloc");
-#endif
-      capacity = num_elems;
-    }
-
     void ensure_capacity(slot_t& s, std::size_t num_args, std::size_t num_offsets, std::size_t num_sparsity) {
-      grow(s.dev_args, s.args_capacity, num_args);
-      grow(s.dev_offsets, s.offsets_capacity, num_offsets);
       s.args.reserve(num_args);
       s.offsets.reserve(num_offsets);
       s.sparsity.reserve(num_sparsity);
@@ -460,173 +604,150 @@ namespace mra::detail {
   };
 
   /**
-   * Lazily allocates, per device, a persistent pinned host buffer of zero
-   * bytes -- a reusable memcpy SOURCE for zero-initializing arbitrary device
-   * destinations from within a single batched submit_grouped_copy call (e.g.
-   * convolution's resnorms_view, for positions its compute kernel won't
-   * visit). The same source pointer can be reused across many different
-   * destination entries in one cudaMemcpyBatchAsync call -- there is no rule
-   * against repeating a source -- so ONE allocation, grown (and re-zeroed)
-   * only when a caller asks for more bytes than it currently holds, suffices
-   * regardless of how many destinations end up using it. Indexed per device
-   * purely for consistency with BatchPoolRegistry/GroupedBatchPoolRegistry
-   * above; the content itself (all zero) doesn't actually vary by device.
+   * One extra copy of a GroupedBatchPool slot, as packed by
+   * submit_grouped_copy: `size` bytes from offset `src_offset` of the packed
+   * source bytes to `dst`, or a zero-fill of `size` bytes at `dst` if
+   * src_offset == zero_fill.
    */
-  struct ZeroSourcePool {
-    const void* get(std::size_t num_bytes) {
-      std::lock_guard<std::mutex> lock(mtx);
-      if (num_bytes > buf.size()) {
-        buf.assign(num_bytes, static_cast<unsigned char>(0));
+  struct GroupedCopyDesc {
+    static constexpr std::uint32_t zero_fill = ~std::uint32_t(0);
+    void* dst;
+    std::uint32_t src_offset;
+    std::uint32_t size;
+  };
+
+#if defined(__CUDACC__) || defined(__HIP__)
+  /* One warp per descriptor, grid-stride over descriptors. A template only
+   * so that every translation unit including this header may define it. */
+  template <typename DescT>
+  __global__ void grouped_copy_scatter_kernel(const DescT* __restrict__ descs, std::uint32_t num_descs,
+                                              const unsigned char* __restrict__ src)
+  {
+    const unsigned lane = threadIdx.x % warpSize;
+    const unsigned warps_per_block = blockDim.x / warpSize;
+    const unsigned num_warps = gridDim.x * warps_per_block;
+    for (unsigned d = blockIdx.x * warps_per_block + threadIdx.x / warpSize; d < num_descs; d += num_warps) {
+      const DescT desc = descs[d];
+      unsigned char* dst = static_cast<unsigned char*>(desc.dst);
+      if (desc.src_offset == DescT::zero_fill) {
+        for (std::uint32_t i = lane; i < desc.size; i += warpSize) dst[i] = 0;
+      } else {
+        const unsigned char* s = src + desc.src_offset;
+        for (std::uint32_t i = lane; i < desc.size; i += warpSize) dst[i] = s[i];
       }
-      return buf.data();
     }
-
-   private:
-    std::mutex mtx;
-    std::vector<unsigned char, DeviceAllocator<unsigned char>> buf; // pinned host storage, always zero
-  };
-
-  struct ZeroSourcePoolRegistry {
-    explicit ZeroSourcePoolRegistry(int num_devices) : entries(num_devices) { }
-
-    ZeroSourcePool& get(int device_id) {
-      auto& e = entries[device_id];
-      std::call_once(e.once, [&]{ e.pool = std::make_unique<ZeroSourcePool>(); });
-      return *e.pool;
-    }
-
-   private:
-    struct entry_t {
-      std::once_flag once;
-      std::unique_ptr<ZeroSourcePool> pool;
-    };
-    std::vector<entry_t> entries;
-  };
-
-  inline ZeroSourcePoolRegistry& zero_source_pool_registry() {
-    static ZeroSourcePoolRegistry registry(ttg::device::num_devices());
-    return registry;
   }
+#endif // __CUDACC__ || __HIP__
 
   /**
    * Issues the host->device transfer for a GroupedBatchPool slot's args and
-   * offsets regions, PLUS every point-to-point copy queued in
-   * slot.extra_dsts/extra_srcs/extra_sizes, as ONE call. num_args/
-   * num_offsets are the LOGICAL (used) sizes for this launch, which may be
-   * smaller than the slot's allocated capacity (see
-   * GroupedBatchPool::ensure_capacity).
+   * offsets, PLUS every point-to-point copy queued in
+   * slot.extra_dsts/extra_srcs/extra_sizes, and points slot.dev_args/
+   * slot.dev_offsets at the transferred arrays. num_args/num_offsets are the
+   * LOGICAL (used) sizes for this launch.
    *
-   * The "extra" copies are what used to require a dedicated scatter kernel
-   * per kernel family (compress_scatter_sparsity_kernel,
-   * reconstruct_scatter_sparsity_kernel, convolution_scatter_sparsity_kernel):
-   * each one copies straight from a slice of slot.sparsity (this batch's
+   * The extra copies typically take slices of slot.sparsity (this batch's
    * pinned, host-side-aggregated sparsity bytes for one member's one
-   * destination tensor) DIRECTLY to that tensor's own device buffer --
+   * destination tensor) to that tensor's own device buffer --
    * slot.extra_dsts[k] is the destination tensor's buffer().device_ptr_on(device),
    * which coincides exactly with where its inline sparsity bitfield starts
-   * (byte offset 0 -- see SparseArrayBase's layout), so no on-device
-   * scatter/set_state loop is needed at all. A family with an additional
-   * duty (e.g. convolution zero-filling resnorms_view for positions its
-   * compute kernel won't visit) can queue more entries sourced from
-   * zero_source_pool_registry instead of slot.sparsity -- same mechanism,
-   * no extra kernel either way.
+   * (byte offset 0 -- see SparseArrayBase's layout). A nullptr source
+   * zero-fills the destination instead (e.g. convolution's resnorms_view).
    *
-   * On CUDA 12.8+, this is a single cudaMemcpyBatchAsync call describing all
-   * `2 + slot.extra_dsts.size()` copies (one shared cudaMemcpyAttributes
-   * entry, since all of them are plain pinned-host -> device copies with the
-   * same access-order/location semantics as an ordinary cudaMemcpyAsync). The
-   * three descriptor arrays this call needs (dsts/srcs/sizes) live in the
-   * slot itself (slot.batch_dsts/batch_srcs/batch_sizes) rather than being
-   * allocated fresh here on every call -- only checked_out by one caller at a
-   * time, same as every other slot_t field, so reusing them across launches
-   * is safe without extra locking.
+   * Everything is packed on the host into slot.packed as
+   * [args | offsets | GroupedCopyDesc table | source bytes], transferred with
+   * ONE async copy into slot.dev_packed, and the extra copies are then done
+   * by grouped_copy_scatter_kernel on the same stream, so kernels launched
+   * afterwards see them complete. slot.sparsity is packed with a single
+   * memcpy; any other source is appended individually.
    *
-   * On older CUDA toolkits, or on HIP (no batched-copy API exists there), this
-   * falls back to that many ordinary async copies on the same stream; the
-   * caller still only records one event for the slot afterwards (see
-   * GroupedBatchPool::mark_submitted), so the slot/event count stays at one
-   * regardless of which path is taken.
-   *
-   * cudaMemcpyBatchAsync's signature is NOT stable across toolkits:
-   * CUDA 12.8-12.x takes a trailing `size_t* failIdx` output parameter;
-   * CUDA 13.0+ dropped it (and tightened dsts/srcs/sizes to const*). Both
-   * versions number CUDART_VERSION as major*1000+minor*10+patch (12.8 ->
-   * 12080, 13.0 -> 13000), so a single "CUDART_VERSION >= 12080" guard
-   * would (wrongly) take the old 9-argument path on CUDA 13, where it fails
-   * to compile ("too many arguments"). Band the check on 13000 to pick the
-   * right call shape per toolkit.
+   * This used to be one cudaMemcpyBatchAsync describing every copy, but
+   * that call's host-side cost grows by ~0.7us per copy (~200us for a
+   * 138-member batch with two copies each, on an A100/EPYC node), which the
+   * calling thread cannot overlap with anything. Packing costs ~6us
+   * regardless of batch size, at the price of one extra small kernel on the
+   * device.
    */
   template <typename Arg>
   void submit_grouped_copy(typename GroupedBatchPool<Arg>::slot_t& slot,
                             std::size_t num_args, std::size_t num_offsets,
                             int device_id, ttg::device::Stream stream)
   {
+#if defined(__CUDACC__) || defined(__HIP__)
+    auto align_up = [](std::size_t n) { return (n + 15) & ~std::size_t(15); };
     const std::size_t num_extra = slot.extra_dsts.size();
-#if defined(MRA_ENABLE_CUDA) && defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
-    // Cached in the slot (see slot_t's own comment) instead of being
-    // allocated fresh on every call -- clear() keeps the vectors' capacity,
-    // so reserve() below is a no-op once a slot has warmed up.
-    auto& dsts = slot.batch_dsts;
-    auto& srcs = slot.batch_srcs;
-    auto& sizes = slot.batch_sizes;
-    dsts.clear();
-    srcs.clear();
-    sizes.clear();
-    dsts.reserve(2 + num_extra);
-    srcs.reserve(2 + num_extra);
-    sizes.reserve(2 + num_extra);
-    // cudaMemcpyBatchAsync rejects zero-sized entries with
-    // cudaErrorInvalidValue (unlike cudaMemcpyAsync, for which they are a
-    // no-op), and extra copies for a member with no functions are exactly
-    // that -- so drop them here.
-    auto add_copy = [&](const void* dst, const void* src, std::size_t size) {
-      if (size == 0) return;
-      dsts.push_back(dst);
-      srcs.push_back(src);
-      sizes.push_back(size);
-    };
-    add_copy(slot.dev_args, slot.args.data(), num_args*sizeof(Arg));
-    add_copy(slot.dev_offsets, slot.offsets.data(), num_offsets*sizeof(size_type));
+    const unsigned char* sparsity_begin = slot.sparsity.data();
+    const unsigned char* sparsity_end = sparsity_begin + slot.sparsity.size();
+
+    // Sources outside slot.sparsity are appended after it.
+    std::size_t num_descs = 0;
+    std::size_t num_src_bytes = slot.sparsity.size();
     for (std::size_t k = 0; k < num_extra; ++k) {
-      add_copy(slot.extra_dsts[k], slot.extra_srcs[k], slot.extra_sizes[k]);
+      if (slot.extra_sizes[k] == 0) continue;
+      ++num_descs;
+      auto src = static_cast<const unsigned char*>(slot.extra_srcs[k]);
+      if (src != nullptr && !(src >= sparsity_begin && src + slot.extra_sizes[k] <= sparsity_end)) {
+        num_src_bytes += slot.extra_sizes[k];
+      }
     }
-    const std::size_t total = dsts.size();
+
+    const std::size_t args_bytes = num_args*sizeof(Arg);
+    const std::size_t offsets_off = align_up(args_bytes);
+    const std::size_t descs_off = align_up(offsets_off + num_offsets*sizeof(size_type));
+    const std::size_t src_off = descs_off + num_descs*sizeof(GroupedCopyDesc);
+    const std::size_t total = src_off + num_src_bytes;
+    if (num_src_bytes > GroupedCopyDesc::zero_fill) {
+      throw std::runtime_error("submit_grouped_copy: source bytes exceed 32-bit descriptor offsets");
+    }
+
+    if (slot.packed.size() < total) slot.packed.resize(total + total/4);
+    slot.dev_packed.grow(device_id, slot.packed.size());
+
+    unsigned char* h = slot.packed.data();
+    std::memcpy(h, slot.args.data(), args_bytes);
+    std::memcpy(h + offsets_off, slot.offsets.data(), num_offsets*sizeof(size_type));
+    std::memcpy(h + src_off, sparsity_begin, slot.sparsity.size());
+    auto descs = reinterpret_cast<GroupedCopyDesc*>(h + descs_off);
+    std::size_t d = 0;
+    std::size_t appended = slot.sparsity.size();
+    for (std::size_t k = 0; k < num_extra; ++k) {
+      const std::size_t size = slot.extra_sizes[k];
+      if (size == 0) continue;
+      auto src = static_cast<const unsigned char*>(slot.extra_srcs[k]);
+      std::uint32_t offset;
+      if (src == nullptr) {
+        offset = GroupedCopyDesc::zero_fill;
+      } else if (src >= sparsity_begin && src + size <= sparsity_end) {
+        offset = static_cast<std::uint32_t>(src - sparsity_begin);
+      } else {
+        std::memcpy(h + src_off + appended, src, size);
+        offset = static_cast<std::uint32_t>(appended);
+        appended += size;
+      }
+      descs[d++] = GroupedCopyDesc{slot.extra_dsts[k], offset, static_cast<std::uint32_t>(size)};
+    }
+
+    unsigned char* dev = slot.dev_packed.get();
+    slot.dev_args = reinterpret_cast<Arg*>(dev);
+    slot.dev_offsets = reinterpret_cast<size_type*>(dev + offsets_off);
     if (total == 0) return;
-    cudaMemcpyAttributes attrs{};
-    attrs.srcAccessOrder = cudaMemcpySrcAccessOrderAny;
-    attrs.srcLocHint = cudaMemLocation{cudaMemLocationTypeHost, 0};
-    attrs.dstLocHint = cudaMemLocation{cudaMemLocationTypeDevice, device_id};
-    attrs.flags = cudaMemcpyHostToDevice;
-    std::size_t attrsIdxs[1] = { 0 }; // one attribute set applies to all entries
-#if CUDART_VERSION >= 13000
-    check_cuda_rt(cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), total, &attrs, attrsIdxs, 1, stream),
-                  "cudaMemcpyBatchAsync");
-#else
-    std::size_t failIdx = 0;
-    check_cuda_rt(cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), total, &attrs, attrsIdxs, 1, &failIdx, stream),
-                  "cudaMemcpyBatchAsync");
-#endif
-#elif defined(MRA_ENABLE_CUDA)
-    // Toolkit predates cudaMemcpyBatchAsync (added in CUDA 12.8).
-    check_cuda_rt(cudaMemcpyAsync(slot.dev_args, slot.args.data(), num_args*sizeof(Arg),
-                                  cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
-    check_cuda_rt(cudaMemcpyAsync(slot.dev_offsets, slot.offsets.data(), num_offsets*sizeof(size_type),
-                                  cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
-    for (std::size_t k = 0; k < num_extra; ++k) {
-      check_cuda_rt(cudaMemcpyAsync(slot.extra_dsts[k], slot.extra_srcs[k], slot.extra_sizes[k],
-                                    cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
-    }
+#if defined(MRA_ENABLE_CUDA)
+    check_cuda_rt(cudaMemcpyAsync(dev, h, total, cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
 #elif defined(MRA_ENABLE_HIP)
-    // No HIP equivalent of cudaMemcpyBatchAsync exists yet.
-    check_hip_rt(hipMemcpyAsync(slot.dev_args, slot.args.data(), num_args*sizeof(Arg),
-                                hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
-    check_hip_rt(hipMemcpyAsync(slot.dev_offsets, slot.offsets.data(), num_offsets*sizeof(size_type),
-                                hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
-    for (std::size_t k = 0; k < num_extra; ++k) {
-      check_hip_rt(hipMemcpyAsync(slot.extra_dsts[k], slot.extra_srcs[k], slot.extra_sizes[k],
-                                  hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
-    }
+    check_hip_rt(hipMemcpyAsync(dev, h, total, hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
 #endif
+    if (num_descs > 0) {
+      // The kernel uses the device's actual warpSize; 32 only sizes the grid.
+      constexpr unsigned threads = 128;
+      constexpr unsigned warps_per_block = threads / 32;
+      const unsigned blocks = static_cast<unsigned>(std::min<std::size_t>((num_descs + warps_per_block - 1) / warps_per_block, 256));
+      CALL_KERNEL(grouped_copy_scatter_kernel<GroupedCopyDesc>, blocks, threads, 0, stream,
+                  (reinterpret_cast<const GroupedCopyDesc*>(dev + descs_off),
+                   static_cast<std::uint32_t>(num_descs), dev + src_off));
+    }
+#else
+    static_assert(sizeof(Arg) == 0, "submit_grouped_copy must be instantiated in a CUDA/HIP translation unit");
+#endif // __CUDACC__ || __HIP__
   }
 
   /**

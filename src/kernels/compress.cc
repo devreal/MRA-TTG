@@ -19,6 +19,7 @@ namespace mra {
     double* tmp,
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
+    const SparseTensorView<const double, 3+1>& ns_view,
     const double* child_kept,
     double trunc_tol,
     ttg::device::Stream stream);

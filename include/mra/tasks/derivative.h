@@ -317,7 +317,13 @@ namespace mra {
         const auto& phibar = functiondata.get_phibar();
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(derivative_tmp_size<NDIM>(K)*n_nonzero, TempScope);
+        /* batched, the scratch is the batch slot's, see submit_derivative_batch_leader */
+#ifndef MRA_ENABLE_HOST
+        const std::size_t tmp_size = enable_batching ? 0 : derivative_tmp_size<NDIM>(K)*n_nonzero;
+#else
+        const std::size_t tmp_size = derivative_tmp_size<NDIM>(K)*n_nonzero;
+#endif
+        if (tmp_size > 0) tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, ttg::scope::Allocate);
         /* per function, the nodes the coefficients at the left neighbor, here, and at the
          * right neighbor belong to; the kernel projects them to the neighbors and to this
          * node. The kernel takes them from the own node, else from the inherited node. */
@@ -335,7 +341,8 @@ namespace mra {
         }
 #ifndef MRA_ENABLE_HOST
         auto inputs = ttg::device::Input(db, result.coeffs().buffer(), operators.buffer(), phibar.buffer(),
-                                         phi.buffer(), quad_x.buffer(), tmp, src_keys);
+                                         phi.buffer(), quad_x.buffer(), src_keys);
+        if (tmp_size > 0) inputs.add(tmp);
         /* siblings share their inherited node, so one may be passed more than once */
         std::array<const void*, 6> added{};
         std::size_t n_added = 0;
@@ -354,13 +361,12 @@ namespace mra {
         auto center_view = center_own.coeffs().current_view(), center_inh_view = center_inh.coeffs().current_view();
         auto right_view = right_own.coeffs().current_view(), right_inh_view = right_inh.coeffs().current_view();
         const key_type* src_keys_ptr = src_keys.current_device_ptr();
-        T* tmp_ptr = tmp.current_device_ptr();
 #ifndef MRA_ENABLE_HOST
         if (enable_batching) {
           /* the result's sparsity is pushed by the leader along with the batch */
           auto batch = co_await ttg::device::coop<key_type>(key, src_keys_ptr, left_view, left_inh_view,
                                                             center_view, center_inh_view, right_view, right_inh_view,
-                                                            result_view, tmp_ptr, N, result.coeffs(), n_nonzero);
+                                                            result_view, N, result.coeffs(), n_nonzero);
           detail::submit_derivative_batch_leader<T, NDIM>(batch, *batch_pool, D, operators.current_view(),
                                                           phi.current_view(), phibar.current_view(),
                                                           quad_x.current_view(), K, T(0), T(0), axis,
@@ -374,7 +380,7 @@ namespace mra {
           submit_derivative_kernel(D, key, src_keys_ptr, left_view, left_inh_view, center_view, center_inh_view,
                                    right_view, right_inh_view, operators.current_view(), result_view,
                                    phi.current_view(), phibar.current_view(), quad_x.current_view(),
-                                   tmp_ptr, N, n_nonzero, K, T(0), T(0), axis,
+                                   tmp.current_device_ptr(), N, n_nonzero, K, T(0), T(0), axis,
                                    FunctionData<T, NDIM>::BC_FREE, FunctionData<T, NDIM>::BC_FREE,
                                    ttg::device::current_stream());
         }

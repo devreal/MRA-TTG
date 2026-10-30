@@ -29,7 +29,13 @@ namespace mra{
   SCOPE size_type convolution_tmp_size(size_type K) {
     size_type K2NDIM = std::pow(K, NDIM);
     size_type TWOK2NDIM = std::pow(2*K, NDIM);
-    return 3*TWOK2NDIM + 2*K2NDIM; // resultc, result, f, work1, work2
+    // f0, resultc: K-sized. work1, work2, staged_in: 2K-sized. staged_in
+    // holds a copy of this function's "in" (the running sum so far), taken
+    // before any write into `result` -- which, when accumulate_tt reuses its
+    // input node's own storage as the output (see its comment), aliases the
+    // very same memory `in` reads from. See convolution_process_one's
+    // staged_in comment for why the copy has to happen there.
+    return 4*TWOK2NDIM + 2*K2NDIM; // f0, resultc, work1, work2, staged_in
   }
 
   namespace detail {
@@ -370,7 +376,7 @@ namespace mra{
      * straight to the variadic-Dims constructor.
      */
     template<typename T, Dimension NDIM, typename KT, typename TwoKT, typename InViewT, typename FViewT, typename ResultViewT,
-             typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename FT, typename InT, typename ResultT>
+             typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename StagedInT, typename FT, typename InT, typename ResultT>
     DEVSCOPE void convolution_process_one_leader(
       const InViewT& in_view,
       const FViewT& f_view,
@@ -380,30 +386,29 @@ namespace mra{
       TwoKT TWOK,
       size_type N,
       size_type tmp_pos,
+      size_type tmp_slot,
       F0T& f0,
       ResultcT& resultc,
       Work1T& work1,
       Work2T& work2,
+      StagedInT& staged_in,
       FT& f,
       InT& in,
       ResultT& result,
+      size_type fnid,
       size_type& i)
     {
-      // result_view has exactly n_nonzero non-zero entries, so this
-      // always finds a valid function id -- see submit_convolution_kernel.
-      // Excluded (zero) functions' resnorms entries are pre-filled with
-      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
-      // them here.
-      i = find_nth_allocated(N, tmp_pos, result_view);
+      i = fnid;
 
       const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
       const size_type TWOK2NDIM = mra::pow(TWOK, Int<NDIM>{});
-      T* block_tmp_ptr = &tmp[tmp_pos*convolution_tmp_size<NDIM>(K)];
+      T* block_tmp_ptr = &tmp[tmp_slot*convolution_tmp_size<NDIM>(K)];
       // construct temporaries and pass them to conv_transform
       f0        = F0T(&block_tmp_ptr[                      0], detail::broadcast_dims<typename F0T::dims_type>(K, std::make_index_sequence<NDIM>{}));
       resultc   = ResultcT(&block_tmp_ptr[                 K2NDIM], detail::broadcast_dims<typename ResultcT::dims_type>(K, std::make_index_sequence<NDIM>{}));
       work1     = Work1T(&block_tmp_ptr[              2*K2NDIM], detail::broadcast_dims<typename Work1T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
       work2     = Work2T(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename Work2T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      staged_in = StagedInT(&block_tmp_ptr[2*TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename StagedInT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
       in        = make_ct_tensorview_from(in_view(i), TWOK);
       f         = make_ct_tensorview_from(f_view(i), TWOK);
       result    = make_ct_tensorview_from(result_view(i), TWOK);
@@ -440,7 +445,8 @@ namespace mra{
       ResnormsT& resnorms,
       T* tmp,
       size_type N,
-      size_type tmp_pos)
+      size_type tmp_pos,
+      size_type tmp_slot)
     {
       auto TWOK = Int<2>{}*K;
       using dims_k_type = decltype(make_dims<NDIM>(K));
@@ -449,13 +455,26 @@ namespace mra{
       using tensor_view_2k_type = DenseTensorView<T, NDIM, dims_2k_type>;
       using const_tensor_view_2k_type = DenseTensorView<const T, NDIM, dims_2k_type>;
       SHARED tensor_view_k_type f0, resultc;
-      SHARED tensor_view_2k_type work1, work2, result;
+      SHARED tensor_view_2k_type work1, work2, result, staged_in;
       SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
 
+      // The function id of this position, searched for by the first warp.
+      // result_view has exactly n_nonzero non-zero entries, so this
+      // always finds a valid function id -- see submit_convolution_kernel.
+      // Excluded (zero) functions' resnorms entries are pre-filled with
+      // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
+      // them here.
+      size_type fnid = N;
+#ifdef HAVE_DEVICE_ARCH
+      if (thread_id() < MRA_WARP_SIZE)
+#endif
+      {
+        fnid = find_nth_allocated_warp(N, tmp_pos, result_view);
+      }
       if (is_team_lead()) {
-        convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos,
-                                                f0, resultc, work1, work2, f, in, result, i);
+        convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos, tmp_slot,
+                                                f0, resultc, work1, work2, staged_in, f, in, result, fnid, i);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -470,10 +489,20 @@ namespace mra{
         return i;
       }
 
+      // Snapshot `in` into tmp-backed storage before anything below writes to
+      // `result` -- result_view/out may be the SAME underlying storage as
+      // in_view when accumulate_tt reuses its input node in place as the
+      // output (see its comment in mra/tasks/convolution.h), and apply_conv/
+      // convolution_kernel_impl's cheap-skip path both zero `result`
+      // unconditionally before the final combination with `in` -- which would
+      // otherwise read back zeros (or worse, the half-written new value)
+      // instead of the original running sum.
+      staged_in = in;
+
       int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0; // TODO: this is a bit hacky, can we do better?
 
       convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
-                                       transr, transs, opnorms_view, at, in, f, f0,
+                                       transr, transs, opnorms_view, at, staged_in, f, f0,
                                        resultc, result, work1, work2,
                                        resnorms.empty() ? nullptr : &resnorms[i]);
       return i;
@@ -553,7 +582,7 @@ namespace mra{
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         size_type i = convolution_process_one<T, NDIM>(key, displacement, K, fac, tol, transr, transs, opnorms_view, at,
-                                                        in_view, f_view, result_view, resnorms, tmp, N, pos);
+                                                        in_view, f_view, result_view, resnorms, tmp, N, pos, pos);
         // result_view's bitfield was populated optimistically (from the
         // structural union of the inputs' sparsity, via SparsityManager)
         // before this position's real value was known -- demote it now that
@@ -683,7 +712,10 @@ namespace mra{
       SparseTensorView<T, NDIM+1>,             // f_view
       SparseTensorView<T, NDIM+1>,             // result_view
       DenseTensorView<T, 1>,                   // resnorms_view
-      T*,                                      // tmp
+      // No per-member tmp field anymore: every member's scratch comes out of
+      // one shared, occupancy-sized pool instead (see GroupedBatchPool::
+      // ensure_scratch / submit_convolution_kernel_batched), indexed by
+      // blockIdx.x rather than this member's own local position.
       size_type,                               // n: number of blocks (functions) this member contributes
       std::array<DenseTensorView<const T, 4>, NDIM>, // transr (this member's own operator data)
       std::array<DenseTensorView<const T, 4>, NDIM>, // transs
@@ -703,13 +735,12 @@ namespace mra{
       static constexpr std::size_t f_view          = 1;
       static constexpr std::size_t result_view     = 2;
       static constexpr std::size_t resnorms_view   = 3;
-      static constexpr std::size_t tmp             = 4;
-      static constexpr std::size_t n               = 5;
-      static constexpr std::size_t transr          = 6;
-      static constexpr std::size_t transs          = 7;
-      static constexpr std::size_t opnorms         = 8;
-      static constexpr std::size_t tol             = 9;
-      static constexpr std::size_t at              = 10;
+      static constexpr std::size_t n               = 4;
+      static constexpr std::size_t transr          = 5;
+      static constexpr std::size_t transs          = 6;
+      static constexpr std::size_t opnorms         = 7;
+      static constexpr std::size_t tol             = 8;
+      static constexpr std::size_t at              = 9;
     };
 
     /**
@@ -735,6 +766,9 @@ namespace mra{
       const size_type* member_offsets,        // device ptr, size == num_members+1
       size_type num_members,
       size_type total_nonzero,
+      T* shared_tmp,                          // one shared, occupancy-sized scratch pool for
+                                               // the whole launch -- indexed by blockIdx.x, not
+                                               // per-member (see GroupedBatchPool::ensure_scratch)
       auto K,
       const T fac)
     {
@@ -757,7 +791,7 @@ namespace mra{
                                          std::get<idx::opnorms>(arg), std::get<idx::at>(arg),
                                          std::get<idx::in_view>(arg), std::get<idx::f_view>(arg),
                                          result_view, resnorms_view,
-                                         std::get<idx::tmp>(arg), member_N, local_pos);
+                                         shared_tmp, member_N, local_pos, blockIdx.x);
         // See convolution_kernel's comment: demote this member's result_view
         // state for i now that resnorms_view[i] is known -- same inline
         // check as the unbatched path, replacing the old, separately
@@ -781,8 +815,7 @@ namespace mra{
      * submit_convolution_kernel_batched -- unlike reconstruct's batched
      * check, this one must run after that transfer, since result_view's own
      * device bitfield (what's being checked here) is exactly what it just
-     * wrote (see submit_grouped_copy's comment for why no scatter kernel is
-     * needed for that anymore).
+     * scattered (see submit_grouped_copy).
      */
     template <typename T, Dimension NDIM>
     GLOBALSCOPE void convolution_verify_sparsity_kernel(
@@ -846,8 +879,7 @@ namespace mra{
 
     // Single combined H2D transfer for args/offsets, plus every member's
     // sparsity-scatter and resnorms-zero destination copy -- see
-    // submit_grouped_copy's comment for the CUDA-batched-memcpy vs. fallback
-    // split, and for why no separate scatter kernel is needed anymore.
+    // submit_grouped_copy.
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
 #if defined(MRA_CHECK_NORMS)
@@ -875,16 +907,22 @@ namespace mra{
     // to be exactly zero happens inline inside convolution_kernel_batched
     // itself (see convolution_process_one's comment) -- no separate
     // post-launch prune kernel needed.
+    // Scratch is sized from grid_cap -- a fixed bound for this kernel/device,
+    // independent of total_nonzero -- not from grid_x, so ensure_scratch's
+    // first allocation already covers every later launch and never needs to
+    // grow (see its comment for why growing it would be unsafe).
     if (K == 8) {
-      size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>, threads, smem_size));
+      size_type grid_cap = detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, mra::Int<8>>, threads, smem_size);
+      size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * convolution_tmp_size<NDIM>(K));
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, Int<8>{}, fac));
+                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, Int<8>{}, fac));
     } else {
-      size_type grid_x = std::min<size_type>(total_nonzero,
-          detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, size_type>, threads, smem_size));
+      size_type grid_cap = detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, size_type>, threads, smem_size);
+      size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * convolution_tmp_size<NDIM>(K));
       CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, fac));
+                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, K, fac));
     }
     checkSubmit();
 
@@ -913,17 +951,16 @@ namespace mra{
      * sparsitymanager.h), and queue a direct copy from that staged slice
      * straight to `m_out`'s own device buffer -- which is exactly where its
      * inline sparsity bitfield starts (see submit_grouped_copy's comment) --
-     * as one of slot.extra_dsts/extra_srcs/extra_sizes' entries. No scatter
-     * kernel needed: submit_convolution_kernel_batched's single
-     * submit_grouped_copy call carries this straight to its final
-     * destination alongside slot.args/slot.offsets.
+     * as one of slot.extra_dsts/extra_srcs/extra_sizes' entries, which
+     * submit_convolution_kernel_batched's single submit_grouped_copy call
+     * scatters to its final destination before the compute kernel runs.
      *
      * resnorms: each member also now passes its own `resnorms` Tensor
      * (get<12>(), the real Tensor -- separate from resnorms_view, get<3>(),
      * which is what the compute kernel itself uses) through coop(), purely
-     * so this leader can queue a second extra-copy entry per member: from a
-     * shared, persistent, pre-zeroed pinned buffer (zero_source_pool_registry)
-     * to `m_resnorms`'s own device buffer, zero-filling positions
+     * so this leader can queue a second extra-copy entry per member: a
+     * zero-fill (nullptr source) of `m_resnorms`'s own device buffer,
+     * covering positions
      * convolution_process_one won't visit for this member (mirroring
      * convolution_kernel's unbatched tail pass -- see its comment). Skipped
      * for a non-last-key accumulate_tt member, which passes an empty
@@ -959,7 +996,6 @@ namespace mra{
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();
       auto& pool = registry.get(device);
-      auto& zero_pool = zero_source_pool_registry().get(device);
 
       // Args/offsets regions sized to a fixed upper bound (max_batch_size,
       // +1 for offsets), and the sparsity staging region to max_batch_size *
@@ -995,15 +1031,18 @@ namespace mra{
         auto& m_f             = batch[m].template get<1>();
         auto& m_result        = batch[m].template get<2>();
         auto& m_resnorms      = batch[m].template get<3>();
-        auto& m_tmp           = batch[m].template get<4>();
-        auto& m_transr        = batch[m].template get<5>();
-        auto& m_transs        = batch[m].template get<6>();
-        auto& m_opnorms       = batch[m].template get<7>();
-        auto& m_tol           = batch[m].template get<8>();
-        auto& m_at            = batch[m].template get<9>();
-        auto& m_out           = batch[m].template get<10>(); // real out tensor: sparsity source AND this member's scatter destination
-        const size_type m_n_nonzero = batch[m].template get<11>();
-        auto& m_resnorms_tensor = batch[m].template get<12>(); // real resnorms tensor: this member's zero-fill destination
+        // No per-member tmp extraction anymore -- see ConvolutionBatchArg's
+        // comment: every member's scratch now comes from one shared,
+        // occupancy-sized pool instead (ensure_scratch in
+        // submit_convolution_kernel_batched).
+        auto& m_transr        = batch[m].template get<4>();
+        auto& m_transs        = batch[m].template get<5>();
+        auto& m_opnorms       = batch[m].template get<6>();
+        auto& m_tol           = batch[m].template get<7>();
+        auto& m_at            = batch[m].template get<8>();
+        auto& m_out           = batch[m].template get<9>(); // real out tensor: sparsity source AND this member's scatter destination
+        const size_type m_n_nonzero = batch[m].template get<10>();
+        auto& m_resnorms_tensor = batch[m].template get<11>(); // real resnorms tensor: this member's zero-fill destination
         const size_type n = static_cast<size_type>(m_result.dim(0)); // structural N
 
         sparsity_to_bytes(m_out.sparsity(), reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset]), n);
@@ -1014,12 +1053,11 @@ namespace mra{
 
         if (!m_resnorms.empty()) {
           slot.extra_dsts.push_back(const_cast<T*>(m_resnorms_tensor.buffer().device_ptr_on(device)));
-          slot.extra_srcs.push_back(zero_pool.get(n * sizeof(T)));
+          slot.extra_srcs.push_back(nullptr); // zero-fill, see GroupedBatchPool::slot_t::extra_srcs
           slot.extra_sizes.push_back(n * sizeof(T));
         }
 
-        slot.args.emplace_back(m_in, m_f, m_result, m_resnorms,
-                               m_tmp.current_device_ptr(), n,
+        slot.args.emplace_back(m_in, m_f, m_result, m_resnorms, n,
                                m_transr, m_transs, m_opnorms, m_tol, m_at);
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;

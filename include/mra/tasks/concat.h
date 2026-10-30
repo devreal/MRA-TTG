@@ -5,7 +5,10 @@
 #include <ttg.h>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
+#include "mra/misc/batch_group.h"
+#include "mra/misc/batch_size.h"
 #include "mra/tensor/sparsityinfo.h"
+#include "mra/tensor/sparsitymanager.h"
 #include "mra/tensor/functionnode.h"
 #include "mra/kernels/concat.h"
 
@@ -36,13 +39,32 @@ namespace mra {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
     const std::string& name = "concat",
     ProcMap procmap = {},
-    DeviceMap devicemap = {})
+    DeviceMap devicemap = {},
+    const BatchGroup& batch_group = {})
   {
     using node_type = mra::FunctionsCompressedNode<T, NDIM>;
     constexpr const int OUT = 0, BALANCE_A = 1, BALANCE_B = 2;
     ttg::Edge<mra::Key<NDIM>, node_type> SA(name + "-balance_a"), SB(name + "-balance_b");
 
-    auto concat_fn = [fnsA, fnsB, K](const mra::Key<NDIM>& key, const node_type& na,
+    /* batching is controlled process-wide (mra/misc/batch_size.h), read once here;
+     * concatenation has no operator data, so any two tasks may be batched */
+    const std::size_t max_batch_size = mra::get_batch_size();
+    const bool enable_batching = mra::batching_enabled();
+    const size_type total_functions = fnsA->num_functions() + fnsB->num_functions();
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ConcatBatchArg<T, NDIM>>> batch_pool;
+    if (enable_batching) {
+      /* shared by every instance of batch_group, whose batches may mix their tasks */
+      using registry_t = detail::GroupedBatchPoolRegistry<detail::ConcatBatchArg<T, NDIM>>;
+      batch_pool = batch_group.pool<registry_t>([&]{
+        return std::make_shared<registry_t>(ttg::device::num_devices(), max_batch_size);
+      }, K);
+    }
+#else  // MRA_ENABLE_HOST
+    std::nullptr_t batch_pool = nullptr; // never used, only captured
+#endif // MRA_ENABLE_HOST
+
+    auto concat_fn = [fnsA, fnsB, K, enable_batching, batch_pool, total_functions](const mra::Key<NDIM>& key, const node_type& na,
                                      const node_type& nb) -> TASKTYPE {
       const size_type NA = fnsA->num_functions(key), NB = fnsB->num_functions(key), N = NA + NB;
 
@@ -67,11 +89,22 @@ namespace mra {
         if (!nb.empty()) input.add(nb.coeffs().buffer());
         co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
+        auto a_view = na.coeffs().current_view(), b_view = nb.coeffs().current_view();
         auto out_view = result.coeffs().current_view();
-        auto sparseman = make_sparsity_manager(result);
-        sparseman.populate_device_sparsity();
-        submit_concat_kernel<NDIM>(key, na.coeffs().current_view(), nb.coeffs().current_view(), out_view,
-                                   NA, N, n_nonzero, K, ttg::device::current_stream());
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* the result's sparsity is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(a_view, b_view, out_view, NA, N,
+                                                                  result.coeffs(), n_nonzero);
+          detail::submit_concat_batch_leader<T, NDIM>(batch, *batch_pool, K, total_functions);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          auto sparseman = make_sparsity_manager(result);
+          sparseman.populate_device_sparsity();
+          submit_concat_kernel<NDIM>(key, a_view, b_view, out_view, NA, N, n_nonzero, K,
+                                     ttg::device::current_stream());
+        }
       }
 
       /* where only one set continues, the other gets empty nodes */
@@ -98,6 +131,12 @@ namespace mra {
                                   ttg::edges(out, SA, SB), name, {"a", "b"}, {"out", "balance_a", "balance_b"});
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+#ifndef MRA_ENABLE_HOST
+    if (enable_batching) {
+      tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; }, max_batch_size);
+      batch_group.add(tt);
+    }
+#endif // MRA_ENABLE_HOST
     return tt;
   }
 

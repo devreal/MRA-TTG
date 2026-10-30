@@ -287,7 +287,7 @@ namespace mra {
       const concepts::TensorView<2> auto& phibar,
       const concepts::TensorView<1> auto& quad_x,
       T* tmp,
-      size_type tmp_pos,
+      size_type tmp_slot,
       size_type K,
       const T g1,
       const T g2,
@@ -301,7 +301,7 @@ namespace mra {
         SHARED DenseTensorView<T, NDIM+1> tmp_result;
         SHARED T* workspace;
 
-        T* block_tmp_ptr = &tmp[tmp_pos*derivative_tmp_size<NDIM>(K)];
+        T* block_tmp_ptr = &tmp[tmp_slot*derivative_tmp_size<NDIM>(K)];
         const size_type K2NDIM = std::pow(K, NDIM);
         if (is_team_lead()) {
           tmp_result = DenseTensorView<T, NDIM+1>(&block_tmp_ptr[       0], make_dims<NDIM+1>(2, K));
@@ -326,27 +326,38 @@ namespace mra {
 
     /**
      * Derivative of the pos-th non-zero function of deriv, executed by one block;
-     * shared by derivative_kernel and derivative_kernel_batched.
+     * shared by derivative_kernel and derivative_kernel_batched. The block's scratch
+     * is the tmp_slot-th one of tmp: the position for the unbatched kernel, the block
+     * for the batched one (see submit_derivative_batch_leader).
+     *
+     * The views are named template parameters rather than abbreviated
+     * `concepts::TensorView<...> auto&` parameters: mixing the explicit T, NDIM
+     * with this many abbreviated-auto parameters crashes nvcc's front end with
+     * "internal error: assertion failed ... in check_name_hiding_by_template_parameters"
+     * (see reconstruct_process_one_leader in mra/kernels/reconstruct.h).
      */
-    template <typename T, Dimension NDIM>
+    template <typename T, Dimension NDIM, typename NodeLeftT, typename InhLeftT, typename NodeCenterT,
+              typename InhCenterT, typename NodeRightT, typename InhRightT, typename OperatorsT,
+              typename DerivT, typename PhiT, typename PhibarT, typename QuadXT>
     DEVSCOPE void derivative_process_one(
       const Domain<NDIM>& D,
       const Key<NDIM>& key,
       const Key<NDIM>* src_keys,
-      const concepts::TensorView<NDIM+1> auto& node_left,
-      const concepts::TensorView<NDIM+1> auto& inh_left,
-      const concepts::TensorView<NDIM+1> auto& node_center,
-      const concepts::TensorView<NDIM+1> auto& inh_center,
-      const concepts::TensorView<NDIM+1> auto& node_right,
-      const concepts::TensorView<NDIM+1> auto& inh_right,
-      const concepts::TensorView<3> auto& operators,
-      concepts::TensorView<NDIM+1> auto& deriv,
-      const concepts::TensorView<2> auto& phi,
-      const concepts::TensorView<2> auto& phibar,
-      const concepts::TensorView<1> auto& quad_x,
+      const NodeLeftT& node_left,
+      const InhLeftT& inh_left,
+      const NodeCenterT& node_center,
+      const InhCenterT& inh_center,
+      const NodeRightT& node_right,
+      const InhRightT& inh_right,
+      const OperatorsT& operators,
+      DerivT& deriv,
+      const PhiT& phi,
+      const PhibarT& phibar,
+      const QuadXT& quad_x,
       T* tmp,
       size_type N,
       size_type pos,
+      size_type tmp_slot,
       size_type K,
       const T g1,
       const T g2,
@@ -377,27 +388,30 @@ namespace mra {
       }
       SYNCTHREADS();
       derivative_kernel_impl<T, NDIM>(D, key, left, center, right, node_left_view, node_center_view, node_right_view,
-        operators, deriv_view, phi, phibar, quad_x, tmp, pos, K, g1, g2, axis, bc_left, bc_right);
+        operators, deriv_view, phi, phibar, quad_x, tmp, tmp_slot, K, g1, g2, axis, bc_left, bc_right);
       SYNCTHREADS(); // shared state is rewritten by the next call
     }
 
-    template <typename T, Dimension NDIM>
+    /* named template parameters for the views: see derivative_process_one */
+    template <typename T, Dimension NDIM, typename NodeLeftT, typename InhLeftT, typename NodeCenterT,
+              typename InhCenterT, typename NodeRightT, typename InhRightT, typename OperatorsT,
+              typename DerivT, typename PhiT, typename PhibarT, typename QuadXT>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void derivative_kernel(
       const Domain<NDIM>& D,
       const Key<NDIM> key,
       const Key<NDIM>* src_keys,
-      const concepts::TensorView<NDIM+1> auto node_left,
-      const concepts::TensorView<NDIM+1> auto inh_left,
-      const concepts::TensorView<NDIM+1> auto node_center,
-      const concepts::TensorView<NDIM+1> auto inh_center,
-      const concepts::TensorView<NDIM+1> auto node_right,
-      const concepts::TensorView<NDIM+1> auto inh_right,
-      const concepts::TensorView<3> auto operators,
-      concepts::TensorView<NDIM+1> auto deriv,
-      const concepts::TensorView<2> auto phi,
-      const concepts::TensorView<2> auto phibar,
-      const concepts::TensorView<1> auto quad_x,
+      const NodeLeftT node_left,
+      const InhLeftT inh_left,
+      const NodeCenterT node_center,
+      const InhCenterT inh_center,
+      const NodeRightT node_right,
+      const InhRightT inh_right,
+      const OperatorsT operators,
+      DerivT deriv,
+      const PhiT phi,
+      const PhibarT phibar,
+      const QuadXT quad_x,
       T* tmp,
       size_type N,
       size_type n_nonzero,
@@ -416,7 +430,7 @@ namespace mra {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
         derivative_process_one<T, NDIM>(D, key, src_keys, node_left, inh_left, node_center, inh_center,
                                         node_right, inh_right, operators, deriv,
-                                        phi, phibar, quad_x, tmp, N, pos, K, g1, g2, axis, bc_left, bc_right);
+                                        phi, phibar, quad_x, tmp, N, pos, pos, K, g1, g2, axis, bc_left, bc_right);
       }
     }
 
@@ -440,24 +454,27 @@ namespace mra {
    * in inh_left, inh_center, and inh_right (coefficients inherited from an ancestor).
    * src_keys (device memory, 3 per function: left, center, right) holds the nodes that
    * these coefficients belong to, per function: they are projected from there to the
-   * left neighbor, to key, and to the right neighbor.
+   * left neighbor, to key, and to the right neighbor. The views are named template
+   * parameters, see detail::derivative_process_one.
    */
-  template <typename T, Dimension NDIM>
+  template <typename T, Dimension NDIM, typename NodeLeftT, typename InhLeftT, typename NodeCenterT,
+            typename InhCenterT, typename NodeRightT, typename InhRightT, typename OperatorsT,
+            typename DerivT, typename PhiT, typename PhibarT, typename QuadXT>
   void submit_derivative_kernel(
     const Domain<NDIM>& D,
     const Key<NDIM>& key,
     const Key<NDIM>* src_keys,
-    const concepts::TensorView<NDIM+1> auto node_left,
-    const concepts::TensorView<NDIM+1> auto inh_left,
-    const concepts::TensorView<NDIM+1> auto node_center,
-    const concepts::TensorView<NDIM+1> auto inh_center,
-    const concepts::TensorView<NDIM+1> auto node_right,
-    const concepts::TensorView<NDIM+1> auto inh_right,
-    const concepts::TensorView<3> auto operators,
-    concepts::TensorView<NDIM+1> auto deriv,
-    const concepts::TensorView<2> auto phi,
-    const concepts::TensorView<2> auto phibar,
-    const concepts::TensorView<1> auto quad_x,
+    const NodeLeftT node_left,
+    const InhLeftT inh_left,
+    const NodeCenterT node_center,
+    const InhCenterT inh_center,
+    const NodeRightT node_right,
+    const InhRightT inh_right,
+    const OperatorsT operators,
+    DerivT deriv,
+    const PhiT phi,
+    const PhibarT phibar,
+    const QuadXT quad_x,
     T* tmp,
     size_type N,
     size_type n_nonzero,
@@ -482,9 +499,10 @@ namespace mra {
    * Batching support for the derivative kernel, used by ttg::device::coop()/
    * TT::set_batch_matcher() in mra/tasks/derivative.h. The operator data (D, the
    * derivative operators, phi, phibar, quad_x, K, axis, boundary conditions) is the
-   * same for every node of the TT, so batching is unrestricted; the views, source
-   * keys and scratch of each node travel per member. The combined launch is flattened
-   * over the sum of each member's non-zero functions, see compress_kernel_batched.
+   * same for every node of the TT, so batching is unrestricted; the views and source
+   * keys of each node travel per member. The combined launch is flattened over the sum
+   * of each member's non-zero functions, see compress_kernel_batched; its scratch is
+   * one occupancy-sized region of the batch slot, indexed by block.
    */
   namespace detail {
 
@@ -499,7 +517,6 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,   // node_right
       SparseTensorView<T, NDIM+1>,   // inh_right
       SparseTensorView<T, NDIM+1>,   // deriv
-      T*,                            // tmp: this member's scratch, indexed by local position
       size_type                      // N: this member's function count
     >;
 
@@ -513,8 +530,7 @@ namespace mra {
       static constexpr std::size_t node_right  = 6;
       static constexpr std::size_t inh_right   = 7;
       static constexpr std::size_t deriv       = 8;
-      static constexpr std::size_t tmp         = 9;
-      static constexpr std::size_t n           = 10;
+      static constexpr std::size_t n           = 9;
     };
 
     template <typename T, Dimension NDIM>
@@ -524,6 +540,7 @@ namespace mra {
       const size_type* member_offsets,    // device ptr, size == num_members+1
       size_type num_members,
       size_type total_nonzero,
+      T* shared_tmp,                      // occupancy-sized scratch of the batch slot, indexed by block
       const Domain<NDIM>& D,
       const concepts::TensorView<3> auto operators,
       const concepts::TensorView<2> auto phi,
@@ -550,15 +567,15 @@ namespace mra {
                                         std::get<idx::node_center>(arg), std::get<idx::inh_center>(arg),
                                         std::get<idx::node_right>(arg), std::get<idx::inh_right>(arg),
                                         operators, std::get<idx::deriv>(arg),
-                                        phi, phibar, quad_x, std::get<idx::tmp>(arg), std::get<idx::n>(arg),
-                                        local_pos, K, g1, g2, axis, bc_left, bc_right);
+                                        phi, phibar, quad_x, shared_tmp, std::get<idx::n>(arg),
+                                        local_pos, blockIdx.x, K, g1, g2, axis, bc_left, bc_right);
       }
     }
 
     /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(key, src_keys, left, inh_left, center,
-     * inh_center, right, inh_right, deriv_view, tmp, N, deriv, n_nonzero)`; the leader marshals every member and
+     * inh_center, right, inh_right, deriv_view, N, deriv, n_nonzero)`; the leader marshals every member and
      * submits one combined launch. The sparsity of each member's result is copied to
      * its device buffer as part of the single H2D copy of the batch (see
      * submit_grouped_copy). total_functions (of the whole function set) bounds the
@@ -597,13 +614,13 @@ namespace mra {
       slot.extra_sizes.clear();
 
       size_type total_sparsity_bytes = 0;
-      for (std::size_t m = 0; m < nb; ++m) total_sparsity_bytes += batch[m].template get<10>();
+      for (std::size_t m = 0; m < nb; ++m) total_sparsity_bytes += batch[m].template get<9>();
       slot.sparsity.resize(total_sparsity_bytes);
 
       size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        const size_type m_N = batch[m].template get<10>();
-        auto& m_deriv_tensor = batch[m].template get<11>();
+        const size_type m_N = batch[m].template get<9>();
+        auto& m_deriv_tensor = batch[m].template get<10>();
         sparsity_to_bytes(m_deriv_tensor.sparsity(), reinterpret_cast<SparsityState*>(&slot.sparsity[sparsity_offset]), m_N);
         slot.extra_dsts.push_back(const_cast<T*>(m_deriv_tensor.buffer().device_ptr_on(device)));
         slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset]);
@@ -612,16 +629,27 @@ namespace mra {
         slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<1>(), batch[m].template get<2>(),
                                batch[m].template get<3>(), batch[m].template get<4>(), batch[m].template get<5>(),
                                batch[m].template get<6>(), batch[m].template get<7>(), batch[m].template get<8>(),
-                               batch[m].template get<9>(), m_N);
-        slot.offsets[m + 1] = slot.offsets[m] + batch[m].template get<12>();
+                               m_N);
+        slot.offsets[m + 1] = slot.offsets[m] + batch[m].template get<11>();
+
       }
       const size_type total_nonzero = slot.offsets[nb];
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
       const size_type smem_size = derivative_smem_size<T, NDIM>(K);
-      CALL_KERNEL((derivative_kernel_batched<T, NDIM>), total_nonzero, derivative_thread_dims(K), smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, D,
+      const Dim3 thread_dims = derivative_thread_dims(K);
+      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+      /* cap the grid at occupancy (the kernel's grid-stride loop covers the rest) so the
+       * scratch is one region per slot, sized from the cap and not from this launch --
+       * see submit_compress_kernel_batched */
+      auto kernel = derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>, std::decay_t<decltype(phi)>,
+                                              std::decay_t<decltype(phibar)>, std::decay_t<decltype(quad_x)>>;
+      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
+      const size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
+      CALL_KERNEL((derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, shared_tmp, D,
                    operators, phi, phibar, quad_x, K, g1, g2, axis, bc_left, bc_right));
       checkSubmit();
       pool.mark_submitted(slot, stream);

@@ -232,7 +232,7 @@ namespace {
       }
       T tol = s.tol;
       std::array<bool, 2> at = s.at;
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
+      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, ttg::scope::Allocate);
       const auto& op_data = s.op_data;
 
 #ifndef MRA_ENABLE_HOST

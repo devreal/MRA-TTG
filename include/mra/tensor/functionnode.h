@@ -74,21 +74,13 @@ namespace mra {
 
         FunctionNodeBase(const key_type& key, size_type N, size_type K, ttg::scope scope = ttg::scope::SyncIn)
         : m_key(key)
-#ifdef MRA_ENABLE_HOST
-        , m_coeffs(make_dims<ndim()+1>(N, K), ttg::scope::SyncIn) // make sure we allocate on host
-#else
         , m_coeffs(make_dims<ndim()+1>(N, K), scope)
-#endif
         , m_num_func(N)
         { }
 
         FunctionNodeBase(const key_type& key, const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn)
         : m_key(key)
-#ifdef MRA_ENABLE_HOST
-        , m_coeffs(sparsity, K, ttg::scope::SyncIn) // make sure we allocate on host
-#else
         , m_coeffs(sparsity, K, scope)
-#endif
         , m_num_func(sparsity.dim(0))
         { }
 
@@ -106,11 +98,7 @@ namespace mra {
         void allocate(size_type K, ttg::scope scope = ttg::scope::SyncIn) {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
-#ifndef MRA_ENABLE_HOST
           m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), scope);
-#else
-          m_coeffs = tensor_type(make_dims<ndim()+1>(m_num_func, K), ttg::scope::SyncIn); // make sure we allocate on host
-#endif
         }
 
 
@@ -121,13 +109,6 @@ namespace mra {
         void allocate(const SparsityInfo& sparsity, size_type K, ttg::scope scope = ttg::scope::SyncIn) {
           if (!empty()) throw std::runtime_error("Reallocating non-empty FunctionNode not allowed!");
           if (m_num_func == 0) throw std::runtime_error("Cannot reallocate FunctionNode with N = 0");
-
-#ifdef MRA_ENABLE_HOST
-          /**
-           * Currently needed to ensure the buffer is allocated on the host.
-           */
-          scope = ttg::scope::SyncIn;
-#endif // MRA_ENABLE_HOST
           m_coeffs = tensor_type(sparsity, K, scope);
         }
 
@@ -723,6 +704,21 @@ namespace mra {
 
         FunctionsCompressedNode& operator=(FunctionsCompressedNode&& other) = default;
         FunctionsCompressedNode& operator=(const FunctionsCompressedNode& other) = delete;
+
+        /**
+         * Move the node's contents (coefficients, key, sparsity, child info) out
+         * of other, but NOT the ttg::TTValue base: the defaulted move operators
+         * also transfer TTG's data-copy bookkeeping (readers/mutable tag, next
+         * task, refcount). Use this when other is a task input owned by TTG and
+         * this node is a local that will be sent on: a plain move would make the
+         * local look like a mutable, already-tracked copy (so TTG tries to copy
+         * it on send) and leave the task's input copy with zeroed bookkeeping.
+         */
+        void move_contents_from(FunctionsCompressedNode&& other) {
+          base_type::operator=(std::move(static_cast<base_type&>(other)));
+          m_child_is_leaf = std::move(other.m_child_is_leaf);
+          m_ns = other.m_ns;
+        }
 
 
         void set_child_leaf(int fn, int child, bool value = true) {

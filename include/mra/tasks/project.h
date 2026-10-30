@@ -168,7 +168,7 @@ namespace mra{
 
           /* temporaries */
           const std::size_t tmp_size = fcoeffs_tmp_size<NDIM>(K)*n_nonzero;
-          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, TempScope);
+          ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch(tmp_size, ttg::scope::Allocate);
 
           /* TODO: cannot do this from a function, had to move it into the main task */
 #ifndef MRA_ENABLE_HOST

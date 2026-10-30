@@ -73,6 +73,27 @@ namespace mra {
     void foreach_child(const Key<NDIM>& key, auto&& fn) {
       foreach_child_impl(key, fn, std::make_index_sequence<Key<NDIM>::num_children()>{});
     }
+
+    /**
+     * True iff two sparsity sets mark the exact same function indices
+     * non-zero. Used by accumulate_tt to decide whether its newly-computed
+     * output sparsity exactly matches its input node's own -- if so, the
+     * input node's already-allocated storage has the right shape to be
+     * reused as the output in place (see accumulate_tt's comment), instead
+     * of allocating a fresh tensor. No existing comparator for this in the
+     * tensor/sparsity headers (SparsityInfo and a node's own sparsity() are
+     * different RangeSparsityBase instantiations with no operator== between
+     * them), so compare through the common is_nonzero()/count() interface
+     * both expose.
+     */
+    template <typename SparsityA, typename SparsityB>
+    bool sparsity_equal(const SparsityA& a, const SparsityB& b) {
+      if (a.count() != b.count() || a.count_nonzero() != b.count_nonzero()) return false;
+      for (size_type i = 0; i < a.count(); ++i) {
+        if (a.is_nonzero(i) != b.is_nonzero(i)) return false;
+      }
+      return true;
+    }
   } // namespace detail
 
 
@@ -445,7 +466,7 @@ namespace mra {
         DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          cnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
+          cnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
 #endif
@@ -521,61 +542,48 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
           /**
            * A device task may co_await ttg::device::select() only ONCE over its
-           * whole execution, but this task needs a DIFFERENT operator aggregate
-           * (and hence a different Opnorm) per mad_disp in the loop below --
-           * one select() per displacement is not an option. Instead, prime this
-           * level's shared 1D operator table ONCE here, up front, using an
-           * arbitrary in-range displacement purely to trigger/await generation
-           * (any displacement works: generation is level-wide, not
-           * per-displacement -- see GaussianConvolutionOperator::try_get_op).
-           * Once the table exists, try_get_op() for any OTHER displacement at
-           * this same level is guaranteed host-only (finish_op_assembly() only
-           * reads norms1d via .view_on(host), already valid once the table's
-           * norms1d has been pulled back once, right here) -- so the
-           * per-displacement loop below never needs another select().
+           * whole execution, but this task needs a DIFFERENT Opnorm per
+           * mad_disp in the loop below -- one select() per displacement is not
+           * an option. Instead, obtain (and if need be generate) this level's
+           * shared 1D operator table ONCE here, up front: generation is
+           * level-wide, not per-displacement. Once the table exists, each
+           * displacement's Opnorm is computed host-only from the table's
+           * norms1d (already current on the host, pulled back by whoever
+           * generated the table) -- so the loop below never needs another
+           * select(). The screener never claims the device-side norms tensors
+           * that shell0_tt/accumulate_tt consume (see try_get_opnorms()).
            */
-          mra::Key<NDIM> op_disp(key.batch(), key.level(), {0, 0, 0});
-          // The level's table once known. If we generate it ourselves, its
-          // publication is deferred until this task completes (see below),
-          // so we have to look up norms against it directly.
-          typename mra::GaussianConvolutionOperator<T, NDIM>::table_pointer_type level_table;
+          // If we generate the table ourselves, its publication is deferred
+          // until this task completes (see below), so the per-displacement
+          // lookups below take it explicitly.
+          typename mra::GaussianConvolutionOperator<T, NDIM>::table_pointer_type level_table = nullptr;
           for (;;) {
-            auto res = level_table ? op.try_get_op(key.level(), op_disp, level_table)
-                                   : op.try_get_op(key.level(), op_disp);
-            if (op.has_generation_work(res)) {
+            auto lt = op.try_get_level_table(key.level());
+            if (lt.pending) {
+              // a pure reschedule point, no kernel of ours to wait for
+              co_await ttg::device::suspend();
+              continue;
+            }
+            if (lt.level_work) {
               /**
                * We need to generate the transition matrices for this level's operator.
                */
-              auto gen_items = op.collect_generation_items(res);
+              auto gen_items = op.collect_generation_items(lt.level_work);
               auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-              auto gen_input = op.make_generation_input(res, items_buf);
+              auto gen_input = op.make_generation_input(lt.level_work, items_buf);
               co_await ttg::device::select(gen_input);
-              op.submit_generation_kernel(res, gen_items, items_buf);
+              op.submit_generation_kernel(lt.level_work, gen_items, items_buf);
               // wait for the kernel and pull the table's norms back to the host
-              // for finish_op_assembly(); R/S are only ever used on the device
-              co_await ttg::device::wait(res.level_work->norms1d.buffer());
+              // for try_get_opnorms(); R/S are only ever used on the device
+              co_await ttg::device::wait(lt.level_work->norms1d.buffer());
               // Publish only once this task has completed: until then the
               // runtime still holds our (written) device copies of the table,
               // and other tasks must not stage them in.
-              sends.push_back(ttg::device::on_complete([opp = &op, res]() { opp->publish_generation_work(res); }));
+              sends.push_back(ttg::device::on_complete(
+                [opp = &op, level_work = lt.level_work]() { opp->publish_generation_work(level_work); }));
             }
-            if (res.status != mra::GaussianConvolutionOperator<T, NDIM>::Status::Pending) {
-              level_table = res.dims[0].table;
-            }
-            if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
-              break;
-            }
-            if (res.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned) {
-              /**
-               * The operator is owned, so we need to assemble its norms on the host.
-               */
-              auto assembled = op.finish_op_assembly(key.level(), op_disp, res.dims);
-              op.publish_op(key.level(), op_disp, assembled);
-              break;
-            }
-            // Pending: yield (a pure reschedule point, no kernel of ours to
-            // wait for) and retry.
-            co_await ttg::device::suspend();
+            level_table = lt.table;
+            break;
           }
 #endif // MRA_ENABLE_HOST
 
@@ -595,16 +603,29 @@ namespace mra {
               -> std::uint64_t {
             return displacement.distsq_bc(mad_op->lattice_summed());
           };
+#ifndef MRA_ENABLE_HOST
+          // Opnorms per position in mad_disps. With a single operator every
+          // function walks the same displacement list, so each displacement's
+          // Opnorms (one per operator index) are looked up once per task
+          // rather than once per function.
+          std::vector<typename mra::GaussianConvolutionOperator<T, NDIM>::opnorms_pointer_type> disp_opnorms;
+#endif // MRA_ENABLE_HOST
           for (int i = 0; i < N; ++i) {
             // we may have either one operator for all functions or one operator per function
             int opnorm_index = (op.count() == 1) ? 0 : i;
             // safe because get_disp returns a reference that remains valid
             const auto& mad_disps = op.get_mad_displacements(opnorm_index, key.level());
             const auto& mad_op = op.get_mad_op(opnorm_index);
+#ifndef MRA_ENABLE_HOST
+            if (op.count() != 1 || disp_opnorms.empty()) {
+              disp_opnorms.assign(mad_disps.size(), nullptr);
+            }
+#endif // MRA_ENABLE_HOST
             int nused = 1, nvalid = 1;
             std::optional<double> real_last_distsq;
             std::optional<std::uint64_t> lattice_last_distsq;
-            for (auto& mad_disp : mad_disps) {
+            for (std::size_t disp_idx = 0; disp_idx < mad_disps.size(); ++disp_idx) {
+              const auto& mad_disp = mad_disps[disp_idx];
 
               // Screen out shells. We assume shells are grouped into shells so that the operator decays with shell index.
               // Shells are indexed by least distance from box to the central box.
@@ -643,34 +664,19 @@ namespace mra {
 #ifdef MRA_ENABLE_HOST
               auto op_data = op.get_op(key.level(), disp_key);
               auto opnorm_view = op_data->norms.view_on(ttg::device::Device::host());
+              auto opnorm = opnorm_view(opnorm_index, 0, 0, (int)NormId::Opnorm);
 #else
-              // The level's table was already primed (see above), so
-              // try_get_op() here is guaranteed host-only -- has_generation_work()
-              // is never true for this call, and finish_op_assembly() only reads
-              // norms1d via .view_on(host), already valid -- no select() needed.
-              // Just the norms tensor -- see try_get_op()'s OpResult comment
-              // for why R/S (unused by screener_tt anyway) aren't cached.
-              std::shared_ptr<const DenseTensor<T, 4>> op_norms;
-              for (;;) {
-                auto res2 = op.try_get_op(key.level(), disp_key, level_table);
-                if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Available) {
-                  op_norms = res2.norms;
-                  break;
-                }
-                if (res2.status == mra::GaussianConvolutionOperator<T, NDIM>::Status::Owned) {
-                  auto assembled = op.finish_op_assembly(key.level(), disp_key, res2.dims);
-                  op.publish_op(key.level(), disp_key, assembled);
-                  op_norms = assembled;
-                  break;
-                }
-                co_await ttg::device::suspend();
+              // Host-only (the level's table is already known, see above):
+              // only Pending -- another screener computing the same Opnorms
+              // right now -- makes us wait.
+              auto& opnorms = disp_opnorms[disp_idx];
+              while (opnorms == nullptr) {
+                opnorms = op.try_get_opnorms(key.level(), disp_key, level_table);
+                if (opnorms == nullptr) co_await ttg::device::suspend();
               }
-
-              assert(op_norms->buffer().is_valid() && "op_norms buffer should be valid at this point");
-              auto opnorm_view = op_norms->view_on(ttg::device::Device::host());
+              auto opnorm = (*opnorms)[opnorm_index];
 #endif // MRA_ENABLE_HOST
 
-              auto opnorm = opnorm_view(opnorm_index, 0, 0, (int)NormId::Opnorm);
               //std::cout << "MRA-SCREEN " << key << " disp " << disp_key << " neighbor " << neighbor_key << " cnorm " << cnorm_view(i)
               //          << " op norm " << op_data->norm << " fac " << fac << " tol/fac " << tol/fac << std::endl;
               if (opnorm * cnorm_view(i) > tol / fac) {
@@ -785,11 +791,11 @@ namespace mra {
         const bool need_assemble = (res.status == OpStatus::Owned);
         // All host-side (safe before the select(), see has_generation_work()/
         // make_norms_tensor()'s comments in conv_mad.h).
-        auto gen_items = op.collect_generation_items(res); // empty if !need_generate
+        auto gen_items = op.collect_generation_items(res.level_work); // empty if !need_generate
         auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-        std::shared_ptr<mra::DenseTensor<T, 4>> norms;
+        mra::DenseTensor<T, 4>* norms = nullptr; // owned by op's norms cache
         if (need_assemble) {
-          norms = op.make_norms_tensor();
+          norms = op.make_norms_tensor(key.level(), op_disp);
         }
 #endif // MRA_ENABLE_HOST
 
@@ -812,23 +818,37 @@ namespace mra {
         // tail pass for the unbatched path, a queued zero-fill copy from
         // submit_convolution_batch_leader for the batched path (see their
         // comments in kernels/convolution.h).
-        DenseTensor<T, 1> resnorms(N, ttg::scope::Allocate);
+        DenseTensor<T, 1> resnorms(N, ttg::scope::SyncOut);
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
 
-        auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
+        // When batching, submit_convolution_kernel_batched's own occupancy-
+        // capped scratch pool (GroupedBatchPool::ensure_scratch) supplies
+        // every member's real per-block scratch -- no per-task buffer is
+        // needed at all in that case, so tmp_size is 0 and tmp is never
+        // allocated. The unbatched fallback (host, or batching disabled at
+        // runtime) still needs the full size, since it's the only thing
+        // submit_convolution_kernel uses as scratch.
+#ifndef MRA_ENABLE_HOST
+        const std::size_t tmp_size = enable_conv_batching ? 0 : convolution_tmp_size<NDIM>(K) * n_nonzero;
+#else
+        const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
+#endif
+        auto tmp = ttg::Buffer<T>();
+        if (tmp_size > 0) tmp.reset(tmp_size, ttg::scope::Allocate);
 
         // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
 
 #ifndef MRA_ENABLE_HOST
         auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
-                                        out.coeffs().buffer(), tmp);
-        op.add_convolution_op_buffers(input, res, items_buf, norms.get());
+                                        out.coeffs().buffer());
+        if (tmp_size > 0) input.add(tmp);
+        op.add_convolution_op_buffers(input, res, items_buf, norms);
         co_await ttg::device::select(input);
         if (need_generate) {
-          op.submit_generation_kernel(res, gen_items, items_buf);
+          op.submit_generation_kernel(res.level_work, gen_items, items_buf);
         }
         if (need_assemble) {
           // Same stream as submit_generation_kernel (if it ran) and the
@@ -874,7 +894,7 @@ namespace mra {
           // resnorms_view) travels through too, so the leader can likewise
           // queue a direct zero-fill copy into its own device buffer (see
           // submit_convolution_batch_leader).
-          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view, tmp,
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(empty_node_view, in_node_view, out_view, resnorms_view,
                                                                   transr, transs, opnorms_view, tol, at, out.coeffs(),
                                                                   n_nonzero, resnorms);
           // followers: the leader's batched launch already wrote our slice of out/resnorms.
@@ -897,27 +917,28 @@ namespace mra {
         }
 
 #ifndef MRA_ENABLE_HOST
-        // wait for the norms to come back. If we built the operator, also
-        // pull its norms (and the level table, if we generated it) back to
-        // the host before publishing: screener_tt reads the norms there
-        // (finish_op_assembly() / opnorm lookup). R/S are only ever used on
-        // the device, so they stay there.
+        // wait for the result norms to come back. If we generated the level
+        // table, also pull its norms1d back to the host before publishing:
+        // screener_tt computes its Opnorms from it there (try_get_opnorms()).
+        // R/S and the assembled norms tensor are only ever consumed on the
+        // device, so they stay there.
         // need_generate implies need_assemble (see the try_get_op() loop above).
         if (need_generate) {
-          co_await ttg::device::wait(resnorms.buffer(), norms->buffer(), res.level_work->norms1d.buffer());
-        } else if (need_assemble) {
-          co_await ttg::device::wait(resnorms.buffer(), norms->buffer());
+          co_await ttg::device::wait(resnorms.buffer(), res.level_work->norms1d.buffer());
         } else {
           co_await ttg::device::wait(resnorms.buffer());
+        }
+        if (need_assemble && op.validate_ops_enabled()) {
+          co_await ttg::device::wait(norms->buffer()); // DEBUG: publish_op() validates it on the host
         }
         if (need_assemble) {
           // Publish only once this task has completed: until then the
           // runtime still holds our (written) device copies of the table and
           // norms, and other tasks must not stage them in.
           sends.push_back(ttg::device::on_complete(
-            [opp = &op, res, level = key.level(), op_disp, norms]() {
-              opp->publish_generation_work(res); // no-op unless we generated the table
-              opp->publish_op(level, op_disp, norms);
+            [opp = &op, level_work = res.level_work, level = key.level(), op_disp]() {
+              opp->publish_generation_work(level_work); // no-op unless we generated the table
+              opp->publish_op(level, op_disp);
             }));
         }
 #endif // MRA_ENABLE_HOST
@@ -948,9 +969,22 @@ namespace mra {
 
 
     /**
-     * Recursive edges
+     * Recursive edges. Two separate node edges, not one, because the SAME
+     * node value dispatch hands accumulate_tt as in_node is also broadcast
+     * elsewhere as the (read-only) `contribution` input of OTHER accumulate_tt
+     * chains (one source node's coefficients contribute to many destination
+     * keys) -- TTG cannot reconcile one consumer wanting to move/mutate a
+     * value that other consumers still need to read. accumulate_node_recurse
+     * therefore stays const/read-only (fed by dispatch on the first hop, and
+     * by accumulate_tt itself with an empty placeholder on every later hop);
+     * accumulate_node_recurse_owned is exclusively owned by this one chain
+     * (an empty placeholder from dispatch on the first hop, real,
+     * move-from-safe data from accumulate_tt's own previous iteration on
+     * every later hop) -- see accumulate_tt's comment for how it picks
+     * whichever of the two actually arrived non-empty.
      */
     ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_node_recurse;
+    ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> accumulate_node_recurse_owned;
     ttg::Edge<detail::KeyPair<NDIM>, std::vector<detail::KeyPair<NDIM>>> accumulate_contribution_recurse;
 
     /**
@@ -980,12 +1014,17 @@ namespace mra {
         if (contributions.empty()) {
           // if we have no contributions to apply, just forward the input to the output
           //std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
-          send_out(key, in_node, std::integral_constant<std::size_t, 2>{});
+          send_out(key, in_node, std::integral_constant<std::size_t, 3>{});
         } else {
-          // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively
+          // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively.
+          // in_node goes out on the const edge (index 0): it's read-only here since the
+          // same value is also broadcast elsewhere as other chains' `contribution` input.
+          // The owned edge (index 1) gets an empty placeholder on this, the first hop --
+          // see the edges' own comment and accumulate_tt's for why.
           //std::cout << "ACCUMULATE DISPATCH " << key << " dispatching to accumulate " << contributions.back() << " with " << contributions.size() << " contributions" << std::endl;
           send_out(contributions.back(), in_node, std::integral_constant<std::size_t, 0>{});
-          send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 1>{});
+          send_out(contributions.back(), mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 1>{});
+          send_out(contributions.back(), contributions, std::integral_constant<std::size_t, 2>{});
         }
 
         /**
@@ -994,7 +1033,7 @@ namespace mra {
         [&]<std::size_t... Is>(std::index_sequence<Is...>){
           return ((
             child_empty[Is] && send_out(key, mra::FunctionsCompressedNode<T, NDIM>{},
-                                        std::integral_constant<std::size_t, 3+Is>{})
+                                        std::integral_constant<std::size_t, 4+Is>{})
           ), ...);
         }(std::make_index_sequence<mra::Key<NDIM>::num_children()>{});
 
@@ -1002,7 +1041,7 @@ namespace mra {
         co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(to_shellN, contribution_edge, down_to_accumulate_leaf_info),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_to_adjust_leaf,
+         ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, accumulate_contribution_recurse, accumulate_to_adjust_leaf,
                     adjust_leaf_edges[0], adjust_leaf_edges[1], adjust_leaf_edges[2], adjust_leaf_edges[3],
                     adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7]),
          "AccumulateDispatch");
@@ -1012,14 +1051,31 @@ namespace mra {
      * The task recurses over the list of contributions to apply them one by one and send the result to the next contribution task.
      * After the last contribution is applied, the result is sent to the output.
      *
+     * Receives the running-sum node on TWO edges (see accumulate_node_recurse's
+     * own comment): in_node_const (read-only -- the same value dispatch sends
+     * here is also broadcast as other chains' `contribution` input) and
+     * in_node_owned (exclusively ours -- real data only when this task is a
+     * later hop fed by a previous accumulate_tt's own recursive send). Exactly
+     * one of the two is ever non-empty for a given invocation; pick that one
+     * as the effective running sum below. Only in_node_owned's data may ever
+     * be moved from.
+     *
      * NOTE: because we use coroutines we cannot outline most of the code and instead have to copy past it here.
      */
     auto accumulate_tt = ttg::make_tt<Space>(
       [&, K, fac, thresh, truncate_mode, cell_min_width, name, enable_conv_batching, conv_pool, total_functions](
           const detail::KeyPair<NDIM>& keypair,
-          const mra::FunctionsCompressedNode<T, NDIM>& in_node,
+          const mra::FunctionsCompressedNode<T, NDIM>& in_node_const,
+          mra::FunctionsCompressedNode<T, NDIM>&& in_node_owned,
           const mra::FunctionsCompressedNode<T, NDIM>& contribution,
           std::vector<detail::KeyPair<NDIM>>&& contribution_keys) -> TASKTYPE {
+      // Exactly one of in_node_const/in_node_owned is non-empty (see the
+      // class comment above and accumulate_node_recurse's) -- in_node is a
+      // read-only alias for whichever that is, used everywhere the old
+      // single in_node parameter used to be read; only in_node_owned itself
+      // may ever be moved from (see the reuse branch further down).
+      const bool in_node_from_owned = !in_node_owned.empty();
+      const auto& in_node = in_node_from_owned ? in_node_owned : in_node_const;
 
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
@@ -1082,24 +1138,58 @@ namespace mra {
       }
       const bool need_generate = op.has_generation_work(res);
       const bool need_assemble = (res.status == OpStatus::Owned);
-      auto gen_items = op.collect_generation_items(res); // empty if !need_generate
+      auto gen_items = op.collect_generation_items(res.level_work); // empty if !need_generate
       auto items_buf = mra::make_generate_op1d_items_buffer(gen_items);
-      std::shared_ptr<mra::DenseTensor<T, 4>> norms;
+      mra::DenseTensor<T, 4>* norms = nullptr; // owned by op's norms cache
       if (need_assemble) {
-        norms = op.make_norms_tensor();
+        norms = op.make_norms_tensor(key.level(), displacement);
       }
 #endif // MRA_ENABLE_HOST
 
-      out.allocate(sparsity, K, ttg::scope::Allocate);
-
-      out.set_ns();
-      mra::apply_leaf_info(out, in_node);
+      // When the newly-computed sparsity exactly matches in_node's own, its
+      // already-allocated storage has exactly the right shape to serve as
+      // out directly -- move it in instead of allocating a fresh tensor and
+      // copying/convolving into that. The move is an O(1) buffer-ownership
+      // transfer (see Tensor/ttg::Buffer's move ctor), not a device copy. Only
+      // ever valid when in_node came from the owned edge: in_node_const may
+      // be the SAME value other accumulate_tt chains are still reading as
+      // their own `contribution` (see accumulate_node_recurse's comment), so
+      // it must never be moved from, regardless of sparsity. Also excluded:
+      // an invalid (no corresponding prior node) or empty (no coefficients
+      // yet) in_node -- those fall through to the ordinary allocate path
+      // below.
+      // set_ns()/apply_leaf_info() must NOT run in the reuse branch the way
+      // they do below: set_ns() would be clobbered by the move if called
+      // first, and apply_leaf_info(out, in_node) reads in_node -- already
+      // moved-from by that point -- when out already carries in_node's exact
+      // child-leaf info verbatim via the move.
+      const bool reuse_in_node = in_node_from_owned && !in_node.invalid() && !in_node.empty() &&
+                                  detail::sparsity_equal(sparsity, in_node.sparsity());
+      if (reuse_in_node) {
+        // not `out = std::move(in_node_owned)`: that would also move TTG's
+        // data-copy bookkeeping out of the task's input (see move_contents_from)
+        out.move_contents_from(std::move(in_node_owned));
+        out.set_ns();
+      } else {
+        out.allocate(sparsity, K, ttg::scope::Allocate);
+        out.set_ns();
+        mra::apply_leaf_info(out, in_node);
+      }
 
       DenseTensor<T, 1> resnorms;
       const double tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
       std::array<bool, 2> at = {true, source.level()>0}; // apply terms analogue in MADNESS
 
-      auto tmp = ttg::Buffer<T>(convolution_tmp_size<NDIM>(K) * n_nonzero, TempScope);
+      // See shell0_tt's identical comment above: batched launches get their
+      // scratch from submit_convolution_kernel_batched's occupancy-capped
+      // pool instead -- no per-task buffer is needed at all in that case.
+#ifndef MRA_ENABLE_HOST
+      const std::size_t tmp_size = enable_conv_batching ? 0 : convolution_tmp_size<NDIM>(K) * n_nonzero;
+#else
+      const std::size_t tmp_size = convolution_tmp_size<NDIM>(K) * n_nonzero;
+#endif
+      auto tmp = ttg::Buffer<T>();
+      if (tmp_size > 0) tmp.reset(tmp_size, ttg::scope::Allocate);
 
       // std::cout << "MRA:: For Key: " << key << "\n the operators being passed are \n R\n" << op_data->ops[0]->R.current_view() << "\nand S: \n" << op_data->ops[0]->S.current_view() << std::endl;
 
@@ -1109,18 +1199,23 @@ namespace mra {
         // tail pass for the unbatched path, a queued zero-fill copy from
         // submit_convolution_batch_leader for the batched path (see their
         // comments in kernels/convolution.h).
-        resnorms = DenseTensor<T, 1>(N, ttg::scope::Allocate);
+        resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
       }
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer(), contribution.coeffs().buffer(), tmp);
-      op.add_convolution_op_buffers(input, res, items_buf, norms.get());
+      // When reusing in_node's storage as out, in_node is already moved-from
+      // -- out.coeffs().buffer() is now the SAME underlying buffer, so there
+      // is nothing further to select for it separately.
+      auto input = ttg::device::Input(out.coeffs().buffer(), contribution.coeffs().buffer());
+      if (!reuse_in_node) input.add(in_node.coeffs().buffer());
+      if (tmp_size > 0) input.add(tmp);
+      op.add_convolution_op_buffers(input, res, items_buf, norms);
       if (last_key) {
         // if this is the last we want to get the norms of the result back
         input.add(resnorms.buffer());
       }
       co_await ttg::device::select(input);
       if (need_generate) {
-        op.submit_generation_kernel(res, gen_items, items_buf);
+        op.submit_generation_kernel(res.level_work, gen_items, items_buf);
       }
       if (need_assemble) {
         // same stream as the generation and convolution kernels, see shell0_tt
@@ -1140,7 +1235,11 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
       auto out_view = out.coeffs().current_view();
       auto contribution_view = contribution.coeffs().current_view();
-      auto in_node_view = in_node.coeffs().current_view();
+      // When reusing in_node's storage as out, in_node is already moved-from
+      // -- out_view IS what used to be in_node's own view, now aliasing the
+      // kernel's write target. convolution_process_one's staged_in (see its
+      // comment in kernels/convolution.h) is exactly what makes that safe.
+      auto in_node_view = reuse_in_node ? out_view : in_node.coeffs().current_view();
       auto resnorms_view = resnorms.current_view();
 
 #ifndef MRA_ENABLE_HOST
@@ -1160,7 +1259,7 @@ namespace mra {
         // travels through too, so the leader can likewise queue a direct
         // zero-fill copy into its own device buffer (see
         // submit_convolution_batch_leader).
-        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view, tmp,
+        auto batch = co_await ttg::device::coop<detail::KeyPair<NDIM>>(in_node_view, contribution_view, out_view, resnorms_view,
                                                                        transr, transs, opnorms_view, tol, at, out.coeffs(),
                                                                        n_nonzero, resnorms);
         // followers: the leader's batched launch already wrote our slice of out/resnorms.
@@ -1186,20 +1285,20 @@ namespace mra {
       }
 
 #ifndef MRA_ENABLE_HOST
+      if (need_generate) {
+        // pull the generated table's norms1d back to the host for
+        // screener_tt before publishing -- see shell0_tt
+        co_await ttg::device::wait(res.level_work->norms1d.buffer());
+      }
+      if (need_assemble && op.validate_ops_enabled()) {
+        co_await ttg::device::wait(norms->buffer()); // DEBUG: publish_op() validates it on the host
+      }
       if (need_assemble) {
-        // Pull the operator norms (and the level table, if we generated it)
-        // back to the host before publishing -- see shell0_tt.
-        // need_generate implies need_assemble.
-        if (need_generate) {
-          co_await ttg::device::wait(norms->buffer(), res.level_work->norms1d.buffer());
-        } else {
-          co_await ttg::device::wait(norms->buffer());
-        }
         // publish once this task has completed -- see shell0_tt
         sends.push_back(ttg::device::on_complete(
-          [opp = &op, res, level = key.level(), displacement, norms]() {
-            opp->publish_generation_work(res); // no-op unless we generated the table
-            opp->publish_op(level, displacement, norms);
+          [opp = &op, level_work = res.level_work, level = key.level(), displacement]() {
+            opp->publish_generation_work(level_work); // no-op unless we generated the table
+            opp->publish_op(level, displacement);
           }));
       }
       // wait for norms to come back
@@ -1234,18 +1333,24 @@ namespace mra {
         // if this was the last contribution to apply, send the result to the output
         ttg::trace(name, key, ": last contribution, node empty: ", empty);
         //std::cout << "ACCUMULATE " << key << " last contribution applied, sending result to output" << out << std::endl;
-        send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 2>{});
+        send_out(keypair.dest, std::move(out), std::integral_constant<std::size_t, 3>{});
       } else {
-        // send the result to the next contribution task or output
-        send_out(contribution_keys.back(), std::move(out), std::integral_constant<std::size_t, 0>{});
-        send_out(contribution_keys.back(), std::move(contribution_keys), std::integral_constant<std::size_t, 1>{});
+        // send the result to the next contribution task or output: the real
+        // data goes out on the owned edge (index 1) -- the next accumulate_tt
+        // invocation is this chain's sole consumer of it, so it's safe for
+        // that task to move from it -- and an empty placeholder goes out on
+        // the const edge (index 0), since nothing real needs to travel there
+        // for this hop (see accumulate_node_recurse's comment).
+        send_out(contribution_keys.back(), mra::FunctionsCompressedNode<T, NDIM>{}, std::integral_constant<std::size_t, 0>{});
+        send_out(contribution_keys.back(), std::move(out), std::integral_constant<std::size_t, 1>{});
+        send_out(contribution_keys.back(), std::move(contribution_keys), std::integral_constant<std::size_t, 2>{});
       }
 
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
 #endif // MRA_ENABLE_HOST
-      }, ttg::edges(accumulate_node_recurse, screener_to_accumulate, accumulate_contribution_recurse),
-         ttg::edges(accumulate_node_recurse, accumulate_contribution_recurse, accumulate_to_adjust_leaf),
+      }, ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, screener_to_accumulate, accumulate_contribution_recurse),
+         ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, accumulate_contribution_recurse, accumulate_to_adjust_leaf),
          "Accumulate");
 
     /***************************************************************************************

@@ -30,12 +30,8 @@ namespace mra {
       , m_name(std::move(name))
       {
         std::array<size_type, sizeof...(NodeTs)+1> counts = {node.count(), nodes.count()...};
-#ifndef MRA_ENABLE_HOST
         m_norms = DenseTensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1,
-                                *std::max_element(counts.begin(), counts.end())}, ttg::scope::Allocate);
-#else
-        m_norms = DenseTensor<T, 2>({static_cast<size_type>(sizeof...(NodeTs))+1, *std::max_element(counts.begin(), counts.end())}, ttg::scope::SyncIn);
-#endif // MRA_ENABLE_HOST
+                                *std::max_element(counts.begin(), counts.end())}, ttg::scope::SyncOut);
         for (int i = 0; i < m_nodes.size(); ++i) {
           auto& node = *m_nodes[i];
           if (m_initial[i]) {

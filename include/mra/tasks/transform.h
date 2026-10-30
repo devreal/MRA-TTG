@@ -6,6 +6,7 @@
 #include <memory>
 #include <ttg.h>
 #include <utility>
+#include <vector>
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/misc/batch_size.h"
@@ -30,18 +31,47 @@ namespace mra {
    * the result.
    *
    * The tree of out_j is the union of the trees of the in_i with U(i,j) != 0.
-   * To keep the output consistent (a node is sent if and only if its parent
-   * marks it as a child of at least one function), every task passes the set
-   * of output functions present below each child down to it. Children that
-   * receive input nodes always get such a mask, even if no output function is
-   * present there, so that every input node is consumed.
+   * It is determined locally from the child information of the input node: a
+   * function not present at a key has zero coefficients and only leaf children
+   * there, so it contributes nothing. An output node is sent at every key with
+   * an input node. For this to match the child information of the output, the
+   * tree of an input function that no output depends on (a zero row of U) is
+   * added to out_0, which only adds nodes with zero coefficients to out_0.
+   *
+   * U is passed down the tree by a separate propagate task that does not touch
+   * device data, so it runs ahead of the transform kernels and exposes more tasks
+   * for batching.
    *
    * The input must be compressed, not non-standard. No screening is applied;
    * truncate the result if needed.
    */
   namespace detail {
+    /**
+     * Determines which output functions have a non-zero node at the key of in_node and
+     * which have children below it.
+     */
+    template <typename T, Dimension NDIM>
+    void transform_structure(const mra::FunctionsCompressedNode<T, NDIM>& in_node,
+                             const T* U, size_type N, size_type M,
+                             std::vector<std::array<bool, mra::Key<NDIM>::num_children()>>& has_child,
+                             SparsityInfo& sparsity)
+    {
+      has_child.assign(M, {});
+      for (size_type i = 0; i < N; ++i) {
+        const bool zero_row = std::all_of(U + i*M, U + (i+1)*M, [](T u){ return u == T(0); });
+        for (size_type j = 0; j < M; ++j) {
+          const bool contributes = U[i*M + j] != T(0);
+          if (!contributes && !(zero_row && j == 0)) continue;
+          if (contributes && !in_node.is_zero(i)) sparsity.set_nonzero(j);
+          for (int c = 0; c < mra::Key<NDIM>::num_children(); ++c) {
+            has_child[j][c] = has_child[j][c] || !in_node.is_child_leaf(i, c);
+          }
+        }
+      }
+    }
+
     /* U arrives at the root on U_in, or, if U_fixed is given, is sent there by the dispatch
-     * task; every task passes it on to the children it sends a mask to */
+     * task; the propagate tasks pass it on to the children that receive input nodes */
     template <typename T, Dimension NDIM, typename FunctionSetIn, typename FunctionSetOut,
               typename ProcMap, typename DeviceMap>
     auto make_transform_impl(const std::shared_ptr<FunctionSetIn>& fns_in,
@@ -57,8 +87,6 @@ namespace mra {
   {
     using node_type = mra::FunctionsCompressedNode<T, NDIM>;
     using matrix_type = mra::DenseTensor<T, 2>;
-    /* per output function: LeafStatus::Inner if present at this key, LeafStatus::Invalid if not */
-    using mask_type = mra::DenseTensor<LeafStatus, 1>;
     static constexpr const int num_children = mra::Key<NDIM>::num_children();
 
     /* batching is controlled process-wide (mra/misc/batch_size.h), read once here; U is
@@ -77,39 +105,29 @@ namespace mra {
     std::nullptr_t batch_pool = nullptr; // never used, only captured
 #endif // MRA_ENABLE_HOST
 
-    ttg::Edge<mra::Key<NDIM>, node_type> node_e;
-    ttg::Edge<mra::Key<NDIM>, mask_type> mask_e;
-    ttg::Edge<mra::Key<NDIM>, matrix_type> U_down(name + "-U");
+    ttg::Edge<mra::Key<NDIM>, node_type> node_p, node_t;
+    ttg::Edge<mra::Key<NDIM>, matrix_type> U_p(name + "-U"), U_t;
 
     /**
-     * Forward the input nodes and seed the root with all output functions present
-     * (and with U, if it is fixed).
+     * Forward the input nodes to the propagate and transform tasks and seed the root
+     * with U, if it is fixed.
      */
-    auto dispatch_fn = [fns_out, U_fixed](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
+    auto dispatch_fn = [U_fixed](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
-      auto sends = ttg::device::forward(ttg::device::send<0>(key, node));
+      auto sends = ttg::device::forward(ttg::device::send<0>(key, node), ttg::device::send<1>(key, node));
 #else  // MRA_ENABLE_HOST
       ttg::send<0>(key, node);
+      ttg::send<1>(key, node);
 #endif // MRA_ENABLE_HOST
-      if (key.level() == 0) {
-        const size_type M = fns_out->num_functions(key);
-        mask_type mask(M);
-        std::fill(mask.buffer().host_ptr(), mask.buffer().host_ptr() + M, LeafStatus::Inner);
+      if (key.level() == 0 && U_fixed) {
+        matrix_type U(std::array<size_type, 2>{U_fixed->dim(0), U_fixed->dim(1)});
+        std::copy(U_fixed->buffer().host_ptr(), U_fixed->buffer().host_ptr() + U_fixed->dim(0) * U_fixed->dim(1),
+                  U.buffer().host_ptr());
 #ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::send<1>(key, std::move(mask)));
+        sends.push_back(ttg::device::send<2>(key, std::move(U)));
 #else  // MRA_ENABLE_HOST
-        ttg::send<1>(key, std::move(mask));
+        ttg::send<2>(key, std::move(U));
 #endif // MRA_ENABLE_HOST
-        if (U_fixed) {
-          matrix_type U(std::array<size_type, 2>{U_fixed->dim(0), U_fixed->dim(1)});
-          std::copy(U_fixed->buffer().host_ptr(), U_fixed->buffer().host_ptr() + U_fixed->dim(0) * U_fixed->dim(1),
-                    U.buffer().host_ptr());
-#ifndef MRA_ENABLE_HOST
-          sends.push_back(ttg::device::send<2>(key, std::move(U)));
-#else  // MRA_ENABLE_HOST
-          ttg::send<2>(key, std::move(U));
-#endif // MRA_ENABLE_HOST
-        }
       }
 #ifndef MRA_ENABLE_HOST
       co_await std::move(sends);
@@ -117,106 +135,38 @@ namespace mra {
     };
 
     auto dispatch_tt = ttg::make_tt<Space>(std::move(dispatch_fn),
-                                           ttg::edges(in), ttg::edges(node_e, mask_e, U_down),
+                                           ttg::edges(in), ttg::edges(node_p, node_t, U_p),
                                            name + "-dispatch");
 
-    auto transform_fn = [fns_in, fns_out, K, name, enable_batching, batch_pool, total_functions](
-                                                      const mra::Key<NDIM>& key,
-                                                      const node_type& in_node,
-                                                      const mask_type& mask,
-                                                      const matrix_type& U) -> TASKTYPE {
+    /**
+     * Pass U to the transform task at this key and to the children that receive input
+     * nodes. Only host metadata is read, so this runs ahead of the kernels.
+     */
+    auto propagate_fn = [fns_in, fns_out, name](const mra::Key<NDIM>& key,
+                                                const node_type& in_node,
+                                                const matrix_type& U) -> TASKTYPE {
       if (in_node.is_ns()) {
         throw std::runtime_error(name + ": input must be compressed, not non-standard");
       }
-      const size_type N = fns_in->num_functions(key);
-      const size_type M = fns_out->num_functions(key);
-      if (U.dim(0) != N || U.dim(1) != M) {
+      if (U.dim(0) != fns_in->num_functions(key) || U.dim(1) != fns_out->num_functions(key)) {
         throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
       }
-      const T* Uh = U.buffer().host_ptr();
-      const LeafStatus* mask_h = mask.buffer().host_ptr();
-
-      /* output functions with a non-zero node here, and with children below here */
-      SparsityInfo sparsity(M, SparsityInfo::InitType::AllZero);
-      std::vector<std::array<bool, num_children>> has_child(M);
-      bool any_present = false;
-      for (size_type j = 0; j < M; ++j) {
-        has_child[j].fill(false);
-        if (mask_h[j] != LeafStatus::Inner) continue;
-        any_present = true;
-        for (size_type i = 0; i < N; ++i) {
-          if (Uh[i*M + j] == T(0)) continue;
-          if (!in_node.is_zero(i)) sparsity.set_nonzero(j);
-          for (int c = 0; c < num_children; ++c) {
-            has_child[j][c] = has_child[j][c] || !in_node.is_child_leaf(i, c);
-          }
-        }
-      }
 
 #ifndef MRA_ENABLE_HOST
-      auto sends = ttg::device::forward();
+      auto sends = ttg::device::forward(ttg::device::send<0>(key, U));
+#else  // MRA_ENABLE_HOST
+      ttg::send<0>(key, U);
 #endif // MRA_ENABLE_HOST
 
-      /* every child that receives input nodes gets a mask, and U */
       std::vector<mra::Key<NDIM>> U_children;
       for (auto child : children(key)) {
-        if (in_node.is_all_child_leaf(child)) continue;
-        U_children.push_back(child);
-        mask_type child_mask(M);
-        LeafStatus* cm = child_mask.buffer().host_ptr();
-        for (size_type j = 0; j < M; ++j) {
-          cm[j] = has_child[j][child.childindex()] ? LeafStatus::Inner : LeafStatus::Invalid;
-        }
-#ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::send<1>(child, std::move(child_mask)));
-#else  // MRA_ENABLE_HOST
-        ttg::send<1>(child, std::move(child_mask));
-#endif // MRA_ENABLE_HOST
+        if (!in_node.is_all_child_leaf(child)) U_children.push_back(child);
       }
       if (!U_children.empty()) {
 #ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::broadcast<2>(std::move(U_children), U));
+        sends.push_back(ttg::device::broadcast<1>(std::move(U_children), U));
 #else  // MRA_ENABLE_HOST
-        ttg::broadcast<2>(std::move(U_children), U);
-#endif // MRA_ENABLE_HOST
-      }
-
-      if (any_present) {
-        const size_type n_nonzero = sparsity.count_nonzero();
-        node_type out = (n_nonzero > 0) ? node_type(key, sparsity, K, ttg::scope::Allocate)
-                                        : node_type(key, M);
-        for (size_type j = 0; j < M; ++j) {
-          for (int c = 0; c < num_children; ++c) {
-            out.set_child_leaf(j, c, !has_child[j][c]);
-          }
-        }
-        if (n_nonzero > 0) {
-#ifndef MRA_ENABLE_HOST
-          auto input = ttg::device::Input(out.coeffs().buffer(), U.buffer());
-          if (!in_node.empty()) input.add(in_node.coeffs().buffer());
-          co_await ttg::device::select(input);
-#endif // MRA_ENABLE_HOST
-          auto in_view = in_node.coeffs().current_view();
-          auto out_view = out.coeffs().current_view();
-          const T* U_ptr = U.buffer().current_device_ptr();
-#ifndef MRA_ENABLE_HOST
-          if (enable_batching) {
-            /* the output's sparsity is pushed by the leader along with the batch */
-            auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(in_view, out_view, N, M, out.coeffs(), n_nonzero);
-            detail::submit_transform_functions_batch_leader<T, NDIM>(batch, *batch_pool, U_ptr, K, total_functions);
-          } else
-#endif // MRA_ENABLE_HOST
-          {
-            auto sparseman = make_sparsity_manager(out);
-            sparseman.populate_device_sparsity();
-            submit_transform_functions_kernel<T, NDIM>(key, in_view, out_view, U_ptr, N, M, n_nonzero, K,
-                                                       ttg::device::current_stream());
-          }
-        }
-#ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::send<0>(key, std::move(out)));
-#else  // MRA_ENABLE_HOST
-        ttg::send<0>(key, std::move(out));
+        ttg::broadcast<1>(std::move(U_children), U);
 #endif // MRA_ENABLE_HOST
       }
 #ifndef MRA_ENABLE_HOST
@@ -224,17 +174,74 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
     };
 
+    auto propagate_tt = ttg::make_tt<Space>(std::move(propagate_fn),
+                                            ttg::edges(node_p, U_fixed ? U_p : ttg::fuse(U_in, U_p)),
+                                            ttg::edges(U_t, U_p),
+                                            name + "-propagate", {"node", "U"}, {"U", "child U"});
+
+    auto transform_fn = [fns_in, fns_out, K, enable_batching, batch_pool, total_functions](
+                                                      const mra::Key<NDIM>& key,
+                                                      const node_type& in_node,
+                                                      const matrix_type& U) -> TASKTYPE {
+      const size_type N = fns_in->num_functions(key);
+      const size_type M = fns_out->num_functions(key);
+
+      /* output functions with a non-zero node here, and with children below here */
+      SparsityInfo sparsity(M, SparsityInfo::InitType::AllZero);
+      std::vector<std::array<bool, num_children>> has_child;
+      detail::transform_structure<T, NDIM>(in_node, U.buffer().host_ptr(), N, M, has_child, sparsity);
+
+      const size_type n_nonzero = sparsity.count_nonzero();
+      node_type out = (n_nonzero > 0) ? node_type(key, sparsity, K, ttg::scope::Allocate)
+                                      : node_type(key, M);
+      for (size_type j = 0; j < M; ++j) {
+        for (int c = 0; c < num_children; ++c) {
+          out.set_child_leaf(j, c, !has_child[j][c]);
+        }
+      }
+      if (n_nonzero > 0) {
+#ifndef MRA_ENABLE_HOST
+        auto input = ttg::device::Input(out.coeffs().buffer(), U.buffer());
+        if (!in_node.empty()) input.add(in_node.coeffs().buffer());
+        co_await ttg::device::select(input);
+#endif // MRA_ENABLE_HOST
+        auto in_view = in_node.coeffs().current_view();
+        auto out_view = out.coeffs().current_view();
+        const T* U_ptr = U.buffer().current_device_ptr();
+#ifndef MRA_ENABLE_HOST
+        if (enable_batching) {
+          /* the output's sparsity is pushed by the leader along with the batch */
+          auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(in_view, out_view, N, M, out.coeffs(), n_nonzero);
+          detail::submit_transform_functions_batch_leader<T, NDIM>(batch, *batch_pool, U_ptr, K, total_functions);
+        } else
+#endif // MRA_ENABLE_HOST
+        {
+          auto sparseman = make_sparsity_manager(out);
+          sparseman.populate_device_sparsity();
+          submit_transform_functions_kernel<T, NDIM>(key, in_view, out_view, U_ptr, N, M, n_nonzero, K,
+                                                     ttg::device::current_stream());
+        }
+      }
+#ifndef MRA_ENABLE_HOST
+      co_await ttg::device::send<0>(key, std::move(out));
+#else  // MRA_ENABLE_HOST
+      ttg::send<0>(key, std::move(out));
+#endif // MRA_ENABLE_HOST
+    };
+
     auto transform_tt = ttg::make_tt<Space>(std::move(transform_fn),
-                                            ttg::edges(node_e, mask_e, U_fixed ? U_down : ttg::fuse(U_in, U_down)),
-                                            ttg::edges(out, mask_e, U_down),
-                                            name, {"node", "mask", "U"}, {"out", "mask", "U"});
+                                            ttg::edges(node_t, U_t),
+                                            ttg::edges(out),
+                                            name, {"node", "U"}, {"out"});
 
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       dispatch_tt->set_keymap(procmap);
+      propagate_tt->set_keymap(procmap);
       transform_tt->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       dispatch_tt->set_devicemap(devicemap);
+      propagate_tt->set_devicemap(devicemap);
       transform_tt->set_devicemap(devicemap);
     }
 #ifndef MRA_ENABLE_HOST
@@ -246,9 +253,10 @@ namespace mra {
 
     auto ins = std::make_tuple(dispatch_tt->template in<0>());
     auto outs = std::make_tuple(transform_tt->template out<0>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(2);
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(3);
     ops[0] = std::move(dispatch_tt);
-    ops[1] = std::move(transform_tt);
+    ops[1] = std::move(propagate_tt);
+    ops[2] = std::move(transform_tt);
     return make_ttg(std::move(ops), ins, outs, name);
   }
   } // namespace detail

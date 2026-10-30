@@ -69,7 +69,8 @@ namespace mra {
 
   /**
    * A frame in the recursive call stack. We cannot rely on recursive calls in the kernel
-   * so we use a manual stack approach instead. The stack is located in shared memory.
+   * so we use a manual stack approach instead. Every thread keeps its own
+   * (identical) copy of the stack, see get_rnlp_device.
    */
   enum FrameState : unsigned char { ENTER, WAIT_LEFT, WAIT_RIGHT };
   struct Frame {
@@ -107,7 +108,7 @@ namespace mra {
     /// Ported from mra::Convolution::issmall (misc/convolutiondata.h).
     template <typename T>
     DEVSCOPE bool op1d_issmall(T expnt, Level n, Translation lx) {
-      T beta = expnt * std::exp2(T(-2) * T(n));
+      T beta = std::ldexp(expnt, -2 * int(n)); // expnt * 4^-n
       Translation l = lx == 0 ? 0 : std::abs(lx) - 1;
       return beta * T(l) * T(l) > T(49.0);
     }
@@ -125,8 +126,9 @@ namespace mra {
      * [leftbuf..rp] -- before the hgT two-pass transform first writes t0),
      * so t0 reuses that whole group's space (t0 = 0) rather than getting its
      * own. tmp cannot join that reuse: it's live concurrently WITH
-     * [leftbuf..rp] (make_rnlp_leaf and get_rnlp_device's combine step use
-     * it as scratch while retbuf/leftbuf/etc. still hold meaningful values),
+     * [leftbuf..rp] (make_rnlp_leaf uses it for its per-warp partial sums,
+     * nwarps*2K <= 2K*(2K+1) elements, while retbuf/leftbuf/etc. still hold
+     * meaningful values),
      * so it keeps its own region, as does smat (live alongside both rmat,
      * which aliases tmp, and ns_scratch, which aliases t0, during the final
      * transpose/norm steps). rmat/ns_scratch keep aliasing tmp/t0 exactly as
@@ -151,8 +153,7 @@ namespace mra {
       size_type retbuf;      // [2K]
       size_type combine_out; // [2K] -- see get_rnlp_device's WAIT_RIGHT comment for why this must
                               // be distinct from retbuf/leftbuf, not an in-place combine target
-      size_type rnlp1;       // [2K]
-      size_type rnlp2;       // [2K]
+      size_type rnlps;       // [4][2K] -- the 4 distinct rnlp vectors a block needs, see generate_op1d_one
       size_type Rvec;        // [4K]
       size_type rm;          // [K*K]
       size_type r0;          // [K*K]
@@ -172,8 +173,7 @@ namespace mra {
         leftbuf = p; p += MRA_OP1D_MAX_RECURSION_DEPTH * 2 * K;
         retbuf = p; p += 2 * K;
         combine_out = p; p += 2 * K;
-        rnlp1 = p; p += 2 * K;
-        rnlp2 = p; p += 2 * K;
+        rnlps = p; p += 4 * 2 * K;
         Rvec = p; p += 4 * K;
         rm = p; p += K * K;
         r0 = p; p += K * K;
@@ -201,94 +201,236 @@ namespace mra {
       return o;
     }
 
+    /**
+     * Quadrature parameters of make_rnlp_leaf that depend only on the term
+     * and the level (not on the translation): every leaf of one
+     * get_rnlp_device call is at the same level (max(n0, natlev), see
+     * there), and all of a block's calls share n0, so generate_op1d_one
+     * computes these once per block rather than per leaf.
+     */
+    template <typename T>
+    struct RnlpLeafParams {
+      T scaledcoeff, beta, h, argmax;
+      size_type nbox;
+
+      SCOPE RnlpLeafParams(T coeff, T expnt, Level n) {
+        scaledcoeff = coeff * std::exp2(T(-0.5) * T(n));
+        beta = std::ldexp(expnt, -2 * int(n)); // expnt * 4^-n
+        h = T(1) / std::sqrt(beta);
+        nbox = std::max(size_type(1), size_type(T(1) / h));
+        h = T(1) / T(nbox);
+        const T sch = std::fabs(scaledcoeff * h);
+        argmax = std::fabs(std::log(T(1e-22) / sch));
+      }
+    };
+
+#if defined(__CUDA_ARCH__)
+    /**
+     * make_rnlp_leaf for a compile-time K and a block of whole 32-lane warps
+     * (the common K == 8 case): each thread accumulates all 2K coefficients
+     * of its points in registers (the Legendre recurrence fully unrolled, so
+     * its n/(n+1) factors are constants), and each warp then sums them with a
+     * reduce-scatter butterfly -- log2(PP) halving steps exchanging half of
+     * the remaining values, PP-1 shuffles in total for PP (2K rounded up to a
+     * power of two) values instead of 5 per value -- after which lane l holds
+     * the warp's sum for coefficient l >> (5 - log2(PP)). See make_rnlp_leaf
+     * for the math and the loop structure.
+     */
+    template <typename T, typename KT>
+    __device__ void make_rnlp_leaf_ct(const RnlpLeafParams<T>& lp, KT K, size_type npt,
+                                      const T* quad_x, const T* quad_w,
+                                      Translation lx, T* tmp, T* out) {
+      constexpr int P = 2 * KT::value;
+      constexpr int PP = (P <= 1) ? 1 : (P <= 2) ? 2 : (P <= 4) ? 4 : (P <= 8) ? 8 : (P <= 16) ? 16 : 32;
+      static_assert(P <= 32, "make_rnlp_leaf_ct: 2K must be at most 32");
+      constexpr int LOG2PP = (PP == 1) ? 0 : (PP == 2) ? 1 : (PP == 4) ? 2 : (PP == 8) ? 3 : (PP == 16) ? 4 : 5;
+      const Translation lxx = (lx < 0) ? (-lx - 1) : lx;
+      const size_type total_work = lp.nbox * npt;
+      const unsigned tid = thread_id();
+      const unsigned nthreads = block_size();
+      const unsigned lane = tid % 32;
+      const unsigned warp = tid / 32;
+      const unsigned nwarps = nthreads / 32;
+
+      T a[PP];
+      #pragma unroll
+      for (int i = 0; i < PP; ++i) a[i] = T(0);
+
+      for (size_type base = 0; base < total_work; base += nthreads) {
+        /* the first box of this iteration -- uniform across the block */
+        const T xlo0 = T(base / npt) * lp.h + T(lxx);
+        if (lp.beta * xlo0 * xlo0 > lp.argmax) break;
+        const size_type w = base + tid;
+        if (w < total_work) {
+          const size_type box = w / npt, i = w % npt;
+          const T xlo = T(box) * lp.h + T(lxx);
+          if (!(lp.beta * xlo * xlo > lp.argmax)) {
+            const T xx = xlo + lp.h * quad_x[i];
+            const T ee = lp.scaledcoeff * exp(-lp.beta * xx * xx) * quad_w[i] * lp.h;
+            const T z = T(2) * (xx - T(lxx)) - T(1);
+            T pm = T(0), pc = T(1);
+            #pragma unroll
+            for (int pp = 0; pp < P; ++pp) {
+              a[pp] += ee * pc;
+              const T next = (z * pc - pm) * (T(pp) / T(pp + 1)) + z * pc;
+              pm = pc;
+              pc = next;
+            }
+          }
+        }
+      }
+
+      /* reduce-scatter across the warp; each step is instantiated separately
+       * so that all indices into a[] are compile-time constants (otherwise
+       * a[] ends up in local memory) */
+      auto rs_step = [&]<int STEP>() {
+        constexpr int o = 16 >> STEP;
+        if constexpr (STEP < LOG2PP) {
+          constexpr int half = PP >> (STEP + 1); // values kept after this step
+          const bool upper = (lane & o) != 0;
+          #pragma unroll
+          for (int i = 0; i < half; ++i) {
+            const T send = upper ? a[i] : a[i + half];
+            const T keep = upper ? a[i + half] : a[i];
+            a[i] = keep + __shfl_xor_sync(0xffffffffu, send, o);
+          }
+        } else {
+          a[0] += __shfl_xor_sync(0xffffffffu, a[0], o);
+        }
+      };
+      rs_step.template operator()<0>();
+      rs_step.template operator()<1>();
+      rs_step.template operator()<2>();
+      rs_step.template operator()<3>();
+      rs_step.template operator()<4>();
+      const unsigned pmine = lane >> (5 - LOG2PP);
+
+      /* combine the warps' sums; the barrier also protects tmp from a previous use */
+      SYNCTHREADS();
+      if ((lane & ((1u << (5 - LOG2PP)) - 1)) == 0 && pmine < (unsigned)P) tmp[warp * P + pmine] = a[0];
+      SYNCTHREADS();
+      for (unsigned pp = tid; pp < (unsigned)P; pp += nthreads) {
+        T s = T(0);
+        for (unsigned wi = 0; wi < nwarps; ++wi) s += tmp[wi * P + pp];
+        s *= std::sqrt(T(2) * T(pp) + T(1));
+        if (lx < 0 && (pp & 1)) s = -s; // odd coefficients flip sign for negative translations
+        out[pp] = s;
+      }
+    }
+#endif // __CUDA_ARCH__
+
     /// Ported from mra::Convolution::make_rnlp (misc/convolutiondata.h): the
     /// leaf (base-case) quadrature projection of the Gaussian onto
-    /// double-order polynomials. `out` is block-wide (shared) scratch with
-    /// room for 2*K elements.
+    /// double-order polynomials, out[p] = sqrt(2p+1) * sum over quadrature
+    /// points x of w(x) * P_p(2x-1) (P_p: Legendre polynomial), for
+    /// p < 2*K. `out` (2*K elements) and `tmp` are block-wide (shared)
+    /// scratch; tmp needs room for 2*K elements per warp.
     ///
-    /// Cooperative along two axes: threadIdx.x owns an output coefficient p
-    /// (blockDim.x == 2*K exactly, see max_thread_dims(2*K) in
-    /// submit_generate_op1d_kernel, so this needs no stride on device -- the
-    /// stride is still there for the host build, where blockDim.x == 1 and
-    /// one "thread" must walk all 2*K of them), while threadIdx.y owns a
-    /// strided slice of the (box, quadrature-point) work -- previously that
-    /// whole double loop was walked redundantly by every one of the up to
-    /// 2*K*2*K threads in the block, yet only the 2*K threads with
-    /// threadIdx.y == 0 ever contributed (the rest fell outside `out`'s
-    /// thread_id()-strided publication range and did nothing useful).
-    /// Flattening (box, i) into one index lets every row stride over it
-    /// independently; box is non-decreasing in that flattened index, so a
-    /// row's own early-exit once beta*xlo*xlo crosses argmax is still exact,
-    /// just evaluated per row instead of once globally. Each (p, row) thread
-    /// accumulates its own private partial sum (still redundantly computing
-    /// the full `phix` vector per point, same as before, to avoid a
-    /// reduction/atomics over that intermediate); rows are then reduced into
-    /// `out[p]` after a sync, via the per-row partial sums held in `acc`.
+    /// On device, each thread takes one quadrature point (box, i) at a time
+    /// -- all block_size() threads stride over the flattened points together
+    /// -- and evaluates the Gaussian and the whole Legendre sequence for it
+    /// once (with a compile-time K the recurrence's n/(n+1) factors are
+    /// constants). The per-p contributions are summed within each warp by
+    /// shuffles and accumulated in tmp by the warp's lane 0, which works for
+    /// any block size, including a partial last warp (e.g. 2K x min(256/2K, 2K)
+    /// = 240 threads for K == 10). Boxes are visited in increasing order, so the
+    /// loop stops for the whole block (uniformly) once the first box of an
+    /// iteration lies beyond argmax -- the same set of points as MADNESS's
+    /// per-box early exit.
     template <typename T>
-    DEVSCOPE void make_rnlp_leaf(T coeff, T expnt, auto K, size_type npt,
+    DEVSCOPE void make_rnlp_leaf(const RnlpLeafParams<T>& lp, auto K, size_type npt,
                                   const T* quad_x, const T* quad_w,
-                                  Level n, Translation lx, T* tmp, T* out) {
-      Translation lkeep = lx;
-      Translation lxx = (lx < 0) ? (-lx - 1) : lx;
-      T scaledcoeff = coeff * std::exp2(T(-0.5) * T(n));
-      T beta = expnt * std::exp2(T(-2) * T(n));
-      T h = T(1) / std::sqrt(beta);
-      size_type nbox = std::max(size_type(1), size_type(T(1) / h));
-      h = T(1) / T(nbox);
-      T sch = std::fabs(scaledcoeff * h);
-      T argmax = std::fabs(std::log(T(1e-22) / sch));
+                                  Translation lx, T* tmp, T* out) {
+      const Translation lxx = (lx < 0) ? (-lx - 1) : lx;
+      const size_type P = 2 * K;
+      const size_type total_work = lp.nbox * npt;
 
-      // acc[row*(2*K)+p]: one partial sum per (row, output coefficient),
-      // reduced across rows below, flattened (rather than a T(*)[2*K]
-      // pointer-to-array, which would need 2*K as a compile-time extent) into
-      // tmp -- sized exactly 2*K*2*K by the runtime K (see
-      // Op1DWorkspaceOffsets), which exactly fits blockDim.y <= 2*K rows of
-      // 2*K columns each.
-      T* acc = tmp;
-
-      auto phix = [](T x, size_type p) {
-        T z = T(2) * x - T(1);
-        // tmp[1] holds the result for the current p
-        T tmp[2] = {T(1), T(1)};
-        if (p >= 1) tmp[1] = z;
-        // after this loop, the result for p is in tmp[1]
-        for (size_type n = 1; n < p; ++n) {
-          T nn1 = T(n) / T(n + 1);
-          T v = (z * tmp[1] - tmp[0]) * nn1 + z * tmp[1];
-          // move tmp down
-          tmp[0] = tmp[1];
-          tmp[1] = v;
-        }
-        return tmp[1] * std::sqrt(T(2) * T(p) + T(1));
-      };
-
-      const size_type row = (size_type)threadIdx.y;
-      const size_type nrows = (size_type)blockDim.y;
-      const size_type total_work = nbox * npt;
-
-      for (size_type p = threadIdx.x; p < 2 * K; p += blockDim.x) {
-        T a = T(0);
-        for (size_type w = row; w < total_work; w += nrows) {
-          size_type box = w / npt, i = w % npt;
-          T xlo = T(box) * h + T(lxx);
-          if (beta * xlo * xlo > argmax) break; // box is non-decreasing in w -- safe early exit for this row
-          T xx = xlo + h * quad_x[i];
-          T ee = scaledcoeff * exp(-beta * xx * xx) * quad_w[i] * h;
-          a += ee * phix(xx - T(lxx), p);
-        }
-        acc[row * (2 * K) + p] = a;
-      }
-      SYNCTHREADS();
-
-      if (row == 0) {
-        for (size_type p = threadIdx.x; p < 2 * K; p += blockDim.x) {
-          T s = T(0);
-          for (size_type r = 0; r < nrows; ++r) s += acc[r * (2 * K) + p];
-          if (lkeep < 0 && (p & 1)) s = -s; // odd coefficients flip sign for negative translations
-          out[p] = s;
+#ifdef HAVE_DEVICE_ARCH
+#if defined(__CUDA_ARCH__)
+      if constexpr (is_ct_integral_v<decltype(K)>) {
+        if (block_size() % 32 == 0) {
+          make_rnlp_leaf_ct(lp, K, npt, quad_x, quad_w, lx, tmp, out);
+          return;
         }
       }
+#endif // __CUDA_ARCH__
+      const unsigned tid = thread_id();
+      const unsigned nthreads = block_size();
+      const unsigned lane = tid % MRA_WARP_SIZE;
+      const unsigned warp = tid / MRA_WARP_SIZE;
+      const unsigned nwarps = (nthreads + MRA_WARP_SIZE - 1) / MRA_WARP_SIZE;
+      const unsigned nlanes = (nthreads - warp * MRA_WARP_SIZE < MRA_WARP_SIZE)
+                            ? nthreads - warp * MRA_WARP_SIZE : MRA_WARP_SIZE;
+      /* this warp's partial sums, accumulated by its lane 0 only, so the
+       * block's last warp may be partial (nlanes < MRA_WARP_SIZE) */
+      T* wsum = tmp + warp * P;
+
+      /* the barrier protects tmp from a previous use */
       SYNCTHREADS();
+      if (lane == 0) {
+        for (size_type pp = 0; pp < P; ++pp) wsum[pp] = T(0);
+      }
+
+      for (size_type base = 0; base < total_work; base += nthreads) {
+        /* the first box of this iteration -- uniform across the block */
+        const T xlo0 = T(base / npt) * lp.h + T(lxx);
+        if (lp.beta * xlo0 * xlo0 > lp.argmax) break;
+
+        const size_type w = base + tid;
+        T ee = T(0), z = T(0);
+        if (w < total_work) {
+          const size_type box = w / npt, i = w % npt;
+          const T xlo = T(box) * lp.h + T(lxx);
+          if (!(lp.beta * xlo * xlo > lp.argmax)) {
+            const T xx = xlo + lp.h * quad_x[i];
+            ee = lp.scaledcoeff * exp(-lp.beta * xx * xx) * quad_w[i] * lp.h;
+            z = T(2) * (xx - T(lxx)) - T(1);
+          }
+        }
+
+        /* Legendre recurrence: pc = P_p(z), pm = P_{p-1}(z) */
+        T pm = T(0), pc = T(1);
+        for (size_type pp = 0; pp < P; ++pp) {
+          /* the warp's sum for this p, valid in lane 0 */
+          const T c = reduce_warp(ee * pc, lane, nlanes);
+          if (lane == 0) wsum[pp] += c;
+          const T next = (z * pc - pm) * (T(pp) / T(pp + 1)) + z * pc;
+          pm = pc;
+          pc = next;
+        }
+      }
+
+      /* combine the warps' sums */
+      SYNCTHREADS();
+      for (size_type pp = tid; pp < P; pp += nthreads) {
+        T s = T(0);
+        for (unsigned wi = 0; wi < nwarps; ++wi) s += tmp[wi * P + pp];
+        s *= std::sqrt(T(2) * T(pp) + T(1));
+        if (lx < 0 && (pp & 1)) s = -s; // odd coefficients flip sign for negative translations
+        out[pp] = s;
+      }
+#else  // HAVE_DEVICE_ARCH
+      for (size_type pp = 0; pp < P; ++pp) out[pp] = T(0);
+      for (size_type w = 0; w < total_work; ++w) {
+        const size_type box = w / npt, i = w % npt;
+        const T xlo = T(box) * lp.h + T(lxx);
+        if (lp.beta * xlo * xlo > lp.argmax) break; // box is non-decreasing in w
+        const T xx = xlo + lp.h * quad_x[i];
+        const T ee = lp.scaledcoeff * exp(-lp.beta * xx * xx) * quad_w[i] * lp.h;
+        const T z = T(2) * (xx - T(lxx)) - T(1);
+        T pm = T(0), pc = T(1);
+        for (size_type pp = 0; pp < P; ++pp) {
+          out[pp] += ee * pc;
+          const T next = (z * pc - pm) * (T(pp) / T(pp + 1)) + z * pc;
+          pm = pc;
+          pc = next;
+        }
+      }
+      for (size_type pp = 0; pp < P; ++pp) {
+        out[pp] *= std::sqrt(T(2) * T(pp) + T(1));
+        if (lx < 0 && (pp & 1)) out[pp] = -out[pp];
+      }
+#endif // HAVE_DEVICE_ARCH
     }
 
     /**
@@ -312,58 +454,57 @@ namespace mra {
      * memory/stack sizing unpredictable for the compiler (and risks a
      * runtime stack overflow across many concurrent threads if actual depth
      * exceeds whatever nvcc assumed); this version's control-flow state is a
-     * fixed, statically-sized, per-thread-PRIVATE array instead --
+     * fixed, statically-sized, per-thread-private array instead --
      * MRA_OP1D_MAX_RECURSION_DEPTH frames, each just a small (n, lx, state)
-     * triple. Kept private (redundantly identical on every thread, since it
-     * depends only on scalar inputs shared by the whole block) rather than
-     * promoted to the block-wide `leftbuf`/`retbuf`/`combine_out` scratch,
-     * which hold the actual numerical results and are the only things that
-     * need synchronization.
+     * triple, redundantly identical on every thread (the traversal depends
+     * only on scalar inputs shared by the whole block), so no thread ever
+     * diverges from another at a barrier. Only the numerical results live in
+     * block-wide scratch (retbuf, leftbuf, combine_out).
      *
      * Each frame starts ENTER (not yet processed): issmall() prunes it to a
-     * zero leaf immediately; n>=natlev makes it a quadrature leaf; otherwise
-     * it's an internal node -- push the left child (frame state becomes
-     * WAIT_LEFT) and let the loop resolve it (however deep that takes,
-     * within the same fixed stack). When a WAIT_LEFT frame is revisited (only
-     * possible immediately after its child popped, so retbuf reliably holds
-     * that child's result, synchronized), stash it into leftbuf[top] and
-     * push the right child (state becomes WAIT_RIGHT). When a WAIT_RIGHT
-     * frame is revisited, retbuf holds the right child's result; combine it
-     * with leftbuf[top] via hgT2k into combine_out (a buffer distinct from
-     * both inputs -- every thread's output index reads the FULL 4K
-     * concatenated vector, so overwriting either input in place while other
-     * threads may still be reading it would race), then copy combine_out
-     * back into retbuf for the parent to consume. When the stack empties,
-     * retbuf holds the original (n0, lx0) query's answer.
+     * zero leaf immediately; n>=natlev makes it a quadrature leaf (so every
+     * leaf is at level max(n0, natlev)); otherwise it's an internal node --
+     * push the left child (frame state becomes WAIT_LEFT). When a WAIT_LEFT
+     * frame is revisited, retbuf holds the left child's result; stash it
+     * into leftbuf[top] and push the right child (state becomes
+     * WAIT_RIGHT). When a WAIT_RIGHT frame is revisited, retbuf holds the
+     * right child's result; combine it with leftbuf[top] via hgT2k into
+     * combine_out (every output index reads the FULL 4K concatenated vector,
+     * so overwriting either input in place while other threads may still be
+     * reading it would race), then copy combine_out back into retbuf for the
+     * parent to consume.
+     *
+     * Element i of retbuf/leftbuf/combine_out is always written by the same
+     * thread (the thread_id()-strided loops below and in make_rnlp_leaf all
+     * use the same mapping), so handing a result from a child to its parent
+     * needs no barrier; the only barriers are around the combine step, which
+     * reads every element, and inside make_rnlp_leaf.
      */
     template <typename T, concepts::TensorView<2> ViewHgT2k>
     DEVSCOPE void get_rnlp_device(const GaussianTermParams<T>& p, auto K, size_type npt,
                                    const T* quad_x, const T* quad_w,
                                    const ViewHgT2k& hgT2k,
                                    Level n0, Translation lx0,
+                                   const RnlpLeafParams<T>& lp, // for level max(n0, p.natlev)
                                    T* leftbuf, T* retbuf, T* combine_out,
-                                   T* tmp, Frame* stack) {
+                                   T* tmp) {
+      const size_type tid = thread_id();
+      const size_type nthreads = block_size();
+      const size_type K2 = 2 * K;
+      const T* hg = hgT2k.data(); // row-major, row stride hg_ld (4K x 4K; only the first 2K columns are used)
+      const size_type hg_ld = hgT2k.dim(1);
+
+      Frame stack[MRA_OP1D_MAX_RECURSION_DEPTH];
       size_type sp = 0;
-      if (is_team_lead()) {
-        stack[sp].n = n0;
-        stack[sp].lx = lx0;
-        stack[sp].state = ENTER;
-      }
-      SYNCTHREADS();
-      ++sp;
+      stack[sp++] = Frame{n0, lx0, ENTER};
 
       while (sp > 0) {
         const size_type top = sp - 1;
-        // Snapshot the frame, then synchronize: the team lead updates
-        // stack[top].state below, and a thread that had not read it yet would
-        // otherwise see the new state and take a different branch (and a
-        // different SYNCTHREADS()) than the rest of the block.
-        const Frame f = stack[top];
-        SYNCTHREADS();
+        Frame& f = stack[top];
 
         if (f.state == ENTER) {
           if (op1d_issmall(p.expnt, f.n, f.lx)) {
-            for (size_type i = thread_id(); i < 2 * K; i += block_size()) retbuf[i] = T(0);
+            for (size_type i = tid; i < K2; i += nthreads) retbuf[i] = T(0);
             --sp;
             continue;
           }
@@ -375,24 +516,17 @@ namespace mra {
               }
               return;
             }
-            if (is_team_lead()) {
-              stack[top].state = WAIT_LEFT;
-              stack[sp].n = f.n + 1;
-              stack[sp].lx = 2 * f.lx;
-              stack[sp].state = ENTER;
-            }
-            SYNCTHREADS();
-            ++sp;
+            f.state = WAIT_LEFT;
+            stack[sp++] = Frame{Level(f.n + 1), Translation(2 * f.lx), ENTER};
             continue;
           }
-          make_rnlp_leaf(p.coeff, p.expnt, K, npt, quad_x, quad_w, f.n, f.lx, tmp, retbuf); // already synced internally
+          make_rnlp_leaf(lp, K, npt, quad_x, quad_w, f.lx, tmp, retbuf);
           --sp;
           continue;
         }
 
         if (f.state == WAIT_LEFT) {
-          for (size_type i = thread_id(); i < 2 * K; i += block_size())
-            leftbuf[top * 2 * K + i] = retbuf[i];
+          for (size_type i = tid; i < K2; i += nthreads) leftbuf[top * K2 + i] = retbuf[i];
           if (sp >= MRA_OP1D_MAX_RECURSION_DEPTH) {
             if (is_team_lead()) {
               THROWF("get_rnlp_device: recursion depth exceeded MRA_OP1D_MAX_RECURSION_DEPTH (%d)\n",
@@ -400,62 +534,27 @@ namespace mra {
             }
             return;
           }
-          if (is_team_lead()) {
-            stack[top].state = WAIT_RIGHT;
-            stack[sp].n = f.n + 1;
-            stack[sp].lx = 2 * f.lx + 1;
-            stack[sp].state = ENTER;
-          }
-          SYNCTHREADS();
-          ++sp;
+          f.state = WAIT_RIGHT;
+          stack[sp++] = Frame{Level(f.n + 1), Translation(2 * f.lx + 1), ENTER};
           continue;
         }
 
         // f.state == WAIT_RIGHT: retbuf holds the right child's result,
-        // leftbuf[top] the (already-computed) left child's. Parallelized the
-        // same way as make_rnlp_leaf: threadIdx.x owns an output index j
-        // (blockDim.x == 2*K exactly, so this needs no stride on device --
-        // see make_rnlp_leaf's comment), while threadIdx.y splits the 4*K-
-        // term contraction (leftbuf/retbuf concatenated against hgT2k's
-        // matching 4*K rows) across rows, each row's partial sum landing in
-        // tmp (flattened as acc[row*(2*K)+j] scratch -- safe to reuse: tmp is
-        // otherwise untouched for the whole make_rnlij_device/
-        // get_rnlp_device call chain, see make_rnlp_leaf's own comment, and
-        // is sized exactly 2*K*2*K by the runtime K -- see
-        // Op1DWorkspaceOffsets -- which exactly fits blockDim.y <= 2*K rows
-        // of 2*K columns each), reduced into combine_out afterward. Safe to
-        // sync right after the j-loop (no per-iteration barrier needed)
-        // because j's loop always takes exactly one trip per thread on
-        // device -- its range (2*K) equals blockDim.x exactly, unlike
-        // make_rnlij_device's K*K-sized contraction below, which needs a
-        // wave loop instead.
-        {
-          const size_type row = (size_type)threadIdx.y;
-          const size_type nrows = (size_type)blockDim.y;
-          T* acc = tmp;
-
-          for (size_type j = threadIdx.x; j < 2 * K; j += blockDim.x) {
-            T a = T(0);
-            for (size_type k = row; k < 4 * K; k += nrows) {
-              T src = (k < 2 * K) ? leftbuf[top * 2 * K + k] : retbuf[k - 2 * K];
-              a += src * hgT2k(k, j);
-            }
-            acc[row * (2 * K) + j] = a;
-          }
-          SYNCTHREADS();
-          if (row == 0) {
-            for (size_type j = threadIdx.x; j < 2 * K; j += blockDim.x) {
-              T s = T(0);
-              for (size_type r = 0; r < nrows; ++r) s += acc[r * (2 * K) + j];
-              combine_out[j] = s;
-            }
-          }
-          SYNCTHREADS();
-          for (size_type j = thread_id(); j < 2 * K; j += block_size()) retbuf[j] = combine_out[j];
-          --sp;
+        // leftbuf[top] the left child's -- both written by other threads.
+        SYNCTHREADS();
+        for (size_type j = tid; j < K2; j += nthreads) {
+          T a = T(0);
+          for (size_type k = 0; k < K2; ++k) a += leftbuf[top * K2 + k] * hg[k * hg_ld + j];
+          for (size_type k = 0; k < K2; ++k) a += retbuf[k] * hg[(K2 + k) * hg_ld + j];
+          combine_out[j] = a;
         }
+        SYNCTHREADS(); // everyone is done reading retbuf
+        for (size_type j = tid; j < K2; j += nthreads) retbuf[j] = combine_out[j];
+        --sp;
       }
-      // retbuf now holds the (n0, lx0) query's answer -- caller reads it directly.
+      // retbuf now holds the (n0, lx0) query's answer -- element i written by
+      // the thread that owns it (see above); callers synchronize before
+      // reading other threads' elements.
     }
 
     /**
@@ -472,74 +571,31 @@ namespace mra {
      *
      * The contraction is out(qi,qj) = sum_k c(k,qi,qj)*Rvec[k] -- the same
      * math as MADNESS's c(qi,qj,k)*Rvec[k], just reading the transposed
-     * layout above.
-     *
-     * leftbuf/retbuf/combine_out are get_rnlp_device's own scratch (passed
-     * through); rnlp1/rnlp2/Rvec are this function's own block-wide scratch.
+     * layout above -- with Rvec = 2^(-n/2) [rnlp(n, lx-1), rnlp(n, lx)].
+     * The two rnlp vectors are computed by the caller (generate_op1d_one,
+     * which shares them between neighboring lx) and must be visible to the
+     * whole block. One thread per output element.
      */
-    template <typename T, concepts::TensorView<2> ViewHgT2k, concepts::TensorView<3> ViewC>
-    DEVSCOPE void make_rnlij_device(const GaussianTermParams<T>& p, auto K, size_type npt,
-                                     const T* quad_x, const T* quad_w,
-                                     const ViewHgT2k& hgT2k,
-                                     const ViewC& cten,
-                                     Level n, Translation lx,
-                                     T* leftbuf, T* retbuf, T* combine_out,
-                                     T* rnlp1, T* rnlp2, T* Rvec, T* out, T* tmp, Frame* stack) {
-      get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, n, lx - 1, leftbuf, retbuf, combine_out, tmp, stack);
-      for (size_type i = thread_id(); i < 2 * K; i += block_size()) rnlp1[i] = retbuf[i];
-      SYNCTHREADS();
-      get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, n, lx, leftbuf, retbuf, combine_out, tmp, stack);
-      for (size_type i = thread_id(); i < 2 * K; i += block_size()) rnlp2[i] = retbuf[i];
-      SYNCTHREADS();
-
-      T scale = exp2(T(-0.5) * T(n));
-      for (size_type i = thread_id(); i < 2 * K; i += block_size()) {
+    template <typename T, concepts::TensorView<3> ViewC>
+    DEVSCOPE void make_rnlij_device(auto K, const ViewC& cten, Level n,
+                                     const T* rnlp1, const T* rnlp2, T* Rvec, T* out) {
+      const size_type tid = thread_id();
+      const size_type nthreads = block_size();
+      const size_type K2 = 2 * K;
+      const T scale = exp2(T(-0.5) * T(n));
+      for (size_type i = tid; i < K2; i += nthreads) {
         Rvec[i] = rnlp1[i] * scale;
-        Rvec[2 * K + i] = rnlp2[i] * scale;
+        Rvec[K2 + i] = rnlp2[i] * scale;
       }
       SYNCTHREADS();
-
-      // Parallelize the 4*K-term reduction too, same idea as get_rnlp_device's
-      // combine step above: threadIdx.x owns an output index, threadIdx.y
-      // splits the reduction over k across rows into tmp-backed scratch
-      // (safe to reuse -- the earlier get_rnlp_device calls that also use
-      // tmp have already returned and been fully synced by this point),
-      // reduced after a sync. Unlike that combine step, K*K generally isn't
-      // a multiple of blockDim.x (==2*K), so threadIdx.x-striding this with
-      // a single SYNCTHREADS() after the loop would give lanes an UNEVEN
-      // number of loop trips -- and a SYNCTHREADS() reached a different
-      // number of times by different threads is a hang, not a wrong answer.
-      // Instead every thread runs exactly nwaves iterations (nwaves depends
-      // only on K and blockDim.x, both uniform across the block), masking
-      // the tail wave's out-of-range lanes with `idx < K*K` around the work
-      // only, never around the syncs.
-      {
-        const size_type row = (size_type)threadIdx.y;
-        const size_type nrows = (size_type)blockDim.y;
-        const size_type ncols = (size_type)blockDim.x; // == 2*K
-        const size_type nwaves = (K * K + ncols - 1) / ncols;
-        // Flattened as acc[row*ncols+threadIdx.x] -- tmp is sized exactly
-        // 2*K*2*K by the runtime K (see Op1DWorkspaceOffsets), which exactly
-        // fits blockDim.y (<=2*K) rows of blockDim.x (==2*K) columns each.
-        T* acc = tmp;
-
-        for (size_type wave = 0; wave < nwaves; ++wave) {
-          const size_type idx = wave * ncols + threadIdx.x;
-          T a = T(0);
-          if (idx < K * K) {
-            size_type qi = idx / K, qj = idx % K;
-            for (size_type k = row; k < 4 * K; k += nrows) a += cten(k, qi, qj) * Rvec[k];
-          }
-          acc[row * ncols + threadIdx.x] = a;
-          SYNCTHREADS();
-          if (row == 0 && idx < K * K) {
-            T s = T(0);
-            for (size_type r = 0; r < nrows; ++r) s += acc[r * ncols + threadIdx.x];
-            out[idx] = s;
-          }
-          SYNCTHREADS();
-        }
+      const T* c = cten.data(); // (4K x K x K), row-major
+      const size_type c_ld = cten.dim(1) * cten.dim(2);
+      for (size_type idx = tid; idx < K * K; idx += nthreads) {
+        T a = T(0);
+        for (size_type k = 0; k < 2 * K2; ++k) a += c[k * c_ld + idx] * Rvec[k];
+        out[idx] = a;
       }
+      SYNCTHREADS(); // Rvec is reused by the next call; out is read by other threads
     }
 
     /// Frobenius norm of a row-padded 2D buffer: `rows` x `cols` logical
@@ -659,8 +715,7 @@ namespace mra {
       T* leftbuf = op1d_smem + off.leftbuf;         // [MRA_OP1D_MAX_RECURSION_DEPTH][2K]
       T* retbuf = op1d_smem + off.retbuf;           // [2K]
       T* combine_out = op1d_smem + off.combine_out; // [2K] -- see get_rnlp_device's WAIT_RIGHT comment for why this must be distinct from retbuf/leftbuf, not an in-place combine target
-      T* rnlp1 = op1d_smem + off.rnlp1;             // [2K]
-      T* rnlp2 = op1d_smem + off.rnlp2;             // [2K]
+      T* rnlps = op1d_smem + off.rnlps;             // [4][2K]
       T* Rvec = op1d_smem + off.Rvec;               // [4K]
       T* rm = op1d_smem + off.rm;                   // [K*K]
       T* r0 = op1d_smem + off.r0;                   // [K*K]
@@ -710,14 +765,22 @@ namespace mra {
         return;
       }
 
-      SHARED Frame stack[MRA_OP1D_MAX_RECURSION_DEPTH]; // per-thread private; see header comment
+      // The three rnlij blocks at level n+1, translations 2lx-1, 2lx, 2lx+1,
+      // need rnlp at translations (2lx-2, 2lx-1), (2lx-1, 2lx), (2lx, 2lx+1):
+      // compute the 4 distinct ones once, rnlps[r] = rnlp(n+1, 2lx-2+r).
+      // All leaves of these trees are at level max(n+1, natlev).
+      const size_type K2 = 2 * K;
+      const RnlpLeafParams<T> lp(p.coeff, p.expnt, std::max(Level(item.n + 1), p.natlev));
+      for (int r = 0; r < 4; ++r) {
+        get_rnlp_device(p, K, npt, quad_x, quad_w, hgT2k, Level(item.n + 1), Translation(2 * lx - 2 + r), lp,
+                        leftbuf, retbuf, combine_out, tmp);
+        for (size_type i = thread_id(); i < K2; i += block_size()) rnlps[r * K2 + i] = retbuf[i];
+      }
+      SYNCTHREADS();
 
-      make_rnlij_device(p, K, npt, quad_x, quad_w, hgT2k, cten, item.n + 1, 2 * lx - 1,
-                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, rm, tmp, stack);
-      make_rnlij_device(p, K, npt, quad_x, quad_w, hgT2k, cten, item.n + 1, 2 * lx,
-                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, r0, tmp, stack);
-      make_rnlij_device(p, K, npt, quad_x, quad_w, hgT2k, cten, item.n + 1, 2 * lx + 1,
-                         leftbuf, retbuf, combine_out, rnlp1, rnlp2, Rvec, rp, tmp, stack);
+      make_rnlij_device<T>(K, cten, Level(item.n + 1), rnlps + 0 * K2, rnlps + 1 * K2, Rvec, rm);
+      make_rnlij_device<T>(K, cten, Level(item.n + 1), rnlps + 1 * K2, rnlps + 2 * K2, Rvec, r0);
+      make_rnlij_device<T>(K, cten, Level(item.n + 1), rnlps + 2 * K2, rnlps + 3 * K2, Rvec, rp);
 
       // Assemble the 2Kx2K child block from rm/r0/rp: read-only inputs, tmp
       // the sole (distinct) output -- no in-place-aliasing hazard.
@@ -734,17 +797,19 @@ namespace mra {
       // comment above get_rnlp_device for the mTxmq-derived verification of
       // this convention). Each pass reads one buffer and writes a different
       // one (tmp->t0, then t0->rmat).
+      const T* hg = hgT.data(); // (2K x 2K), row-major, row stride hg_ld
+      const size_type hg_ld = hgT.dim(1);
       for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size()) {
         size_type qi = idx / (2 * K), qj = idx % (2 * K);
         T acc = T(0);
-        for (size_type k = 0; k < 2 * K; ++k) acc += tmp[k * (2 * K) + qi] * hgT(k, qj);
+        for (size_type k = 0; k < 2 * K; ++k) acc += tmp[k * (2 * K) + qi] * hg[k * hg_ld + qj];
         t0[idx] = acc;
       }
       SYNCTHREADS();
       for (size_type idx = thread_id(); idx < 2 * K * 2 * K; idx += block_size()) {
         size_type qi = idx / (2 * K), qj = idx % (2 * K);
         T acc = T(0);
-        for (size_type k = 0; k < 2 * K; ++k) acc += t0[k * (2 * K) + qi] * hgT(k, qj);
+        for (size_type k = 0; k < 2 * K; ++k) acc += t0[k * (2 * K) + qi] * hg[k * hg_ld + qj];
         rmat[qi * rmat_stride + qj] = acc;
       }
       SYNCTHREADS();
@@ -855,7 +920,9 @@ namespace mra {
   template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
             concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
             concepts::TensorView<5> ViewNorms>
-  LAUNCH_BOUNDS_P(MAX_THREADS_PER_BLOCK, 4)
+  // 3 blocks per SM: make_rnlp_leaf_ct keeps its 2K accumulators in registers,
+  // which spill to local memory at the 64 registers a minimum of 4 blocks allows
+  LAUNCH_BOUNDS_P(MAX_THREADS_PER_BLOCK, 3)
   GLOBALSCOPE void generate_op1d_kernel(
       const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, auto K,
       ViewC c, ViewHgT hgT,
@@ -1068,9 +1135,9 @@ namespace mra {
    * aggregate's own per-dimension translation (disp.translation()); `norms1d`
    * is the level table's full view (already select()-ed, and if this same
    * round also generated the table, already filled -- no wait() needed:
-   * this kernel reads it on-device, unlike finish_op_assembly's host-side
-   * equivalent for the MADNESS/host-cache path, which is what still needs
-   * norms1d pulled back to host). One block per (count, rank) pair -- `rank`
+   * this kernel reads it on-device, unlike the screener's host-side Opnorm
+   * computation (GaussianConvolutionOperator::try_get_opnorms), which is what
+   * still needs norms1d pulled back to host). One block per (count, rank) pair -- `rank`
    * here is the operator-wide m_max_rank (how the table's axes are
    * allocated), not any one count-index's own real rank; blocks beyond a
    * given count-index's real rank are no-ops (see the kernel's own comment on
