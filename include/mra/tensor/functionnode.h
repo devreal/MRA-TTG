@@ -273,13 +273,11 @@ namespace mra {
       private:
 
         struct function_metadata {
-          T sum = 0.0;
           LeafStatus status = LeafStatus::Inner;
           Level origin = 0; //< the coefficients are those of the ancestor this many levels above the node's key
           //std::array<bool, Key<NDIM>::num_children()> is_child_leaf = { false };
           template<typename Archive>
           void serialize(Archive& ar){
-            ar & sum;
             ar & status;
             ar & origin;
             //ar & is_child_leaf;
@@ -435,14 +433,6 @@ namespace mra {
           return m_metadata[i].is_child_leaf[child];
         }
 #endif // 0
-
-        T& sum(size_type i) {
-          return m_metadata[i].sum;
-        }
-
-        T sum(size_type i) const {
-          return m_metadata[i].sum;
-        }
 
         /**
          * The coefficients of function i are those of the ancestor origin(i) levels above

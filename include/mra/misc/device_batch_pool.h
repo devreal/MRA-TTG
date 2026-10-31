@@ -437,6 +437,10 @@ namespace mra::detail {
       // valid for kernels launched after it.
       Arg* dev_args = nullptr;
       size_type* dev_offsets = nullptr;
+      // Device copy of `sparsity` (byte i of `sparsity` is dev_src[i]), so a
+      // kernel can also read bytes staged there directly instead of only
+      // through extra_dsts scatters.
+      const unsigned char* dev_src = nullptr;
 
       // Persistent, zone_malloc-backed scratch region shared by every launch
       // of this kernel family on this device -- NOT per-member. Paired with
@@ -730,6 +734,7 @@ namespace mra::detail {
     unsigned char* dev = slot.dev_packed.get();
     slot.dev_args = reinterpret_cast<Arg*>(dev);
     slot.dev_offsets = reinterpret_cast<size_type*>(dev + offsets_off);
+    slot.dev_src = dev + src_off;
     if (total == 0) return;
 #if defined(MRA_ENABLE_CUDA)
     check_cuda_rt(cudaMemcpyAsync(dev, h, total, cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");

@@ -171,7 +171,7 @@ namespace mra {
       size_type N,
       size_type tmp_pos,
       size_type tmp_slot,
-      const T* child_kept,
+      const unsigned char* child_kept,
       T trunc_tol)
     {
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
@@ -220,19 +220,19 @@ namespace mra {
        * keep its own host-side sparsity bookkeeping in sync -- no data needs
        * to flow back from this decision.
        *
-       * child_kept is a single packed [num_children x N] buffer (child-major:
-       * child c's row is child_kept[c*N .. c*N+N)), built once on the host by
-       * do_compress from its 8 children's KeptInfo vectors -- one combined
-       * host->device transfer instead of 8 small ones. A structurally-absent
-       * child (a true leaf) has its row filled with zeros there, which the
-       * "!= T(0)" check below already treats the same as the old per-child
-       * nullptr check did.
+       * child_kept is a single packed [num_children x N] byte buffer
+       * (child-major: child c's row is child_kept[c*N .. c*N+N), 1 = kept),
+       * built on the host from the 8 children's KeptInfo vectors -- by
+       * do_compress for the unbatched path, or by the batch leader into the
+       * slot's grouped H2D transfer (see submit_compress_batch_leader). A
+       * structurally-absent child (a true leaf) has its row filled with
+       * zeros there, which reads as "not kept" below.
        */
       if (is_team_lead()) {
         if (key.level() > 1 && d_sumsq[tmp_pos] < trunc_tol*trunc_tol) {
           bool any_child_kept = false;
           for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
-            if (child_kept[c*N + fnid] != T(0)) {
+            if (child_kept[c*N + fnid] != 0) {
               any_child_kept = true;
             }
           }
@@ -308,7 +308,7 @@ namespace mra {
       T* d_sumsq,
       const InViewsT in_views,
       const NSInT ns_in,
-      const T* child_kept,
+      const unsigned char* child_kept,
       T trunc_tol)
     {
       for (size_type pos = blockIdx.x; pos < n_nonzero; pos += gridDim.x) {
@@ -333,7 +333,7 @@ namespace mra {
     T* d_sumsq,
     const InViewsT& in_views,
     const InViewT& ns_view,
-    const T* child_kept,
+    const unsigned char* child_kept,
     T trunc_tol,
     ttg::device::Stream stream)
   {
@@ -391,9 +391,9 @@ namespace mra {
       // indexed by blockIdx.x rather than this member's own local position.
       // d_sumsq stays per-member (sized to this member's own n_nonzero,
       // indexed by local_pos): unlike tmp, the host side reads every compact
-      // position's value back after the kernel (do_compress in
-      // mra/tasks/compress.h, for this node's own norm and truncation
-      // bookkeeping), so it can't be shrunk to occupancy-many slots.
+      // position's value back after the kernel where the node may truncate
+      // (do_compress in mra/tasks/compress.h, to mirror the truncation
+      // decision), so it can't be shrunk to occupancy-many slots.
       T*,                                                                 // d_sumsq: this member's own scratch base, sized to its own n_nonzero, indexed by local_pos
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // in_views (the 8 children)
       size_type,                                                         // n: this member's structural function count N -- used both to size the sparsity-byte span below AND as the scan bound for find_nth_nonzero
@@ -401,7 +401,7 @@ namespace mra {
       // of the H2D transfer itself now (see
       // submit_compress_batch_leader/submit_grouped_copy's comments), not by
       // a device kernel reading an offset out of this struct.
-      const T*,                                                         // child_kept: this member's own single packed [num_children x n] "kept" buffer (child-major, see compress_process_one), for the in-kernel truncation decision
+      size_type,                                                         // child_kept_offset: byte offset of this member's packed [num_children x n] "kept" bytes (child-major, see compress_process_one) into the slot's staged source bytes (slot.dev_src); no_child_kept if this member cannot truncate
       T,                                                                 // trunc_tol: this member's own truncate_tol(key, ...); 0 when truncation is disabled
       SparseTensorView<T, NDIM+1>                                        // ns_in: this node's own non-standard coeffs (make_compress_from_ns), empty otherwise
     >;
@@ -416,10 +416,13 @@ namespace mra {
       static constexpr std::size_t d_sumsq         = 4;
       static constexpr std::size_t in_views        = 5;
       static constexpr std::size_t n               = 6;
-      static constexpr std::size_t child_kept      = 7;
+      static constexpr std::size_t child_kept_offset = 7;
       static constexpr std::size_t trunc_tol       = 8;
       static constexpr std::size_t ns_in           = 9;
     };
+
+    /* CompressBatchArg's child_kept_offset for a member that cannot truncate */
+    inline constexpr size_type no_child_kept = ~size_type(0);
 
     /**
      * One combined launch covering every non-zero function across all
@@ -450,8 +453,10 @@ namespace mra {
                                                // the whole launch -- indexed by blockIdx.x, not
                                                // per-member (see GroupedBatchPool::ensure_scratch).
                                                // d_sumsq stays per-member (CompressBatchArg's own
-                                               // idx::d_sumsq field) since the host reads every
+                                               // idx::d_sumsq field) since the host may read every
                                                // compact position back afterward -- see its comment.
+      const unsigned char* kept_base,         // device copy of the slot's staged source bytes (slot.dev_src),
+                                               // which every member's child_kept_offset indexes into
       size_type K,
       bool is_ns,
       const HgtT hgT)
@@ -467,6 +472,8 @@ namespace mra {
         SYNCTHREADS();
         auto& arg = args[member];
         const size_type member_N = std::get<idx::n>(arg);
+        const size_type kept_offset = std::get<idx::child_kept_offset>(arg);
+        const unsigned char* child_kept = kept_offset == no_child_kept ? nullptr : kept_base + kept_offset;
 
         compress_process_one<T, NDIM>(std::get<idx::key>(arg), K, is_ns,
                                       std::get<idx::node_in>(arg), std::get<idx::p_in>(arg),
@@ -474,7 +481,7 @@ namespace mra {
                                       shared_tmp, std::get<idx::d_sumsq>(arg),
                                       std::get<idx::in_views>(arg), std::get<idx::ns_in>(arg),
                                       member_N, local_pos, blockIdx.x,
-                                      std::get<idx::child_kept>(arg), std::get<idx::trunc_tol>(arg));
+                                      child_kept, std::get<idx::trunc_tol>(arg));
       }
     }
 
@@ -525,14 +532,14 @@ namespace mra {
     // first allocation already covers every later launch and never needs to
     // grow (see its comment for why growing it would be unsafe). Only the
     // tmp transform workspace is pooled here -- d_sumsq stays per-member
-    // (CompressBatchArg's own field), since the host reads every compact
+    // (CompressBatchArg's own field), since the host may read every compact
     // position back afterward (see CompressBatchArg's comment).
     size_type grid_cap = detail::kernel_grid_cap(detail::compress_kernel_batched<T, NDIM, HgtT>, threads, smem_size);
     size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
     T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * compress_tmp_size<NDIM>(K));
 
     CALL_KERNEL((detail::compress_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, K, is_ns, hgT));
+                (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, K, is_ns, hgT));
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
@@ -583,11 +590,14 @@ namespace mra {
      * (max_batch_size * 2 * total_functions), so, like the *BatchArg and
      * offsets pools above, it never needs to grow after that.
      *
-     * Truncation: each member also passes its own single packed
-     * [num_children x n] "kept" device buffer (get<10>() -- built once,
-     * host-side, from its 8 children's KeptInfo vectors; see do_compress)
-     * and its own truncate_tol(key, ...) (get<11>(), 0 when truncation is
-     * disabled) through coop(), so compress_process_one can decide and apply the
+     * Truncation: each member also passes a pointer to its 8 children's
+     * KeptInfo pointers (get<9>(), nullptr where it cannot truncate) and its
+     * own truncate_tol(key, ...) (get<10>(), 0 when truncation is disabled)
+     * through coop(). The leader packs every member's kept bits as
+     * [num_children x n] bytes into slot.sparsity, behind the sparsity bytes,
+     * so they ride along in the same single H2D transfer (no per-member
+     * buffer or copy); the kernel reads them in place at slot.dev_src +
+     * child_kept_offset. compress_process_one can thus decide and apply the
      * truncation drop directly on result_in's device-resident sparsity
      * inside this same combined launch -- no second, per-member
      * host->device sparsity push needed afterward (do_compress mirrors the
@@ -601,9 +611,11 @@ namespace mra {
       size_type K,
       bool is_ns,
       const HgtT& hgT,
-      size_type total_functions)
+      size_type total_functions,
+      bool truncate)
     {
       if (!batch.is_leader()) return;
+      constexpr size_type num_children = Key<NDIM>::num_children();
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();
@@ -611,12 +623,14 @@ namespace mra {
 
       // Args/offsets regions sized to a fixed upper bound (max_batch_size,
       // +1 for offsets), and the sparsity staging region to
-      // 2*max_batch_size*total_functions bytes (every member contributes at
-      // most 2*total_functions bytes: p and result_in, each up to
-      // total_functions) -- not the exact sizes needed this launch -- so the
-      // slot's device buffers are each allocated once, on first use, and
-      // never resized after that.
-      const size_type max_sparsity_bytes = 2 * static_cast<size_type>(registry.get_max_batch_size()) * total_functions;
+      // (2 [+ num_children])*max_batch_size*total_functions bytes (every
+      // member contributes at most 2*total_functions bytes for p and
+      // result_in, plus num_children*total_functions kept bytes when
+      // truncating) -- not the exact sizes needed this launch -- so the
+      // slot's buffers are each allocated once, on first use, and never
+      // resized after that.
+      const size_type bytes_per_fn = 2 + (truncate ? num_children : 0);
+      const size_type max_sparsity_bytes = bytes_per_fn * static_cast<size_type>(registry.get_max_batch_size()) * total_functions;
       auto& slot = pool.acquire(registry.get_max_batch_size(), registry.get_max_batch_size() + 1, max_sparsity_bytes);
       slot.args.clear();
       slot.offsets.resize(nb + 1);
@@ -633,7 +647,8 @@ namespace mra {
       // above.
       size_type total_sparsity_bytes = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        total_sparsity_bytes += 2 * static_cast<size_type>(batch[m].template get<3>().dim(0));
+        const size_type n = static_cast<size_type>(batch[m].template get<3>().dim(0));
+        total_sparsity_bytes += (batch[m].template get<9>() != nullptr ? 2 + num_children : 2) * n;
       }
       slot.sparsity.resize(total_sparsity_bytes);
 
@@ -653,7 +668,7 @@ namespace mra {
         auto& m_p_tensor      = batch[m].template get<6>(); // real p tensor: sparsity source AND this member's p_in scatter destination
         auto& m_result_tensor = batch[m].template get<7>(); // real result (d) tensor: likewise for result_in
         const size_type m_n_nonzero = batch[m].template get<8>();
-        auto& m_child_kept = batch[m].template get<9>(); // this member's own single packed [num_children x n] "kept" device buffer
+        const auto* m_kept_children = batch[m].template get<9>(); // this member's children's KeptInfo pointers, nullptr if it cannot truncate
         const T m_trunc_tol = batch[m].template get<10>(); // this member's own truncate_tol(key, ...); 0 disables
         auto& m_ns_in = batch[m].template get<11>(); // this node's own non-standard coeffs, empty unless compressing from non-standard form
         const size_type n = static_cast<size_type>(m_result_in.dim(0)); // structural N
@@ -667,9 +682,25 @@ namespace mra {
         slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset + n]);
         slot.extra_sizes.push_back(n);
 
-        slot.args.emplace_back(m_key, m_node_in, m_p_in, m_result_in,
-                               m_d_sumsq.current_device_ptr(), m_in_views, n, m_child_kept, m_trunc_tol, m_ns_in);
         sparsity_offset += 2 * n;
+
+        // Pack the children's kept bits right behind; an empty KeptInfo (a
+        // true leaf) leaves its row zero, i.e. "not kept".
+        size_type kept_offset = no_child_kept;
+        if (m_kept_children != nullptr) {
+          kept_offset = sparsity_offset;
+          unsigned char* packed = &slot.sparsity[sparsity_offset];
+          for (size_type c = 0; c < num_children; ++c) {
+            const auto& ck = *(*m_kept_children)[c];
+            for (size_type i = 0; i < n; ++i) {
+              packed[c*n + i] = (!ck.empty() && ck[i] != T(0)) ? 1 : 0;
+            }
+          }
+          sparsity_offset += num_children * n;
+        }
+
+        slot.args.emplace_back(m_key, m_node_in, m_p_in, m_result_in,
+                               m_d_sumsq.current_device_ptr(), m_in_views, n, kept_offset, m_trunc_tol, m_ns_in);
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;
       }
@@ -697,7 +728,7 @@ void submit_compress_kernel<double, 3>(
     double* d_sumsq,
     const std::array<SparseTensorView<double, 3+1>, Key<3>::num_children()>& in_views,
     const SparseTensorView<const double, 3+1>& ns_view,
-    const double* child_kept,
+    const unsigned char* child_kept,
     double trunc_tol,
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION

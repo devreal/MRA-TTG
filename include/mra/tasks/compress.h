@@ -239,9 +239,11 @@ namespace detail {
 
         /**
          * Buffer to pack child information into. Defined here so it
-         * is destroyed at the end of the task.
+         * is destroyed at the end of the task. Small and only used by the
+         * unbatched path, so plain pageable host memory rather than a pinned
+         * DeviceAllocator allocation.
          */
-        ttg::Buffer<T, DeviceAllocator<T>> child_kept_packed;
+        ttg::Buffer<unsigned char> child_kept_packed;
         ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
         ttg::Buffer<T, DeviceAllocator<T>> d_sumsq;
 
@@ -254,10 +256,6 @@ namespace detail {
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
           mark_truncated_children_leaf();
           //mra::apply_leaf_info(p, in, in0, in1, in2, in3, in4, in5, in6, in7);
-          /* all data is still on the host so the coefficients are zero */
-          for (std::size_t i = 0; i < N; ++i) {
-            p.sum(i) = 0.0;
-          }
           // p.set_all_leaf(LeafStatus::Invalid);
           //std::cout << name << " " << key << " all empty, all children leafs " << result.is_all_child_leaf() << " ["
           //           << in.is_all_leaf() << ", " << in0.is_all_leaf() << ", " << in1.is_all_leaf() << ", "
@@ -286,19 +284,6 @@ namespace detail {
           mra::apply_leaf_info(result, in0, in1, in2, in3, in4, in5, in6, in7);
           mark_truncated_children_leaf();
           //std::cout << name << " " << key << " result after apply_leaf_info " << result << " " << std::endl;
-
-          // Per-function "does any child still hold wavelet mass below it"
-          // flag, used by the host-side mirror of the in-kernel truncation
-          // decision further down. child_kept() is always fully resolved
-          // already (plain host KeptInfo vectors, no device residency to
-          // wait on), so -- unlike the old DenseTensor-based scheme -- this
-          // only needs computing once, here, not again after the kernel runs.
-          std::vector<bool> any_child_kept(N, false);
-          for (size_type i = 0; i < N; ++i) {
-            for (size_type c = 0; c < num_children; ++c) {
-              if (child_kept(i, c)) any_child_kept[i] = true;
-            }
-          }
 
           /**
            * Allocate the reconstructed node to send up to the parent.
@@ -337,20 +322,24 @@ namespace detail {
           // tmp_scratch is never allocated. The unbatched fallback (host, or
           // batching disabled at runtime) still needs the full size, since
           // it's the only thing submit_compress_kernel uses as scratch.
-          // (d_sumsq below is NOT shrunk/skipped the same way: the host reads
-          // every compact position back after the kernel runs -- see
-          // do_compress's read of d_sumsq_arr further down -- so it must stay
-          // sized to this task's own n_nonzero and always allocated,
-          // regardless of batching.)
+          // (d_sumsq below is NOT pooled the same way: where this node may
+          // truncate, the host reads every compact position back after the
+          // kernel runs, so it stays sized to this task's own n_nonzero.)
 #ifndef MRA_ENABLE_HOST
-          const std::size_t tmp_size = enable_compress_batching ? 0 : compress_tmp_size<NDIM>(K)*n_nonzero;
+          const bool use_batching = enable_compress_batching;
 #else
-          const std::size_t tmp_size = compress_tmp_size<NDIM>(K)*n_nonzero;
+          const bool use_batching = false;
 #endif
+          const std::size_t tmp_size = use_batching ? 0 : compress_tmp_size<NDIM>(K)*n_nonzero;
           if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
           const auto& hgT = functiondata.get_hgT();
+          // The kernel decides truncation on-device; the host only needs the
+          // sums back to mirror that decision into result's host-side
+          // sparsity, so they are only transferred where this node may
+          // truncate and are device-only scratch otherwise.
+          const bool may_truncate = enable_truncate && key.level() > 1;
           /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
-          d_sumsq.reset(n_nonzero, ttg::scope::SyncOut);
+          d_sumsq.reset(n_nonzero, may_truncate ? ttg::scope::SyncOut : ttg::scope::Allocate);
 
           // Computed up front (depends only on key/thresh/cell_min_width/
           // truncate_mode, all known before the kernel runs) so the kernel
@@ -363,33 +352,30 @@ namespace detail {
           auto& d = result.coeffs();
 
           // Pack every child's KeptInfo into a single [num_children x N]
-          // host buffer (child-major: child c's row is
-          // child_kept_packed[c*N .. c*N+N)) so only ONE host->device
-          // transfer happens below, instead of up to 8 small ones (one per
-          // child, as the old DenseTensor-per-child scheme required). A
-          // structurally-absent child (kept_children[c]->empty(), i.e. a
-          // true leaf) leaves its row zeroed, which compress_process_one's
-          // "!= T(0)" check already treats the same as "not kept".
+          // byte buffer (child-major: child c's row is
+          // child_kept_packed[c*N .. c*N+N), 1 = kept) so only ONE
+          // host->device transfer happens below, instead of up to 8 small
+          // ones. A structurally-absent child (kept_children[c]->empty(),
+          // i.e. a true leaf) leaves its row zeroed, i.e. "not kept".
           // The kernel only reads it where it may truncate (see
           // compress_process_one), so it is neither built nor moved to the
           // device otherwise, and the kernel gets a nullptr instead.
-          const bool need_child_kept = enable_truncate && key.level() > 1;
-          if (need_child_kept) {
+          // When batching, the batch leader packs these same bytes into its
+          // slot's grouped H2D transfer instead (see
+          // submit_compress_batch_leader), so no per-task buffer is needed.
+          const bool pack_child_kept = may_truncate && !use_batching;
+          if (pack_child_kept) {
             child_kept_packed.reset(N * num_children, ttg::scope::SyncIn);
-            T* packed = child_kept_packed.host_ptr();
-            std::fill(packed, packed + N * num_children, T(0));
+            unsigned char* packed = child_kept_packed.host_ptr();
             for (size_type c = 0; c < num_children; ++c) {
-              const auto& ck = *kept_children[c];
-              if (!ck.empty()) {
-                for (size_type i = 0; i < N; ++i) packed[c*N + i] = ck[i];
-              }
+              for (size_type i = 0; i < N; ++i) packed[c*N + i] = child_kept(i, c) ? 1 : 0;
             }
           }
 
 #ifndef MRA_ENABLE_HOST
           auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(), d_sumsq);
           if (tmp_size > 0) input.add(tmp_scratch);
-          if (need_child_kept) input.add(child_kept_packed);
+          if (pack_child_kept) input.add(child_kept_packed);
           auto select_in = [&](const auto& in) {
             if (!in.empty()) {
               input.add(in.coeffs().buffer());
@@ -425,10 +411,10 @@ namespace detail {
           auto hgT_view = hgT.current_view();
 
           // Single packed [num_children x N] "kept" device pointer, for the
-          // in-kernel truncation decision -- valid right after select()
-          // above stages child_kept_packed onto the device; nullptr where the
-          // kernel cannot truncate.
-          const T* child_kept_ptr = need_child_kept ? child_kept_packed.current_device_ptr() : nullptr;
+          // unbatched kernel's in-kernel truncation decision -- valid right
+          // after select() above stages child_kept_packed onto the device;
+          // nullptr where the kernel cannot truncate.
+          const unsigned char* child_kept_ptr = pack_child_kept ? child_kept_packed.current_device_ptr() : nullptr;
 
 #ifndef MRA_ENABLE_HOST
           if (enable_compress_batching) {
@@ -445,13 +431,18 @@ namespace detail {
             // leader can flatten every member's own non-zero work items into
             // one combined 1D launch (see submit_compress_batch_leader); no
             // per-function index list needs to travel with it, since each
-            // member's real function ids are found on-device.
+            // member's real function ids are found on-device. The children's
+            // KeptInfo travel as host pointers (into this frame, which stays
+            // alive while suspended in coop()); the leader packs them into
+            // its grouped H2D transfer.
+            const auto* kept_children_ptr = may_truncate ? &kept_children : nullptr;
             auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(key, in_view, coeffs_view, rcoeffs_view,
                                                                     d_sumsq, input_views,
                                                                     p.coeffs(), d, n_nonzero,
-                                                                    child_kept_ptr, trunc_tol, ns_view);
+                                                                    kept_children_ptr, trunc_tol, ns_view);
             // followers: the leader's batched launch already wrote our slice of p/result/d_sumsq.
-            detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view, total_functions);
+            detail::submit_compress_batch_leader<T, NDIM>(batch, *compress_pool, K, is_ns, hgT_view, total_functions,
+                                                          enable_truncate);
           } else
 #endif // MRA_ENABLE_HOST
           {
@@ -464,10 +455,17 @@ namespace detail {
                                   ttg::device::current_stream());
           }
           norms.compute();
-          /* wait for kernel and transfer sums back */
+          /* wait for kernel and transfer sums back, only if we need them */
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(d_sumsq, norms.buffer());
-#endif
+          if (may_truncate) {
+            co_await ttg::device::wait(d_sumsq, norms.buffer());
+          }
+#if defined(MRA_CHECK_NORMS)
+          else {
+            co_await ttg::device::wait(norms.buffer());
+          }
+#endif // MRA_CHECK_NORMS
+#endif // MRA_ENABLE_HOST
           norms.verify();
 
 #if defined(MRA_CHECK_NORMS)
@@ -498,51 +496,23 @@ namespace detail {
           }
 #endif // MRA_CHECK_NORMS
 
-          // Explicitly zero every function's sum first, rather than relying
-          // on FunctionsReconstructedNode's default-constructed 0.0 --
-          // mirrors the prior kernel's explicit d_sumsq[fnid] = 0.0 for zero
-          // functions. The loop below then overwrites the non-zero ones.
-          for (size_type i = 0; i < N; ++i) {
-            p.sum(i) = T(0);
-          }
-
-          // d_sumsq is compacted (indexed by compact position, not fnid) --
-          // walk it by re-enumerating `sparsity`'s own non-zero ids (host-side,
-          // O(#ranges + n_nonzero), same set find_nth_nonzero scanned
-          // on-device).
-          auto* d_sumsq_arr = d_sumsq.host_ptr();
-          // d_sumsq[pos] is this node's own per-function wavelet norm^2 at
-          // this level (not the running total accumulated into p.sum below)
-          // -- exactly what truncate_process_one (tasks/truncate.h) compares
-          // against tol^2. Only meaningful for standard-form (is_ns==false)
-          // compression at level > 1, where compress_kernel_impl has zeroed
-          // out the scaling (child_slice) sub-block of d before computing
-          // this sum -- truncation is exempt below level 2 anyway (see the
-          // key.level() > 1 guard below), so is_ns's level==0/1 exception to
-          // that zeroing never affects the truncation test.
-          size_type pos = 0;
-          for (auto it = sparsity.begin_nonzero(); it != sparsity.end_nonzero(); ++it, ++pos) {
-            const size_type i = *it;
-            auto sumsqs = std::array{in0.sum(i), in1.sum(i), in2.sum(i), in3.sum(i),
-                                    in4.sum(i), in5.sum(i), in6.sum(i), in7.sum(i)};
-            auto child_sumsq = std::reduce(sumsqs.begin(), sumsqs.end());
-            p.sum(i) = d_sumsq_arr[pos] + child_sumsq; // result sumsq is last element in sumsqs
-            //std::cout << name << " " << key << " fn " << i << "/" << N << " d_sumsq " << d_sumsq_arr[pos]
-            //          << " child_sumsq " << child_sumsq << " sum " << p.sum(i) << std::endl;
-
-            // Optional in-line truncation: mirrors compress_process_one's own
-            // decision (mra/kernels/compress.h), which already dropped this
-            // node's device-resident wavelet coefficients for function i
-            // under the identical condition (same d_sumsq_arr[pos], same
-            // trunc_tol, same any_child_kept[i] -- resolved from the same
-            // kept0..7 KeptInfo vectors, see child_kept() above). Re-applied
-            // here purely to keep this host-side `result` object's own
-            // sparsity bookkeeping in sync with the device -- no device
-            // transfer needed for this, since the device bits were already
-            // corrected in-kernel.
-            if (enable_truncate && key.level() > 1 && !result.is_zero(i) &&
-                !any_child_kept[i] && d_sumsq_arr[pos] < trunc_tol*trunc_tol) {
-              result.set_zero(i);
+          // Mirror compress_process_one's in-kernel truncation decision
+          // (mra/kernels/compress.h), which already dropped this node's
+          // device-resident wavelet coefficients for function i under the
+          // identical condition (same d_sumsq, trunc_tol and child kept bits),
+          // purely to keep this host-side `result`'s sparsity in sync with
+          // the device. d_sumsq is compacted (indexed by compact position,
+          // not fnid), so walk it by re-enumerating `sparsity`'s non-zero ids
+          // (the same set find_nth_nonzero scanned on-device).
+          if (may_truncate) {
+            const auto* d_sumsq_arr = d_sumsq.host_ptr();
+            size_type pos = 0;
+            for (auto it = sparsity.begin_nonzero(); it != sparsity.end_nonzero(); ++it, ++pos) {
+              const size_type i = *it;
+              if (result.is_zero(i) || d_sumsq_arr[pos] >= trunc_tol*trunc_tol) continue;
+              bool any_child_kept = false;
+              for (size_type c = 0; c < num_children && !any_child_kept; ++c) any_child_kept = child_kept(i, c);
+              if (!any_child_kept) result.set_zero(i);
             }
           }
 
@@ -587,16 +557,6 @@ namespace detail {
             if (any_kept) ttg::send<out_terminal_id>(key, std::move(result));
 #endif
         } else {
-          bool all_correct = true;
-          for (std::size_t i = 0; i < N; ++i) {
-            if (std::abs(p.sum(i) - 1.0) > 1e-12) {
-              all_correct = false;
-              std::cout << name << ": at root of compressed tree " << key.batch() << " fn " << i << ": total normsq is " << p.sum(i) << std::endl;
-            }
-          }
-          if (all_correct) {
-            std::cout << name << ": at root of compressed tree " << key.batch() << ": all norms are 1.0 with 1e-12 tolerance" << std::endl;
-          }
 #ifndef MRA_ENABLE_HOST
           co_await ttg::device::forward(
             // Send result to output tree
