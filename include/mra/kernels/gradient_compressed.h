@@ -33,6 +33,7 @@ namespace mra {
      * Function `j` of node `key`, executed by one block: inner[j] != 0 unfilters
      * [s, d] (d from the compressed node, s passed down, or the s-block of the
      * compressed root) into the children, else every child receives s unchanged.
+     * The block's scratch is region tmp_slot of tmp (reconstruct_tmp_size(K) each).
      */
     template <typename T, Dimension NDIM>
     DEVSCOPE void gradient_spawn_process_one(
@@ -44,14 +45,15 @@ namespace mra {
       concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& children,
       const std::uint8_t* inner,
       T* tmp,
-      size_type j)
+      size_type j,
+      size_type tmp_slot)
     {
       SHARED DenseTensorView<const T, NDIM> d, s;
       SHARED DenseTensorView<T, NDIM> u, t, dst;
       SHARED T* workspace;
       const size_type TWOK2NDIM = std::pow(2*K, NDIM);
       if (is_team_lead()) {
-        T* block_tmp = &tmp[j*reconstruct_tmp_size<NDIM>(K)];
+        T* block_tmp = &tmp[tmp_slot*reconstruct_tmp_size<NDIM>(K)];
         u = DenseTensorView<T, NDIM>(&block_tmp[0], 2*K);
         t = DenseTensorView<T, NDIM>(&block_tmp[TWOK2NDIM], 2*K);
         workspace = &block_tmp[2*TWOK2NDIM];
@@ -92,7 +94,7 @@ namespace mra {
       T* tmp)
     {
       for (size_type j = blockIdx.x; j < N; j += gridDim.x) {
-        gradient_spawn_process_one<T, NDIM>(key, K, node_view, s_view, hg, children, inner, tmp, j);
+        gradient_spawn_process_one<T, NDIM>(key, K, node_view, s_view, hg, children, inner, tmp, j, j);
       }
     }
   } // namespace detail
@@ -264,7 +266,6 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,                                        // S
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // S of the children
       const std::uint8_t*,                                                // unfilter flags
-      T*,                                                                 // tmp: indexed by function
       size_type                                                           // N
     >;
 
@@ -275,6 +276,7 @@ namespace mra {
       const size_type* member_offsets,      // device ptr, size == num_members+1
       size_type num_members,
       size_type total,
+      T* shared_tmp,                        // occupancy-sized scratch of the batch slot, indexed by block
       size_type K,
       const concepts::TensorView<2> auto hg)
     {
@@ -287,7 +289,7 @@ namespace mra {
         SYNCTHREADS();
         auto& arg = args[member];
         gradient_spawn_process_one<T, NDIM>(std::get<0>(arg), K, std::get<1>(arg), std::get<2>(arg), hg,
-                                            std::get<3>(arg), std::get<4>(arg), std::get<5>(arg), j);
+                                            std::get<3>(arg), std::get<4>(arg), shared_tmp, j, blockIdx.x);
         SYNCTHREADS(); // member and j are rewritten by the next iteration
       }
     }
@@ -295,12 +297,12 @@ namespace mra {
     /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(key, S_view, nb_views, result_views,
-     * results, n_nonzero, src_keys, tmp, has_children, cnode_view, child_views,
-     * children, unfilter, N)`: nb_views the six neighbors (left and right of each axis),
+     * results, n_nonzero, src_keys, has_children, cnode_view, child_views, children,
+     * unfilter, N)`: nb_views the six neighbors (left and right of each axis),
      * results/children the nodes (for their sparsity), n_nonzero the number of
-     * derivatives along each axis, tmp the derivatives' scratch for the axes in order
-     * followed by the children's (batched, only the children's is used: the derivatives'
-     * scratch is the batch slot's). max_functions bounds the number of functions of a node.
+     * derivatives along each axis. The members have no scratch of their own: each
+     * launch takes its scratch from its batch slot, one region per block of the
+     * occupancy-capped grid. max_functions bounds the number of functions of a node.
      */
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_gradient_compute_batch_leader(
@@ -362,7 +364,7 @@ namespace mra {
         size_type sparsity_offset = 0;
         for (std::size_t m = 0; m < nb; ++m) {
           const auto& n_nonzero = batch[m].template get<5>();
-          const size_type N = batch[m].template get<13>();
+          const size_type N = batch[m].template get<12>();
           auto& nbv = batch[m].template get<2>();
           auto& center = batch[m].template get<1>();
           for (Dimension a = 0; a < NDIM; ++a) {
@@ -398,8 +400,8 @@ namespace mra {
       size_type bytes = 0;
       std::size_t members = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        if (!batch[m].template get<8>()) continue;
-        for (auto& c : batch[m].template get<11>()) bytes += c.coeffs().dim(0);
+        if (!batch[m].template get<7>()) continue;
+        for (auto& c : batch[m].template get<10>()) bytes += c.coeffs().dim(0);
         ++members;
       }
       if (members == 0) return;
@@ -409,21 +411,26 @@ namespace mra {
       slot.sparsity.resize(bytes);
       size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
-        if (!batch[m].template get<8>()) continue;
-        const auto& n_nonzero = batch[m].template get<5>();
-        const size_type N = batch[m].template get<13>();
-        size_type deriv_items = 0;
-        for (Dimension b = 0; b < NDIM; ++b) deriv_items += n_nonzero[b];
-        for (auto& c : batch[m].template get<11>()) stage_sparsity(slot, c, sparsity_offset);
-        slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<9>(), batch[m].template get<1>(),
-                               batch[m].template get<10>(), batch[m].template get<12>(),
-                               batch[m].template get<7>() + deriv_items*derivative_tmp_size<NDIM>(K), N);
+        if (!batch[m].template get<7>()) continue;
+        const size_type N = batch[m].template get<12>();
+        for (auto& c : batch[m].template get<10>()) stage_sparsity(slot, c, sparsity_offset);
+        slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<8>(), batch[m].template get<1>(),
+                               batch[m].template get<9>(), batch[m].template get<11>(), N);
         slot.offsets.push_back(slot.offsets.back() + N);
       }
       const size_type total = slot.offsets.back();
       submit_grouped_copy<GradientSpawnBatchArg<T, NDIM>>(slot, members, slot.offsets.size(), spawn_pool.device_id, stream);
-      CALL_KERNEL((gradient_spawn_kernel_batched<T, NDIM>), total, max_thread_dims(2*K), mTxmq_shmem_size<T>(2*K),
-                  stream, (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, K, hg));
+      /* as for the derivatives: the grid capped at occupancy, the scratch the slot's */
+      const Dim3 spawn_threads = max_thread_dims(2*K);
+      const auto spawn_smem = mTxmq_shmem_size<T>(2*K);
+      auto spawn_kernel = gradient_spawn_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>>;
+      const size_type spawn_cap = kernel_grid_cap(spawn_kernel,
+                                                  static_cast<int>(spawn_threads.x * spawn_threads.y * spawn_threads.z),
+                                                  spawn_smem);
+      const size_type spawn_grid = std::min<size_type>(total, spawn_cap);
+      T* spawn_tmp = spawn_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(spawn_cap) * reconstruct_tmp_size<NDIM>(K));
+      CALL_KERNEL((gradient_spawn_kernel_batched<T, NDIM>), spawn_grid, spawn_threads, spawn_smem,
+                  stream, (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, spawn_tmp, K, hg));
       checkSubmit();
       spawn_pool.mark_submitted(slot, stream);
     }

@@ -510,6 +510,10 @@ namespace mra {
        * take an invalid node in its place. */
       auto lr = std::make_tuple(left_children, left_children), rr = std::make_tuple(right_children, right_children);
 #ifndef MRA_ENABLE_HOST
+      /* a fresh keylist tuple per broadcast, passed as an rvalue: the broadcast owns it
+       * until it is delivered after the task completes, rather than referencing ours */
+      auto lr_keys = [&]{ return lr; };
+      auto rr_keys = [&]{ return rr; };
       auto sends = ttg::device::forward(ttg::device::broadcast<0>(all_children, std::move(inherited)));
       if (merge)        sends.push_back(ttg::device::broadcast<1>(all_children, std::move(merged)));
       else if (any_own) sends.push_back(ttg::device::broadcast<1>(all_children, center_own));
@@ -521,17 +525,17 @@ namespace mra {
         sends.push_back(ttg::device::broadcast<3, 4, 5, 9, 10, 11>(
           std::tuple_cat(lr, lr, lr), invalid_node(key, N)));
       } else if (sub_left) {
-        sends.push_back(ttg::device::broadcast<3, 9>(lr, left));
-        sends.push_back(ttg::device::broadcast<4, 10>(lr, left_own));
-        sends.push_back(ttg::device::broadcast<5, 11>(lr, left_inh));
+        sends.push_back(ttg::device::broadcast<3, 9>(lr_keys(), left));
+        sends.push_back(ttg::device::broadcast<4, 10>(lr_keys(), left_own));
+        sends.push_back(ttg::device::broadcast<5, 11>(lr_keys(), left_inh));
       }
       if (rb) {
         sends.push_back(ttg::device::broadcast<6, 7, 8, 12, 13, 14>(
           std::tuple_cat(rr, rr, rr), invalid_node(key, N)));
       } else if (sub_right) {
-        sends.push_back(ttg::device::broadcast<6, 12>(rr, right));
-        sends.push_back(ttg::device::broadcast<7, 13>(rr, right_own));
-        sends.push_back(ttg::device::broadcast<8, 14>(rr, right_inh));
+        sends.push_back(ttg::device::broadcast<6, 12>(rr_keys(), right));
+        sends.push_back(ttg::device::broadcast<7, 13>(rr_keys(), right_own));
+        sends.push_back(ttg::device::broadcast<8, 14>(rr_keys(), right_inh));
       }
       co_await std::move(sends);
 #else  // MRA_ENABLE_HOST

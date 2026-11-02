@@ -349,9 +349,17 @@ namespace mra {
 
       /* scratch, source keys and flags must outlive the kernels: destroying a buffer releases
        * its device memory right away, while the kernels launched below are still running.
-       * One scratch buffer: the derivatives first, then the children. */
+       * One scratch buffer: the derivatives first, then the children. Batched, there is
+       * none: every launch takes its scratch from its batch slot, sized by the occupancy-
+       * capped grid (see submit_gradient_compute_batch_leader). */
+#ifndef MRA_ENABLE_HOST
+      const size_type deriv_tmp = enable_batching ? 0 : derivative_tmp_size<NDIM>(K)*total_nonzero;
+      const size_type spawn_tmp = (enable_batching || !has_children) ? 0 : reconstruct_tmp_size<NDIM>(K)*N;
+#else  // MRA_ENABLE_HOST
       const size_type deriv_tmp = derivative_tmp_size<NDIM>(K)*total_nonzero;
       const size_type spawn_tmp = has_children ? reconstruct_tmp_size<NDIM>(K)*N : 0;
+#endif // MRA_ENABLE_HOST
+      const size_type tmp_size = deriv_tmp + spawn_tmp;
       ttg::Buffer<T, DeviceAllocator<T>> tmp;
       ttg::Buffer<key_type, DeviceAllocator<key_type>> src_keys;
       ttg::Buffer<std::uint8_t, DeviceAllocator<std::uint8_t>> unfilter;
@@ -361,7 +369,7 @@ namespace mra {
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
         const auto& hg = functiondata.get_hg();
-        tmp = ttg::Buffer<T, DeviceAllocator<T>>(deriv_tmp + spawn_tmp, ttg::scope::Allocate);
+        if (tmp_size > 0) tmp = ttg::Buffer<T, DeviceAllocator<T>>(tmp_size, ttg::scope::Allocate);
         /* per axis and function: the nodes the coefficients at the left neighbor, here, and
          * at the right neighbor belong to; an ancestor where the input ended above, and a
          * coarser node (or its ancestor) where a neighbor does not exist */
@@ -378,7 +386,8 @@ namespace mra {
         for (size_type j = 0; j < N; ++j) unfilter.host_ptr()[j] = (S.leaf_status(j) == LeafStatus::Inner);
 #ifndef MRA_ENABLE_HOST
         auto inputs = ttg::device::Input(db, operators.buffer(), phibar.buffer(), phi.buffer(), quad_x.buffer(),
-                                         hg.buffer(), tmp, src_keys, unfilter);
+                                         hg.buffer(), src_keys, unfilter);
+        if (tmp_size > 0) inputs.add(tmp);
         std::array<const void*, NB + 1> added{};
         std::size_t n_added = 0;
         auto add_once = [&](const node_type& n) {
@@ -397,7 +406,7 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
         auto& D = *db.current_device_ptr();
         auto center_view = S.coeffs().current_view();
-        T* tmp_ptr = tmp.current_device_ptr();
+        T* tmp_ptr = (tmp_size > 0) ? tmp.current_device_ptr() : nullptr;
         const key_type* src_keys_ptr = src_keys.current_device_ptr();
         const std::uint8_t* unfilter_ptr = unfilter.current_device_ptr();
         auto cnode_view = cnode.coeffs().current_view();
@@ -416,7 +425,7 @@ namespace mra {
            * and pushes the sparsity of the outputs along with the batch */
           bool spawn_children = has_children;
           auto batch = co_await ttg::device::coop<key_type>(key, center_view, nb_views, result_views, result,
-                                                            n_nonzero, src_keys_ptr, tmp_ptr, spawn_children,
+                                                            n_nonzero, src_keys_ptr, spawn_children,
                                                             cnode_view, child_views, child_s, unfilter_ptr, N);
           detail::submit_gradient_compute_batch_leader<T, NDIM>(batch, *deriv_pool, *spawn_pool, D,
                                                                 operators.current_view(), phi.current_view(),
