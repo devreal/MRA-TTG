@@ -95,121 +95,85 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
       const Batch batch = key.batch();
       const size_type N = vmra.size();
       const size_type K = vmra.front().get_impl()->get_k();
-      /**
-       * Always send reconstructed nodes. We don't send compressed nodes if they are leafs.
-       * MADNESS stores them explicitly, MRA does not.
-       */
-      bool do_send = std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>;
       const auto mad_key = key.to_madness_key();
-
-      /* Determine sparsity: which functions have a non-empty node at this key. */
-      SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
-      for (size_type fnid = 0; fnid < N; ++fnid) {
-        const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
-        auto accessor = coeffs.find(mad_key);
-        if (accessor.get() != coeffs.end()) {
-          if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
-            do_send = true; // always send reconstructed nodes
-            if (accessor.get()->second.is_leaf()) {
-              sparsity.set_nonzero(fnid);
-            }
-          } else if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
-            assert(vmra[fnid].get_impl()->get_tree_state() != madness::TreeState::reconstructed);
-            /**
-             * We only load inner nodes in compressed form. MRA does not store leaf nodes.
-             * TODO: MADNESS compressed trees may have inconsistent leaf information, so we check the coefficients instead of the leaf flag.
-             *       This is a workaround that is potentially expensive since it requires computing the norm.
-             */
-            if (accessor.get()->second.coeff().size() > 0 && accessor.get()->second.coeff().normf() != 0.0) {
-              do_send = true;
-              sparsity.set_nonzero(fnid);
-            }
-          }
-        }
-      }
-
       NodeT result(key, N);
-      if (do_send && sparsity.is_any_nonzero()) {
-        result.allocate(sparsity, K);
+      bool do_send = false;
 
-        //std::cout << "VMRA LOAD " << key << " result: " << result << " sparsity: " << sparsity << " sending? " << do_send << std::endl;
+      if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
+        /**
+         * A node is interior for a function if it has children or holds wavelet coefficients
+         * (2K per dimension), as in MADNESS's reconstruct_op: transform and truncate can leave
+         * interior nodes without coefficients and leafs with them. Only interior nodes are sent;
+         * MRA marks the leafs in their parent. The tree is taken from this rather than from the
+         * coefficients, so that an interior node without coefficients is sent as a zero node
+         * instead of being marked a leaf while its children are sent.
+         */
+        auto has_wavelets = [K](const auto& mad_node) {
+          return mad_node.has_coeff() && mad_node.coeff().dim(0) == long(2*K);
+        };
+        auto is_interior = [&](const auto& coeffs, const madness::Key<NDIM>& k) {
+          auto acc = coeffs.find(k);
+          if (acc.get() == coeffs.end()) return false;
+          const auto& mad_node = acc.get()->second;
+          return mad_node.has_children() || has_wavelets(mad_node);
+        };
 
+        std::vector<bool> interior(N, false);
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
         for (size_type fnid = 0; fnid < N; ++fnid) {
           const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
           auto accessor = coeffs.find(mad_key);
-
-          if (sparsity.is_zero(fnid)) {
-            /**
-             * Handle leaf information for reconstructed nodes.
-             */
-            if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
-              if (accessor.get() == coeffs.end()) {
-                result.set_leaf(fnid, LeafStatus::Invalid);
-              } else if (accessor.get()->second.is_leaf()) {
-                result.set_leaf(fnid, LeafStatus::Leaf);
-              } else {
-                result.set_leaf(fnid, LeafStatus::Inner);
-              }
-            }
-            continue;
-          }
-
-          assert(accessor.get() != coeffs.end());
+          if (accessor.get() == coeffs.end()) continue;
           const auto& mad_node = accessor.get()->second;
-          const auto& mad_coeff = mad_node.coeff();
+          interior[fnid] = mad_node.has_children() || has_wavelets(mad_node);
+          if (has_wavelets(mad_node)) sparsity.set_nonzero(fnid);
+          do_send |= interior[fnid];
+        }
 
-          /* Both MADNESS Tensor and MRA TensorView use contiguous row-major storage. */
-          auto mra_subview = result.coeffs_view(fnid);
-          std::copy_n(mad_coeff.ptr(), mad_coeff.size(), mra_subview.data());
-
-          if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
-            /* MRA encodes leaf information in the *parent* node via set_child_leaf.
-            * Iterate the 2^NDIM children of the current key and check whether each
-            * child is a MADNESS leaf node. */
-            if (vmra.front().get_impl()->get_tree_state() == madness::TreeState::nonstandard) {
-              result.set_ns(true);
+        if (do_send) {
+          result.allocate(sparsity, K);
+          if (vmra.front().get_impl()->get_tree_state() == madness::TreeState::nonstandard) {
+            result.set_ns(true);
+          }
+          for (size_type fnid = 0; fnid < N; ++fnid) {
+            if (!interior[fnid]) continue;   // all children are leafs (the default)
+            const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
+            if (sparsity.is_nonzero(fnid)) {
+              const auto& mad_coeff = coeffs.find(mad_key).get()->second.coeff();
+              /* Both MADNESS Tensor and MRA TensorView use contiguous row-major storage. */
+              auto mra_subview = result.coeffs_view(fnid);
+              std::copy_n(mad_coeff.ptr(), mad_coeff.size(), mra_subview.data());
             }
-            result.set_all_child_leaf(fnid, false);
+            /* MRA encodes leaf information in the *parent* node via set_child_leaf. */
             for (auto child : children(key)) {
-              const madness::Key<NDIM> mad_child_key = child.to_madness_key();
-              auto child_acc = coeffs.find(mad_child_key);
-              if (child_acc.get() == coeffs.end() ||
-                  child_acc.get()->second.coeff().size() == 0 ||
-                  child_acc.get()->second.coeff().normf() == 0.0) {
-                //std::cout << "LOAD " << key << " setting child " << child << " leaf for fnid " << fnid << std::endl;
-                result.set_child_leaf(fnid, child, true);
-                // TODO: the assert below triggers for compressed trees. Check what is going on
-#if 0
-                if (child_acc.get() == coeffs.end()) {
-                  auto& child_node = child_acc.get()->second;
-                  if (child_node.coeff().size() > 0) {
-                    std::cerr << "WARNING: VMRA LOAD " << key << " child " << child
-                              << " is a MADNESS leaf node but has non-zero coefficients" << std::endl;
-                    for (auto child2 : children(child)) {
-                      const madness::Key<NDIM> mad_child2_key = child2.to_madness_key();
-                      auto child2_acc = coeffs.find(mad_child2_key);
-                      if (child2_acc.get() != coeffs.end()) {
-                        std::cerr << "  grandchild " << child2 << " is a MADNESS node with "
-                                  << child2_acc.get()->second.coeff().size() << " coefficients" << std::endl;
-                      }
-                    }
-                  }
-                  assert(child_node.coeff().size() == 0);
-                }
-#endif
-              }
-            }
-          } else if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
-            /**
-             * Reconstructed nodes encode leaf information in the node.
-             */
-            if (mad_node.is_leaf()) {
-              result.set_leaf(fnid);
+              result.set_child_leaf(fnid, child, !is_interior(coeffs, child.to_madness_key()));
             }
           }
         }
-      }
-      if constexpr (std::is_same_v<NodeT, FunctionsReconstructedNode<T, NDIM>>) {
+      } else {
+        /* Always send reconstructed nodes. */
+        do_send = true;
+
+        /* Determine sparsity: which functions have a leaf at this key. */
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+        for (size_type fnid = 0; fnid < N; ++fnid) {
+          const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
+          auto accessor = coeffs.find(mad_key);
+          if (accessor.get() != coeffs.end() && accessor.get()->second.is_leaf()) {
+            sparsity.set_nonzero(fnid);
+          }
+        }
+
+        if (sparsity.is_any_nonzero()) {
+          result.allocate(sparsity, K);
+          for (size_type fnid = 0; fnid < N; ++fnid) {
+            if (sparsity.is_zero(fnid)) continue;
+            const auto& mad_coeff = vmra[fnid].get_impl()->get_coeffs().find(mad_key).get()->second.coeff();
+            /* Both MADNESS Tensor and MRA TensorView use contiguous row-major storage. */
+            auto mra_subview = result.coeffs_view(fnid);
+            std::copy_n(mad_coeff.ptr(), mad_coeff.size(), mra_subview.data());
+          }
+        }
         /* The status of every function, also where no function has a leaf here and
          * the node carries no coefficients (statuses default to Inner): a function
          * without a node at this key ended above (Invalid). */
