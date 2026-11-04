@@ -4,7 +4,9 @@
 #include <cmath>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <tuple>
+#include <type_traits>
 
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
@@ -221,7 +223,7 @@ namespace mra {
     template <typename T, Dimension NDIM>
     using GradientDerivativeBatchArg = std::tuple<
       Key<NDIM>,                   // key
-      const Key<NDIM>*,            // src_keys of the axis
+      size_type,                   // src_keys of the axis: byte offset into the slot's staged bytes (slot.dev_src)
       SparseTensorView<T, NDIM+1>, // left neighbor along the axis
       SparseTensorView<T, NDIM+1>, // S
       SparseTensorView<T, NDIM+1>, // right neighbor along the axis
@@ -245,7 +247,8 @@ namespace mra {
       const concepts::TensorView<1> auto quad_x,
       size_type K,
       const int bc_left,
-      const int bc_right)
+      const int bc_right,
+      const unsigned char* staged)               // device copy of the slot's staged bytes (slot.dev_src)
     {
       SHARED size_type entry;
       SHARED size_type local_pos;
@@ -255,7 +258,7 @@ namespace mra {
         }
         SYNCTHREADS();
         auto& arg = args[entry];
-        derivative_process_one<T, NDIM>(D, std::get<0>(arg), std::get<1>(arg),
+        derivative_process_one<T, NDIM>(D, std::get<0>(arg), reinterpret_cast<const Key<NDIM>*>(staged + std::get<1>(arg)),
                                         std::get<2>(arg), std::get<2>(arg), std::get<3>(arg), std::get<3>(arg),
                                         std::get<4>(arg), std::get<4>(arg), operators, std::get<5>(arg),
                                         phi, phibar, quad_x, shared_tmp, std::get<6>(arg), local_pos, blockIdx.x,
@@ -269,7 +272,8 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,                                        // compressed node
       SparseTensorView<T, NDIM+1>,                                        // S
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // S of the children
-      const std::uint8_t*,                                                // unfilter flags
+      size_type,                                                          // unfilter flags: byte offset into the
+                                                                          // slot's staged bytes (slot.dev_src)
       size_type                                                           // N
     >;
 
@@ -282,7 +286,8 @@ namespace mra {
       size_type total,
       T* shared_tmp,                        // occupancy-sized scratch of the batch slot, indexed by block
       size_type K,
-      const concepts::TensorView<2> auto hg)
+      const concepts::TensorView<2> auto hg,
+      const unsigned char* staged)          // device copy of the slot's staged bytes (slot.dev_src)
     {
       SHARED size_type member;
       SHARED size_type j;
@@ -293,7 +298,7 @@ namespace mra {
         SYNCTHREADS();
         auto& arg = args[member];
         gradient_spawn_process_one<T, NDIM>(std::get<0>(arg), K, std::get<1>(arg), std::get<2>(arg), hg,
-                                            std::get<3>(arg), std::get<4>(arg), shared_tmp, j, blockIdx.x);
+                                            std::get<3>(arg), staged + std::get<4>(arg), shared_tmp, j, blockIdx.x);
         SYNCTHREADS(); // member and j are rewritten by the next iteration
       }
     }
@@ -304,7 +309,8 @@ namespace mra {
      * results, n_nonzero, src_keys, has_children, cnode_view, child_views, children,
      * unfilter, N)`: nb_views the six neighbors (left and right of each axis),
      * results/children the nodes (for their sparsity), n_nonzero the number of
-     * derivatives along each axis. The members have no scratch of their own: each
+     * derivatives along each axis, src_keys (3*NDIM*N keys) and unfilter (N flags) in
+     * host memory: they are staged with the grouped copy of the launch that reads them. The members have no scratch of their own: each
      * launch takes its scratch from its batch slot, one region per block of the
      * occupancy-capped grid. max_functions bounds the number of functions of a node.
      */
@@ -350,31 +356,49 @@ namespace mra {
         slot.extra_sizes.clear();
       };
 
+      /* host data staged after the sparsity bytes, each aligned (the staged bytes start
+       * 16-byte aligned on the device, see submit_grouped_copy) */
+      static_assert(std::is_trivially_copyable_v<Key<NDIM>> && alignof(Key<NDIM>) <= 16);
+      auto align16 = [](size_type n) { return (n + 15) & ~size_type(15); };
+      auto stage_host = [&](auto& slot, const void* src, size_type bytes, size_type& offset) {
+        const size_type at = offset;
+        std::memcpy(&slot.sparsity[at], src, bytes);
+        offset += align16(bytes);
+        return at;
+      };
+
       /* the derivatives of every member and axis, one launch */
       size_type deriv_bytes = 0;
+      size_type keys_bytes = 0;
       std::size_t entries = 0;
       for (std::size_t m = 0; m < nb; ++m) {
+        bool any = false;
         for (Dimension a = 0; a < NDIM; ++a) {
           if (batch[m].template get<5>()[a] == 0) continue;
           deriv_bytes += batch[m].template get<4>()[a].coeffs().dim(0);
           ++entries;
+          any = true;
         }
+        if (any) keys_bytes += align16(3*NDIM*batch[m].template get<12>()*sizeof(Key<NDIM>));
       }
       if (entries > 0) {
         auto& deriv_pool = deriv_registry.get(device);
         auto& slot = deriv_pool.acquire(NDIM * max_batch, NDIM * max_batch + 1, NDIM * max_batch * max_functions);
         reset(slot);
-        slot.sparsity.resize(deriv_bytes);
+        slot.sparsity.resize(align16(deriv_bytes) + keys_bytes);
         size_type sparsity_offset = 0;
+        size_type keys_offset = align16(deriv_bytes);
         for (std::size_t m = 0; m < nb; ++m) {
           const auto& n_nonzero = batch[m].template get<5>();
           const size_type N = batch[m].template get<12>();
           auto& nbv = batch[m].template get<2>();
           auto& center = batch[m].template get<1>();
+          if (n_nonzero == std::array<size_type, NDIM>{}) continue;
+          const size_type keys_at = stage_host(slot, batch[m].template get<6>(), 3*NDIM*N*sizeof(Key<NDIM>), keys_offset);
           for (Dimension a = 0; a < NDIM; ++a) {
             if (n_nonzero[a] == 0) continue;
             stage_sparsity(slot, batch[m].template get<4>()[a], sparsity_offset);
-            slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<6>() + 3*a*N,
+            slot.args.emplace_back(batch[m].template get<0>(), keys_at + size_type(3*a*N*sizeof(Key<NDIM>)),
                                    nbv[2*a], center, nbv[2*a + 1], batch[m].template get<3>()[a], N, size_type(a));
             slot.offsets.push_back(slot.offsets.back() + n_nonzero[a]);
           }
@@ -395,31 +419,35 @@ namespace mra {
         T* shared_tmp = deriv_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
         CALL_KERNEL((gradient_derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
                     (slot.dev_args, slot.dev_offsets, static_cast<size_type>(entries), total, shared_tmp, D,
-                     operators, phi, phibar, quad_x, K, bc_left, bc_right));
+                     operators, phi, phibar, quad_x, K, bc_left, bc_right, slot.dev_src));
         checkSubmit();
         deriv_pool.mark_submitted(slot, stream);
       }
 
       /* S of the children */
       size_type bytes = 0;
+      size_type unfilter_bytes = 0;
       std::size_t members = 0;
       for (std::size_t m = 0; m < nb; ++m) {
         if (!batch[m].template get<7>()) continue;
         for (auto& c : batch[m].template get<10>()) bytes += c.coeffs().dim(0);
+        unfilter_bytes += align16(batch[m].template get<12>());
         ++members;
       }
       if (members == 0) return;
       auto& spawn_pool = spawn_registry.get(device);
       auto& slot = spawn_pool.acquire(max_batch, max_batch + 1, max_batch * num_children * max_functions);
       reset(slot);
-      slot.sparsity.resize(bytes);
+      slot.sparsity.resize(align16(bytes) + unfilter_bytes);
       size_type sparsity_offset = 0;
+      size_type unfilter_offset = align16(bytes);
       for (std::size_t m = 0; m < nb; ++m) {
         if (!batch[m].template get<7>()) continue;
         const size_type N = batch[m].template get<12>();
         for (auto& c : batch[m].template get<10>()) stage_sparsity(slot, c, sparsity_offset);
+        const size_type unfilter_at = stage_host(slot, batch[m].template get<11>(), N, unfilter_offset);
         slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<8>(), batch[m].template get<1>(),
-                               batch[m].template get<9>(), batch[m].template get<11>(), N);
+                               batch[m].template get<9>(), unfilter_at, N);
         slot.offsets.push_back(slot.offsets.back() + N);
       }
       const size_type total = slot.offsets.back();
@@ -435,7 +463,8 @@ namespace mra {
       const size_type spawn_grid = std::min<size_type>(total, spawn_cap);
       T* spawn_tmp = spawn_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(spawn_cap) * reconstruct_tmp_size<NDIM>(K));
       CALL_KERNEL((gradient_spawn_kernel_batched<T, NDIM>), spawn_grid, spawn_threads, spawn_smem,
-                  stream, (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, spawn_tmp, K, hg));
+                  stream, (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, spawn_tmp, K, hg,
+                           slot.dev_src));
       checkSubmit();
       spawn_pool.mark_submitted(slot, stream);
     }

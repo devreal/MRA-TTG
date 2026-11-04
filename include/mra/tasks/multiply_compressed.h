@@ -288,10 +288,21 @@ namespace mra {
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
         tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_compressed_tmp_size<NDIM>(K)*n_items, ttg::scope::Allocate);
-        work = ttg::Buffer<detail::MulCompressedWork<NDIM>, DeviceAllocator<detail::MulCompressedWork<NDIM>>>(n_items);
-        std::copy(plan.work.begin(), plan.work.end(), work.host_ptr());
+        /* batched, the leader stages the work items of every member with the batch's
+         * grouped copy (see submit_multiply_compressed_batch_leader): no buffer, and one
+         * flow less to stage in, per task */
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(db, hg.buffer(), phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp, work);
+        const bool stage_work = enable_batching;
+#else  // MRA_ENABLE_HOST
+        constexpr bool stage_work = false;
+#endif // MRA_ENABLE_HOST
+        if (!stage_work) {
+          work = ttg::Buffer<detail::MulCompressedWork<NDIM>, DeviceAllocator<detail::MulCompressedWork<NDIM>>>(n_items);
+          std::copy(plan.work.begin(), plan.work.end(), work.host_ptr());
+        }
+#ifndef MRA_ENABLE_HOST
+        auto input = ttg::device::Input(db, hg.buffer(), phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp);
+        if (!stage_work) input.add(work);
         for (const cnode_type* n : {&anode, &bnode}) if (!n->empty()) input.add(n->coeffs().buffer());
         if (!s_in.empty()) input.add(s_in.coeffs().buffer());
         if (!plan.result.empty()) input.add(plan.result.coeffs().buffer());
@@ -305,7 +316,8 @@ namespace mra {
         auto result_view = plan.result.coeffs().current_view();
         auto a_view = anode.coeffs().current_view(), b_view = bnode.coeffs().current_view();
         auto s_view = s_in.coeffs().current_view();
-        const detail::MulCompressedWork<NDIM>* work_ptr = work.current_device_ptr();
+        /* batched: the host plan, which lives in this frame while suspended in coop() */
+        const detail::MulCompressedWork<NDIM>* work_ptr = stage_work ? plan.work.data() : work.current_device_ptr();
         T* tmp_ptr = tmp.current_device_ptr();
 #ifndef MRA_ENABLE_HOST
         if (enable_batching) {
@@ -500,10 +512,21 @@ namespace mra {
         const auto& phi = functiondata.get_phi();
         const auto& quad_x = functiondata.get_quad_x();
         tmp = ttg::Buffer<T, DeviceAllocator<T>>(multiply_compressed_tmp_size<NDIM>(K)*n_items, ttg::scope::Allocate);
-        work = ttg::Buffer<detail::MulCompressedWork<NDIM>, DeviceAllocator<detail::MulCompressedWork<NDIM>>>(n_items);
-        std::copy(plan.work.begin(), plan.work.end(), work.host_ptr());
+        /* batched, the leader stages the work items of every member with the batch's
+         * grouped copy (see submit_multiply_compressed_batch_leader): no buffer, and one
+         * flow less to stage in, per task */
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(db, hg.buffer(), phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp, work);
+        const bool stage_work = enable_batching;
+#else  // MRA_ENABLE_HOST
+        constexpr bool stage_work = false;
+#endif // MRA_ENABLE_HOST
+        if (!stage_work) {
+          work = ttg::Buffer<detail::MulCompressedWork<NDIM>, DeviceAllocator<detail::MulCompressedWork<NDIM>>>(n_items);
+          std::copy(plan.work.begin(), plan.work.end(), work.host_ptr());
+        }
+#ifndef MRA_ENABLE_HOST
+        auto input = ttg::device::Input(db, hg.buffer(), phibar.buffer(), phi.buffer(), quad_x.buffer(), tmp);
+        if (!stage_work) input.add(work);
         if (!node.empty()) input.add(node.coeffs().buffer());
         if (!s_in.empty()) input.add(s_in.coeffs().buffer());
         if (!plan.result.empty()) input.add(plan.result.coeffs().buffer());
@@ -517,7 +540,8 @@ namespace mra {
         auto node_view = node.coeffs().current_view();
         auto result_view = plan.result.coeffs().current_view();
         auto s_view = s_in.coeffs().current_view();
-        const detail::MulCompressedWork<NDIM>* work_ptr = work.current_device_ptr();
+        /* batched: the host plan, which lives in this frame while suspended in coop() */
+        const detail::MulCompressedWork<NDIM>* work_ptr = stage_work ? plan.work.data() : work.current_device_ptr();
         T* tmp_ptr = tmp.current_device_ptr();
 #ifndef MRA_ENABLE_HOST
         if (enable_batching) {

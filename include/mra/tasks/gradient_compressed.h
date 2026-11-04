@@ -363,6 +363,17 @@ namespace mra {
       ttg::Buffer<T, DeviceAllocator<T>> tmp;
       ttg::Buffer<key_type, DeviceAllocator<key_type>> src_keys;
       ttg::Buffer<std::uint8_t, DeviceAllocator<std::uint8_t>> unfilter;
+      /* batched, the leader stages the source keys and unfilter flags of every member with
+       * the batch's grouped copies (see submit_gradient_compute_batch_leader), from host
+       * memory in this frame, which lives while suspended in coop(): no buffers, and two
+       * flows less to stage in, per task */
+#ifndef MRA_ENABLE_HOST
+      const bool stage_meta = enable_batching;
+#else  // MRA_ENABLE_HOST
+      constexpr bool stage_meta = false;
+#endif // MRA_ENABLE_HOST
+      std::vector<key_type> host_src_keys;
+      std::vector<std::uint8_t> host_unfilter;
       if (total_nonzero > 0 || has_children) {
         const auto& operators = functiondata.get_operators();
         const auto& phibar = functiondata.get_phibar();
@@ -373,8 +384,14 @@ namespace mra {
         /* per axis and function: the nodes the coefficients at the left neighbor, here, and
          * at the right neighbor belong to; an ancestor where the input ended above, and a
          * coarser node (or its ancestor) where a neighbor does not exist */
-        src_keys = ttg::Buffer<key_type, DeviceAllocator<key_type>>(3*NDIM*N);
-        key_type* sk = src_keys.host_ptr();
+        if (stage_meta) {
+          host_src_keys.resize(3*NDIM*N);
+          host_unfilter.resize(N);
+        } else {
+          src_keys = ttg::Buffer<key_type, DeviceAllocator<key_type>>(3*NDIM*N);
+          unfilter = ttg::Buffer<std::uint8_t, DeviceAllocator<std::uint8_t>>(N);
+        }
+        key_type* sk = stage_meta ? host_src_keys.data() : src_keys.host_ptr();
         for (Dimension a = 0; a < NDIM; ++a) {
           for (size_type j = 0; j < N; ++j) {
             sk[3*(a*N + j) + 0] = neighbor(a, -1).origin_key(j);
@@ -382,11 +399,15 @@ namespace mra {
             sk[3*(a*N + j) + 2] = neighbor(a, 1).origin_key(j);
           }
         }
-        unfilter = ttg::Buffer<std::uint8_t, DeviceAllocator<std::uint8_t>>(N);
-        for (size_type j = 0; j < N; ++j) unfilter.host_ptr()[j] = (S.leaf_status(j) == LeafStatus::Inner);
+        std::uint8_t* uf = stage_meta ? host_unfilter.data() : unfilter.host_ptr();
+        for (size_type j = 0; j < N; ++j) uf[j] = (S.leaf_status(j) == LeafStatus::Inner);
 #ifndef MRA_ENABLE_HOST
         auto inputs = ttg::device::Input(db, operators.buffer(), phibar.buffer(), phi.buffer(), quad_x.buffer(),
-                                         hg.buffer(), src_keys, unfilter);
+                                         hg.buffer());
+        if (!stage_meta) {
+          inputs.add(src_keys);
+          inputs.add(unfilter);
+        }
         if (tmp_size > 0) inputs.add(tmp);
         std::array<const void*, NB + 1> added{};
         std::size_t n_added = 0;
@@ -407,8 +428,9 @@ namespace mra {
         auto& D = *db.current_device_ptr();
         auto center_view = S.coeffs().current_view();
         T* tmp_ptr = (tmp_size > 0) ? tmp.current_device_ptr() : nullptr;
-        const key_type* src_keys_ptr = src_keys.current_device_ptr();
-        const std::uint8_t* unfilter_ptr = unfilter.current_device_ptr();
+        /* batched: host pointers into this frame, staged by the leader */
+        const key_type* src_keys_ptr = stage_meta ? host_src_keys.data() : src_keys.current_device_ptr();
+        const std::uint8_t* unfilter_ptr = stage_meta ? host_unfilter.data() : unfilter.current_device_ptr();
         auto cnode_view = cnode.coeffs().current_view();
         auto nb_views = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
           return std::array{(nb[Is]->coeffs().current_view())...};

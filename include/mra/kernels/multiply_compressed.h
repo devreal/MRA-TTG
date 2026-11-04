@@ -4,7 +4,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <tuple>
+#include <type_traits>
 
 #include "mra/misc/key.h"
 #include "mra/misc/domain.h"
@@ -390,7 +392,8 @@ namespace mra {
       SparseTensorView<T, NDIM+1>,                                        // s_in
       SparseTensorView<T, NDIM+1>,                                        // result
       std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()>, // out_arr
-      const MulCompressedWork<NDIM>*,                                     // work items
+      size_type,                                                          // work items: byte offset into the
+                                                                          // slot's staged bytes (slot.dev_src)
       size_type,                                                          // NA
       T*                                                                  // tmp: indexed by local position
     >;
@@ -413,7 +416,8 @@ namespace mra {
       const concepts::TensorView<2> auto phi,
       const concepts::TensorView<1> auto quad_x,
       bool square,
-      size_type K)
+      size_type K,
+      const unsigned char* staged)          // device copy of the slot's staged bytes (slot.dev_src)
     {
       using idx = MulCompressedBatchArgIdx;
       SHARED size_type member;
@@ -427,7 +431,8 @@ namespace mra {
         multiply_compressed_process_one<T, NDIM>(D, std::get<idx::key>(arg), std::get<idx::a_node>(arg),
                                                  std::get<idx::b_node>(arg), std::get<idx::s_in>(arg),
                                                  std::get<idx::result>(arg), std::get<idx::out_arr>(arg),
-                                                 hg, phibar, phi, quad_x, std::get<idx::work>(arg),
+                                                 hg, phibar, phi, quad_x,
+                                                 reinterpret_cast<const MulCompressedWork<NDIM>*>(staged + std::get<idx::work>(arg)),
                                                  std::get<idx::NA>(arg), square, K, std::get<idx::tmp>(arg),
                                                  local_pos);
       }
@@ -437,10 +442,12 @@ namespace mra {
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(key, a_view, b_view, s_view, result_view,
      * out_views, work, NA, tmp, result, out, n_items)` (result and out the nodes, for
-     * their sparsity); the leader marshals every member and submits one combined
-     * launch. The sparsity of the result and of every allocated child node of each
-     * member is copied to its device buffer as part of the single H2D copy of the
-     * batch. max_functions bounds the number of functions of any of those nodes.
+     * their sparsity; work the member's n_items work items in host memory); the leader
+     * marshals every member and submits one combined launch. The sparsity of the result
+     * and of every allocated child node of each member is copied to its device buffer
+     * as part of the single H2D copy of the batch, and the work items are staged with
+     * it, read by the kernel in place. max_functions bounds the number of functions of
+     * any of those nodes.
      */
     template <typename T, Dimension NDIM, typename BatchView>
     void submit_multiply_compressed_batch_leader(
@@ -480,7 +487,17 @@ namespace mra {
       for (std::size_t m = 0; m < nb; ++m) {
         for_each_output(m, [&](auto& node) { total_sparsity_bytes += node.coeffs().dim(0); });
       }
-      slot.sparsity.resize(total_sparsity_bytes);
+      /* the work items of every member follow the sparsity bytes, each aligned (the
+       * staged bytes start 16-byte aligned on the device, see submit_grouped_copy) */
+      using work_t = MulCompressedWork<NDIM>;
+      static_assert(std::is_trivially_copyable_v<work_t> && alignof(work_t) <= 16);
+      auto align_work = [](size_type n) { return (n + 15) & ~size_type(15); };
+      size_type total_staged_bytes = align_work(total_sparsity_bytes);
+      for (std::size_t m = 0; m < nb; ++m) {
+        total_staged_bytes += align_work(batch[m].template get<11>() * sizeof(work_t));
+      }
+      slot.sparsity.resize(total_staged_bytes);
+      size_type work_offset = align_work(total_sparsity_bytes);
 
       size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
@@ -492,9 +509,12 @@ namespace mra {
           slot.extra_sizes.push_back(n);
           sparsity_offset += n;
         });
+        const size_type work_bytes = batch[m].template get<11>() * sizeof(work_t);
+        std::memcpy(&slot.sparsity[work_offset], batch[m].template get<6>(), work_bytes);
         slot.args.emplace_back(batch[m].template get<0>(), batch[m].template get<1>(), batch[m].template get<2>(),
                                batch[m].template get<3>(), batch[m].template get<4>(), batch[m].template get<5>(),
-                               batch[m].template get<6>(), batch[m].template get<7>(), batch[m].template get<8>());
+                               work_offset, batch[m].template get<7>(), batch[m].template get<8>());
+        work_offset += align_work(work_bytes);
         slot.offsets[m + 1] = slot.offsets[m] + batch[m].template get<11>();
       }
       const size_type total_items = slot.offsets[nb];
@@ -508,7 +528,7 @@ namespace mra {
                                                               std::decay_t<decltype(quad_x)>>, smem_size);
       CALL_KERNEL((multiply_compressed_kernel_batched<T, NDIM>), total_items, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_items, D,
-                   hg, phibar, phi, quad_x, square, K));
+                   hg, phibar, phi, quad_x, square, K, slot.dev_src));
       checkSubmit();
       pool.mark_submitted(slot, stream);
     }
