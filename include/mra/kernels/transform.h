@@ -8,6 +8,7 @@
 #include "mra/misc/platform.h"
 #include "mra/tensor/cycledim.h"
 #include "mra/tensor/tensorview.h"
+#include "mra/kernels/impl/transform_cuda_mma.h"
 
 //#define MRA_CUDA_ENABLE_SHARED_TRANSFORM
 
@@ -61,6 +62,19 @@ namespace mra {
   }
 #endif // defined(MRA_ENABLE_CUDA)
 
+  /**
+   * Dynamic shared memory (bytes) to launch a kernel with that calls transform()
+   * on D^NDIM tensors of T. transform() works with less (down to none, using its
+   * workspace instead) but is faster with it. The tensor-core path's share is
+   * only requested if it fits into max_bytes: the default is what any launch
+   * may use, a launch with more needs detail::configure_kernel_smem first.
+   */
+  template <typename T, Dimension NDIM>
+  constexpr size_type transform_shmem_size(size_type D, size_type max_bytes = 48*1024) {
+    const size_type accel = accel::mma::transform_mma_shmem_size<T, NDIM>(D);
+    return std::max<size_type>(mTxmq_shmem_size<T>(D), accel <= max_bytes ? accel : 0);
+  }
+
   template <typename T>
   SCOPE void transform(
     const concepts::TensorView auto& t,
@@ -70,6 +84,16 @@ namespace mra {
   {
     static_assert(std::decay_t<decltype(t)>::ndim() == std::decay_t<decltype(result)>::ndim(),
                   "Input and output tensor views must have the same number of dimensions.");
+#ifdef MRA_HAVE_TRANSFORM_DMMA
+    {
+      /* FP64 tensor cores for cubes, see mra/kernels/impl/transform_cuda_mma.h */
+      constexpr Dimension ndim = std::decay_t<decltype(t)>::ndim();
+      const size_type D = c.dim(1);
+      bool cube = (c.dim(0) == D);
+      for (Dimension d = 0; d < ndim; ++d) cube = cube && t.dim(d) == D && result.dim(d) == D;
+      if (cube && accel::mma::transform<T, ndim>(D, t.data(), c.data(), result.data(), workspace)) return;
+    }
+#endif // MRA_HAVE_TRANSFORM_DMMA
     if (transform_shared(t, c, result, workspace)) return;
     const auto* pc = c.data();
     T* t0=workspace, *t1=result.data();

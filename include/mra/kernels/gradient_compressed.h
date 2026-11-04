@@ -117,7 +117,11 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    /* W of the tensor-core transform in shared memory even above 48KB (K=10) */
+    const size_type smem_size = transform_shmem_size<T, NDIM>(2*K, std::numeric_limits<size_type>::max());
+    detail::configure_kernel_smem(detail::gradient_spawn_kernel<T, NDIM, std::decay_t<decltype(node_view)>,
+                                    std::decay_t<decltype(s_view)>, std::decay_t<decltype(hg)>,
+                                    std::decay_t<decltype(children)>>, smem_size);
     CALL_KERNEL(detail::gradient_spawn_kernel, N, thread_dims, smem_size, stream,
       (key, N, K, node_view, s_view, hg, children, inner, tmp));
     checkSubmit();
@@ -422,8 +426,9 @@ namespace mra {
       submit_grouped_copy<GradientSpawnBatchArg<T, NDIM>>(slot, members, slot.offsets.size(), spawn_pool.device_id, stream);
       /* as for the derivatives: the grid capped at occupancy, the scratch the slot's */
       const Dim3 spawn_threads = max_thread_dims(2*K);
-      const auto spawn_smem = mTxmq_shmem_size<T>(2*K);
+      const size_type spawn_smem = transform_shmem_size<T, NDIM>(2*K, std::numeric_limits<size_type>::max());
       auto spawn_kernel = gradient_spawn_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>>;
+      configure_kernel_smem(spawn_kernel, spawn_smem);
       const size_type spawn_cap = kernel_grid_cap(spawn_kernel,
                                                   static_cast<int>(spawn_threads.x * spawn_threads.y * spawn_threads.z),
                                                   spawn_smem);

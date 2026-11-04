@@ -129,7 +129,7 @@ namespace mra {
     template <typename T, Dimension NDIM>
     size_type multiply_broadcast_smem_size(size_type K) {
       return std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // phi of fcube_for_mul from an ancestor
-                      static_cast<size_type>(mTxmq_shmem_size<T>(2*K)));
+                      static_cast<size_type>(transform_shmem_size<T, NDIM>(K)));
     }
   } // namespace detail
 

@@ -128,6 +128,62 @@ namespace mra {
       SYNCTHREADS();
     }
 
+#ifdef MRA_HAVE_TRANSFORM_DMMA
+    /**
+     * The products at the children of `key` that end there (MULC_LEAF), one
+     * child per warp, on tensor cores (see accel::mma::transform_warp): from the
+     * child's slice of ua (and ub), values = s1*T(a) (times s1*T(b), or squared)
+     * with phi (as fcube_for_mul, whose parameter named phibar receives phi),
+     * then dst = s2*T(values) with phibar. Each warp keeps its values in its
+     * own K^3 part of t, which is free once the factors are unfiltered. Requires
+     * accel::mma::transform_warp_available<T, NDIM>(K); called by all threads.
+     */
+    template <typename T, Dimension NDIM>
+    DEVSCOPE void multiply_compressed_leaf_children_warp(
+      const Domain<NDIM>& D,
+      const Key<NDIM>& key,
+      const MulCompressedWork<NDIM>& w,
+      const T* ua,
+      const T* ub,
+      T* t,
+      concepts::TensorViewArray<NDIM+1, Key<NDIM>::num_children()> auto& out_arr,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      bool square,
+      size_type K)
+    {
+      using namespace accel::mma;
+      static_assert(NDIM == 3, "warp-parallel children: NDIM=3 only");
+      const int nwarps = block_size() / MRA_WARP_SIZE;
+      const int warp = thread_id() / MRA_WARP_SIZE;
+      const size_type K2 = 2*K;
+      if (warp < nwarps) {
+        T* W = transform_warp_buffer<T>(K);
+        T* values = t + warp * K*K*K; // nwarps <= 8 = (2K)^3/K^3
+        const T* pf = phi.data();    // coefficients to values
+        const T* pb = phibar.data(); // values to coefficients
+        for (int c = warp; c < (int)Key<NDIM>::num_children(); c += nwarps) {
+          if (w.child[c] != MULC_LEAF) continue;
+          const Level level = key.level() + 1;
+          /* coefficients to values (fcube_for_mul at the child itself) and back */
+          const T s1 = std::pow(T(2), T(0.5*NDIM*level)) / std::sqrt(D.template get_volume<T>());
+          const T s2 = std::pow(T(0.5), T(0.5*NDIM*level)) * std::sqrt(D.template get_volume<T>());
+          /* the child's slice of the (2K)^3 unfiltered cubes, see get_child_slice */
+          const size_type off = (c & 1)*K*K2*K2 + ((c >> 1) & 1)*K*K2 + ((c >> 2) & 1)*K;
+          if (square) {
+            transform_warp<T, NDIM, TransformEpilogue::Square>(K, ua + off, K2, K2*K2, pf, values, s1, W);
+          } else {
+            transform_warp<T, NDIM, TransformEpilogue::Scale>(K, ua + off, K2, K2*K2, pf, values, s1, W);
+            transform_warp<T, NDIM, TransformEpilogue::Mul>(K, ub + off, K2, K2*K2, pf, values, s1, W);
+          }
+          T* dst = out_arr[c](w.j).data();
+          transform_warp<T, NDIM, TransformEpilogue::Scale>(K, values, K, K*K, pb, dst, s2, W);
+        }
+      }
+      SYNCTHREADS();
+    }
+#endif // MRA_HAVE_TRANSFORM_DMMA
+
     /**
      * Work item `pos` at node `key`, executed by one block.
      *
@@ -194,9 +250,19 @@ namespace mra {
       } else {
         multiply_compressed_unfilter<T, NDIM>(key, K, da, sa_in, t, ua, hg, workspace);
         if (!square) multiply_compressed_unfilter<T, NDIM>(key, K, db, sb_in, t, ub, hg, workspace);
+        bool leaves_done = false;
+#ifdef MRA_HAVE_TRANSFORM_DMMA
+        if constexpr (NDIM == 3 && std::is_same_v<T, double>) {
+          if (accel::mma::transform_warp_available<T, NDIM>(K)) {
+            multiply_compressed_leaf_children_warp<T, NDIM>(D, key, w, ua.data(), ub.data(), t.data(), out_arr,
+                                                            phi, phibar, square, K);
+            leaves_done = true;
+          }
+        }
+#endif // MRA_HAVE_TRANSFORM_DMMA
         for (size_type c = 0; c < Key<NDIM>::num_children(); ++c) {
           const auto child_slice = get_child_slice<NDIM>(key, K, c);
-          if (w.child[c] == MULC_LEAF) {
+          if (w.child[c] == MULC_LEAF && !leaves_done) {
             if (is_team_lead()) {
               dst = out_arr[c](w.j);
               ca = DenseTensorView<const T, NDIM>(sa.data(), K, K, K);
@@ -255,6 +321,21 @@ namespace mra {
     }
   } // namespace detail
 
+  namespace detail {
+    /**
+     * Dynamic shared memory of the multiply-compressed kernels: W of the
+     * block-wide tensor-core transform of the unfiltering (2K), or W of every
+     * warp for the warp-parallel children (K), whichever is more; above 48KB
+     * at K=10, see detail::configure_kernel_smem.
+     */
+    template <typename T, Dimension NDIM>
+    size_type multiply_compressed_smem_size(size_type K, const Dim3& thread_dims) {
+      const size_type nwarps = (thread_dims.x * thread_dims.y * thread_dims.z) / 32;
+      return std::max<size_type>(transform_shmem_size<T, NDIM>(2*K, std::numeric_limits<size_type>::max()),
+                                 accel::mma::transform_warp_shmem_size<T, NDIM>(K, nwarps));
+    }
+  } // namespace detail
+
   template <typename T, Dimension NDIM>
   void submit_multiply_compressed_kernel(
     const Domain<NDIM>& D,
@@ -277,7 +358,14 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    /* W of the tensor-core transform in shared memory even above 48KB (K=10) */
+    const size_type smem_size = detail::multiply_compressed_smem_size<T, NDIM>(K, thread_dims);
+    detail::configure_kernel_smem(
+      detail::multiply_compressed_kernel<T, NDIM, std::decay_t<decltype(a_node)>, std::decay_t<decltype(b_node)>,
+                                         std::decay_t<decltype(s_in)>, std::decay_t<decltype(result)>,
+                                         std::decay_t<decltype(out_arr)>, std::decay_t<decltype(hg)>,
+                                         std::decay_t<decltype(phibar)>, std::decay_t<decltype(phi)>,
+                                         std::decay_t<decltype(quad_x)>>, smem_size);
     CALL_KERNEL(detail::multiply_compressed_kernel, n_items, thread_dims, smem_size, stream,
       (D, key, a_node, b_node, s_in, result, out_arr, hg, phibar, phi, quad_x, work, NA, square, n_items, K, tmp));
     checkSubmit();
@@ -414,7 +502,10 @@ namespace mra {
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
       Dim3 thread_dims = max_thread_dims(2*K);
-      auto smem_size = mTxmq_shmem_size<T>(2*K);
+      const size_type smem_size = multiply_compressed_smem_size<T, NDIM>(K, thread_dims);
+      configure_kernel_smem(multiply_compressed_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>,
+                                                              std::decay_t<decltype(phibar)>, std::decay_t<decltype(phi)>,
+                                                              std::decay_t<decltype(quad_x)>>, smem_size);
       CALL_KERNEL((multiply_compressed_kernel_batched<T, NDIM>), total_items, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_items, D,
                    hg, phibar, phi, quad_x, square, K));

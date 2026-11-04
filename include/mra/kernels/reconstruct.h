@@ -360,7 +360,7 @@ namespace mra {
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = transform_shmem_size<T, NDIM>(2*K);
     //CONFIGURE_KERNEL((detail::reconstruct_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::reconstruct_kernel, n_nonzero, thread_dims, smem_size, stream,
       (key, N, n_nonzero, K, accumulate_NS, node, tmp, hg, from_parent, r_arr, result, ns));
@@ -583,7 +583,7 @@ namespace mra {
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = transform_shmem_size<T, NDIM>(2*K);
     const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
 
     // total_nonzero can run into the thousands for a large batch, far beyond

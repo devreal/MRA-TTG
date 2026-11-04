@@ -110,7 +110,7 @@ namespace mra {
     ttg::device::Stream stream)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = transform_shmem_size<T, NDIM>(K);
     CALL_KERNEL(detail::square_kernel, n_nonzero, thread_dims, smem_size, stream,
       (D, key, in, out, phibar, phi, quad_x, N, n_nonzero, K, tmp));
     checkSubmit();
@@ -216,7 +216,7 @@ namespace mra {
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
       Dim3 thread_dims = max_thread_dims(2*K);
-      auto smem_size = mTxmq_shmem_size<T>(2*K);
+      auto smem_size = transform_shmem_size<T, NDIM>(K);
       CALL_KERNEL((square_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
                   (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, D, phibar, phi, quad_x, K));
       checkSubmit();

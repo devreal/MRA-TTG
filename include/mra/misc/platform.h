@@ -7,6 +7,11 @@
 #include <algorithm>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 #if defined(MRA_ENABLE_CUDA)
 #include <cuda.h>
@@ -92,6 +97,7 @@ namespace mra::detail {
                   << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;            \
         throw std::runtime_error("kernel configuration failed");                        \
       }                                                                                 \
+      smem_size_config = shared;                                                        \
     }                                                                                   \
   } while (0)
 
@@ -154,6 +160,28 @@ namespace mra::detail {
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, threads, smem_bytes);
     return static_cast<std::uint32_t>(num_sms) * static_cast<std::uint32_t>(std::max(blocks_per_sm, 1)) * overcommit;
   }
+
+  /**
+   * Allows kernel to be launched with smem_bytes of dynamic shared memory on the
+   * current device, which CUDA requires above 48KB. Call before the launch and
+   * before kernel_grid_cap. The attribute is per device, so is the bookkeeping.
+   */
+  template <typename KernelT>
+  inline void configure_kernel_smem(KernelT kernel, std::size_t smem_bytes) {
+    if (smem_bytes <= 48 * 1024) return;
+    static std::mutex mtx;
+    static std::map<std::pair<const void*, int>, std::size_t> configured;
+    int device = 0;
+    cudaGetDevice(&device);
+    std::lock_guard<std::mutex> lock(mtx);
+    std::size_t& current = configured[{reinterpret_cast<const void*>(kernel), device}];
+    if (current >= smem_bytes) return;
+    if (cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel), cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(smem_bytes)) != cudaSuccess) {
+      throw std::runtime_error(std::string("configure_kernel_smem: ") + cudaGetErrorString(cudaGetLastError()));
+    }
+    current = smem_bytes;
+  }
 #elif defined(MRA_ENABLE_HIP)
   template <typename KernelT>
   inline std::uint32_t kernel_grid_cap(KernelT kernel, int threads, std::size_t smem_bytes,
@@ -169,6 +197,9 @@ namespace mra::detail {
     hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, threads, smem_bytes);
     return static_cast<std::uint32_t>(num_sms) * static_cast<std::uint32_t>(std::max(blocks_per_sm, 1)) * overcommit;
   }
+
+  template <typename KernelT>
+  inline void configure_kernel_smem(KernelT, std::size_t) { }
 #else
   // Host "kernels" run as a single call with gridDim == {1,1,1} regardless
   // of the block count passed to CALL_KERNEL (see the host CALL_KERNEL
@@ -177,6 +208,9 @@ namespace mra::detail {
   inline std::uint32_t kernel_grid_cap(KernelT, int, std::size_t, std::uint32_t = 2) {
     return std::numeric_limits<std::uint32_t>::max();
   }
+
+  template <typename KernelT>
+  inline void configure_kernel_smem(KernelT, std::size_t) { }
 #endif
 } // namespace mra::detail
 

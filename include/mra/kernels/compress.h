@@ -350,7 +350,7 @@ namespace mra {
 
     Dim3 thread_dims = max_thread_dims(2*K);
 
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = transform_shmem_size<T, NDIM>(2*K);
     //CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
     CALL_KERNEL(detail::compress_kernel, n_nonzero, thread_dims, smem_size, stream,
       (key, N, n_nonzero, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views, ns_view,
@@ -519,7 +519,7 @@ namespace mra {
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
     Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = mTxmq_shmem_size<T>(2*K);
+    auto smem_size = transform_shmem_size<T, NDIM>(2*K);
     const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
 
     // total_nonzero can run into the thousands for a large batch, far beyond

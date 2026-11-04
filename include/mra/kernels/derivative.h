@@ -437,7 +437,7 @@ namespace mra {
     template <typename T, Dimension NDIM>
     size_type derivative_smem_size(size_type K) {
       return std::max(static_cast<size_type>(K*K*NDIM*sizeof(T)), // used in fcube_for_mul
-                      static_cast<size_type>(mTxmq_shmem_size<T>(2*K)));
+                      static_cast<size_type>(transform_shmem_size<T, NDIM>(K)));
     }
 
     inline Dim3 derivative_thread_dims(size_type K) {
