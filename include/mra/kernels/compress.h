@@ -3,6 +3,8 @@
 
 #include <array>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 
 #include "mra/ops/functions.h"
 #include "mra/kernels/transform.h"
@@ -11,6 +13,7 @@
 #include "mra/tensor/sparsitymanager.h"
 #include "mra/misc/key.h"
 #include "mra/misc/maxk.h"
+#include "mra/misc/integer.h"
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 #include "mra/tensor/tensorview.h"
@@ -154,11 +157,20 @@ namespace mra {
      * separate host-built index list/transfer needed), and shared with the
      * rest of the block via a SHARED variable.
      */
-    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT,
-             typename NSInT>
-    DEVSCOPE void compress_process_one(
+#if defined(HAVE_DEVICE_ARCH)
+    /**
+     * compress_process_one for NDIM == 3 on the device. There is no team-lead
+     * setup phase: every warp finds the function id and forms the views
+     * itself (their loads are broadcasts), so all warps start working at
+     * once. The gather of the children into s and the post-transform pass
+     * (adding ns, extracting p, zeroing the scaling block, sum of squares)
+     * are one loop each, with K known at compile time if KT is an Int<K>.
+     */
+    template<typename T, Dimension NDIM, typename KT, typename NodeInT, typename PInT, typename ResultInT,
+             typename HgtT, typename InViewsT, typename NSInT>
+    DEVSCOPE void compress_process_one_flat(
       Key<NDIM> key,
-      size_type K,
+      KT Kc,
       bool is_ns,
       const NodeInT& node_in,
       PInT& p_in,
@@ -174,6 +186,163 @@ namespace mra {
       const unsigned char* child_kept,
       T trunc_tol)
     {
+      static_assert(NDIM == 3, "compress_process_one_flat is written for NDIM == 3");
+      constexpr int num_children = Key<NDIM>::num_children();
+      const size_type K = Kc;
+      const size_type K2 = K*K, K3 = K2*K;
+      const size_type TK = 2*K, TK2 = TK*TK, TK3 = TK2*TK;
+      const size_type tid = thread_id(), nthreads = block_size();
+
+      /* p_in has exactly as many non-zero entries as positions, so this finds a valid id */
+      const size_type fnid = find_nth_nonzero_warp(N, tmp_pos, p_in);
+
+      /* The data pointers of fnid's blocks (nullptr where zero): lane c < 8
+       * resolves child c, lanes 8..11 d, p, node and ns, then they are
+       * broadcast. Each one takes a few dependent loads (view, sparsity),
+       * which this overlaps instead of running them one after another. */
+      enum : unsigned { L_D = num_children, L_P, L_NODE, L_NS, L_COUNT };
+      auto resolve = [&](unsigned idx) -> const T* {
+        using ViewT = std::decay_t<decltype(in_views[0])>;
+        if constexpr (std::is_same_v<ViewT, NodeInT> && std::is_same_v<ViewT, PInT> &&
+                      std::is_same_v<ViewT, ResultInT> && std::is_same_v<ViewT, NSInT>) {
+          /* one code path for all lanes */
+          const ViewT* v = (idx < L_D)     ? &in_views[idx]
+                         : (idx == L_D)    ? &result_in
+                         : (idx == L_P)    ? &p_in
+                         : (idx == L_NODE) ? &node_in : &ns_in;
+          return (*v)(fnid).data(); // the const subview has nullptr data where zero
+        } else {
+          if (idx < L_D)     return in_views[idx](fnid).data();
+          if (idx == L_D)    return std::as_const(result_in)(fnid).data();
+          if (idx == L_P)    return std::as_const(p_in)(fnid).data();
+          if (idx == L_NODE) return node_in(fnid).data();
+          return ns_in(fnid).data();
+        }
+      };
+      const ScanWarp sw;
+      const bool lanes_suffice = sw.nlanes >= L_COUNT; // uniform within the warp
+      const T* mine = (lanes_suffice && sw.lane < L_COUNT) ? resolve(sw.lane) : nullptr;
+      auto bcast = [&](unsigned src) -> const T* {
+        if (!lanes_suffice) return resolve(src);
+        auto v = reinterpret_cast<unsigned long long>(mine);
+#if defined(__CUDA_ARCH__)
+        v = __shfl_sync((sw.nlanes >= 32) ? 0xffffffffu : ((1u << sw.nlanes) - 1), v, src);
+#else
+        v = __shfl(v, src);
+#endif
+        return reinterpret_cast<const T*>(v);
+      };
+      const T* child[num_children];
+      #pragma unroll
+      for (int c = 0; c < num_children; ++c) child[c] = bcast(c);
+      T* d = const_cast<T*>(bcast(L_D));
+      T* p = const_cast<T*>(bcast(L_P));
+      const T* node = bcast(L_NODE);
+      const T* ns = bcast(L_NS);
+
+      if (d == nullptr) {
+        /* output is zero: pass the input through to p */
+        for (size_type i = tid; i < K3; i += nthreads) {
+          p[i] = (node != nullptr) ? node[i] : T(0);
+        }
+        if (tid == 0) d_sumsq[tmp_pos] = 0.0;
+        SYNCTHREADS();
+        return;
+      }
+
+      T* s = &tmp[tmp_slot*compress_tmp_size<NDIM>(K)];
+      T* workspace = s + TK3;
+
+      /* s = the children's blocks, child c at offset K*(bit d of c) in dimension d */
+      for (size_type e = tid; e < K3; e += nthreads) {
+        const size_type i = e / K2, j = (e / K) % K, k = e % K;
+        T v[num_children];
+        #pragma unroll
+        for (int c = 0; c < num_children; ++c) {
+          v[c] = (child[c] != nullptr) ? child[c][e] : T(0);
+        }
+        #pragma unroll
+        for (int c = 0; c < num_children; ++c) {
+          s[((i + ((c & 1) ? K : 0))*TK + j + ((c & 2) ? K : 0))*TK + k + ((c & 4) ? K : 0)] = v[c];
+        }
+      }
+      SYNCTHREADS();
+
+      {
+        DenseTensorView<T, NDIM> sv(s, TK, TK, TK);
+        DenseTensorView<T, NDIM> dv(d, TK, TK, TK);
+        transform(sv, hgT, dv, workspace); // synchronizes
+      }
+
+      /* d += ns; p = d[0:K,0:K,0:K]; that block is then zeroed except at
+       * level 0 or when compressing from non-standard form; norm of d */
+      const bool zero_s = key.level() > 0 && !is_ns;
+      T sumsq = 0;
+      for (size_type e = tid; e < TK3; e += nthreads) {
+        const size_type i = e / TK2, j = (e / TK) % TK, k = e % TK;
+        T v = d[e];
+        bool write = false;
+        if (ns != nullptr) {
+          v += ns[e];
+          write = true;
+        }
+        if (i < K && j < K && k < K) {
+          p[(i*K + j)*K + k] = v;
+          if (zero_s) {
+            v = T(0);
+            write = true;
+          }
+        }
+        if (write) d[e] = v;
+        sumsq += v*v;
+      }
+      reduce_block(sumsq, &d_sumsq[tmp_pos], std::min(TK3, nthreads));
+
+      /* in-line truncation, see compress_process_one */
+      if (is_team_lead()) {
+        if (key.level() > 1 && d_sumsq[tmp_pos] < trunc_tol*trunc_tol) {
+          bool any_child_kept = false;
+          for (size_type c = 0; c < num_children; ++c) {
+            if (child_kept[c*N + fnid] != 0) {
+              any_child_kept = true;
+            }
+          }
+          if (!any_child_kept) {
+            result_in.set_zero(fnid);
+          }
+        }
+      }
+    }
+#endif // HAVE_DEVICE_ARCH
+
+    template<typename T, Dimension NDIM, typename KT, typename NodeInT, typename PInT, typename ResultInT, typename HgtT,
+             typename InViewsT, typename NSInT>
+    DEVSCOPE void compress_process_one(
+      Key<NDIM> key,
+      KT Kc,
+      bool is_ns,
+      const NodeInT& node_in,
+      PInT& p_in,
+      ResultInT& result_in,
+      const HgtT& hgT,
+      T* tmp,
+      T* d_sumsq,
+      const InViewsT& in_views,
+      const NSInT& ns_in,
+      size_type N,
+      size_type tmp_pos,
+      size_type tmp_slot,
+      const unsigned char* child_kept,
+      T trunc_tol)
+    {
+#if defined(HAVE_DEVICE_ARCH)
+      if constexpr (NDIM == 3) {
+        compress_process_one_flat<T, NDIM>(key, Kc, is_ns, node_in, p_in, result_in, hgT, tmp, d_sumsq,
+                                           in_views, ns_in, N, tmp_pos, tmp_slot, child_kept, trunc_tol);
+        return;
+      }
+#endif // HAVE_DEVICE_ARCH
+      const size_type K = Kc;
       SHARED std::array<decltype(in_views[0](0)), Key<NDIM>::num_children()> block_in_views;
       SHARED T* workspace;
       SHARED DenseTensorView<const T, NDIM> node, ns;
@@ -291,14 +460,14 @@ namespace mra {
     }
 #endif // MRA_CHECK_NORMS
 
-    template<typename T, Dimension NDIM, typename NodeInT, typename PInT, typename ResultInT, typename HgtT, typename InViewsT,
-             typename NSInT>
+    template<typename T, Dimension NDIM, typename KT, typename NodeInT, typename PInT, typename ResultInT, typename HgtT,
+             typename InViewsT, typename NSInT>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel(
       Key<NDIM> key,
       size_type N,
       size_type n_nonzero,
-      size_type K,
+      KT K,
       bool is_ns,
       const NodeInT node_in,
       PInT p_in,
@@ -351,10 +520,11 @@ namespace mra {
     Dim3 thread_dims = max_thread_dims(2*K);
 
     auto smem_size = transform_shmem_size<T, NDIM>(2*K);
-    //CONFIGURE_KERNEL((detail::compress_kernel<T, NDIM>), smem_size);
-    CALL_KERNEL(detail::compress_kernel, n_nonzero, thread_dims, smem_size, stream,
-      (key, N, n_nonzero, K, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views, ns_view,
-       child_kept, trunc_tol));
+    dispatch_k(K, [&](auto Kc) {
+      CALL_KERNEL((detail::compress_kernel<T, NDIM>), n_nonzero, thread_dims, smem_size, stream,
+        (key, N, n_nonzero, Kc, is_ns, in_view, p_view, result_view, hgT_view, tmp, d_sumsq, in_views, ns_view,
+         child_kept, trunc_tol));
+    });
     checkSubmit();
   }
 
@@ -442,7 +612,7 @@ namespace mra {
      * off to the exact same per-(node, function) body compress_kernel itself
      * uses (compress_process_one, defined above with compress_kernel_impl).
      */
-    template<typename T, Dimension NDIM, typename HgtT>
+    template<typename T, Dimension NDIM, typename HgtT, typename KT>
     LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
     GLOBALSCOPE void compress_kernel_batched(
       CompressBatchArg<T, NDIM>* args,        // device ptr, size == num_members
@@ -457,19 +627,16 @@ namespace mra {
                                                // compact position back afterward -- see its comment.
       const unsigned char* kept_base,         // device copy of the slot's staged source bytes (slot.dev_src),
                                                // which every member's child_kept_offset indexes into
-      size_type K,
+      KT K,
       bool is_ns,
       const HgtT hgT)
     {
       using idx = CompressBatchArgIdx;
-      SHARED size_type member;
-      SHARED size_type local_pos;
 
       for (size_type pos = blockIdx.x; pos < total_nonzero; pos += gridDim.x) {
-        if (is_team_lead()) {
-          member = find_member_for_pos(member_offsets, num_members, pos, &local_pos);
-        }
-        SYNCTHREADS();
+        /* every warp looks up its member itself, no barrier needed */
+        size_type local_pos;
+        const size_type member = find_member_for_pos_warp(member_offsets, num_members, pos, &local_pos);
         auto& arg = args[member];
         const size_type member_N = std::get<idx::n>(arg);
         const size_type kept_offset = std::get<idx::child_kept_offset>(arg);
@@ -534,12 +701,15 @@ namespace mra {
     // tmp transform workspace is pooled here -- d_sumsq stays per-member
     // (CompressBatchArg's own field), since the host may read every compact
     // position back afterward (see CompressBatchArg's comment).
-    size_type grid_cap = detail::kernel_grid_cap(detail::compress_kernel_batched<T, NDIM, HgtT>, threads, smem_size);
-    size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
-    T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * compress_tmp_size<NDIM>(K));
+    dispatch_k(K, [&](auto Kc) {
+      using KT = decltype(Kc);
+      size_type grid_cap = detail::kernel_grid_cap(detail::compress_kernel_batched<T, NDIM, HgtT, KT>, threads, smem_size);
+      size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * compress_tmp_size<NDIM>(K));
 
-    CALL_KERNEL((detail::compress_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, K, is_ns, hgT));
+      CALL_KERNEL((detail::compress_kernel_batched<T, NDIM, HgtT, KT>), grid_x, thread_dims, smem_size, stream,
+                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, Kc, is_ns, hgT));
+    });
     checkSubmit();
 
     pool.mark_submitted(slot, stream);

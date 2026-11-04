@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <mra/misc/types.h>
+#include <mra/misc/maxk.h>
 
 namespace mra {
 
@@ -310,6 +311,26 @@ namespace mra {
     concept CtIntegral = is_ct_integral_v<T>;
   } // namespace concepts
 
+  /**
+   * Calls fn(Int<K>{}) for the K that kernels are specialized for (6, 8 and
+   * 10, up to MRA_MAX_K), and fn(K) with the runtime value otherwise. Used at
+   * kernel launch sites to instantiate a kernel with compile-time K.
+   */
+  template<typename Fn>
+  void dispatch_k(size_type K, Fn&& fn) {
+    switch (K) {
+#if MRA_MAX_K >= 6
+      case 6:  fn(Int<6>{}); return;
+#endif
+#if MRA_MAX_K >= 8
+      case 8:  fn(Int<8>{}); return;
+#endif
+#if MRA_MAX_K >= 10
+      case 10: fn(Int<10>{}); return;
+#endif
+      default: fn(K); return;
+    }
+  }
 
 } // namespace mra
 

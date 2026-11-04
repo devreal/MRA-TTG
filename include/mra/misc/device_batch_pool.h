@@ -38,6 +38,7 @@
 #include "mra/misc/platform.h"
 #include "mra/misc/types.h"  // for size_type -- see the ttg.h note above; do not
                              // rely on an includer having pulled this in already
+#include "mra/tensor/sparsity.h"  // find_nth_pred_warp
 
 namespace mra::detail {
 
@@ -775,6 +776,20 @@ namespace mra::detail {
     }
     assert(false && "find_member_for_pos: pos out of range of the batch's member offsets");
     return num_members;
+  }
+
+  /**
+   * Warp-cooperative find_member_for_pos (find_nth_pred_warp, so all
+   * existing lanes of the calling warp must call it, and all get the
+   * result): the member is the first m with pos < offsets[m+1]. Lets every
+   * warp look up its member itself instead of waiting on a team lead.
+   */
+  SCOPE size_type find_member_for_pos_warp(const size_type* offsets, size_type num_members,
+                                            size_type pos, size_type* local_pos_out) {
+    const size_type m = find_nth_pred_warp(num_members, 0, offsets,
+                                           [pos](const size_type* off, size_type i) { return pos < off[i + 1]; });
+    *local_pos_out = pos - offsets[m];
+    return m;
   }
 
 } // namespace mra::detail
