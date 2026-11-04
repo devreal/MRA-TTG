@@ -7,7 +7,8 @@
  *   result[z'][y'][x'] = sum_{z,y,x} f[z][y][x] c[z][z'] c[y][y'] c[x][x']
  *
  * for a D x D x D tensor f and a D x D matrix c (stored [in][out]), i.e.
- * mra::transform for NDIM == 3. This is the single-term case of the
+ * mra::transform for NDIM == 3, or with a different matrix per dimension
+ * (general_transform). This is the single-term case of the
  * convolution core in convolution_cuda_mma.h (apply_conv_k), relaxed so that
  * it runs with any number of whole warps and any D <= 20:
  *
@@ -130,7 +131,8 @@ namespace mra {
        * See the comment at the top of the file. Fragment layout (g = lane/4,
        * t = lane%4): lane holds A[g][t], B[t][g], and D[g][2t], D[g][2t+1].
        * Called by all threads of the block, or (WarpScope) by one warp alone.
-       * f[z][y][x] is at f[z*ldz + y*ldy + x]. Epi: 0 stores the result as is,
+       * f[z][y][x] is at f[z*ldz + y*ldy + x]. cx, cy, cz are the matrices of
+       * x (stage 1), y (stage 2) and z (stage 3). Epi: 0 stores the result as is,
        * otherwise the TransformEpilogue Epi-1 applies with alpha.
        */
       template<int KS, bool WInSmem, bool WarpScope = false, int Epi = 0>
@@ -139,7 +141,9 @@ namespace mra {
                             const double* f,
                             const int ldy,
                             const int ldz,
-                            const double* __restrict__ c,
+                            const double* __restrict__ cx,
+                            const double* __restrict__ cy,
+                            const double* __restrict__ cz,
                             double* result,
                             double* W,
                             const double alpha = 1.0)
@@ -170,23 +174,27 @@ namespace mra {
           }
         };
 
-        /* ta[mt][ks] = c[KS*t+ks][g+8mt]: A fragments of stages 1 and 3 (Tx and Tz) */
+        /* ta[mt][ks] = c[KS*t+ks][g+8mt]: A fragments of stage 1 (c = cx), reloaded
+         * for stage 3 (c = cz) unless the two are the same */
         double ta[MT][KS];
-        #pragma unroll
-        for (int mt = 0; mt < MT; ++mt) {
+        auto load_ta = [&](const double* __restrict__ c) {
           #pragma unroll
-          for (int ks = 0; ks < KS; ++ks) {
-            const int i = KS * t + ks, o = g + 8 * mt;
-            ta[mt][ks] = (i < D && o < D) ? c[i * D + o] : 0.0;
+          for (int mt = 0; mt < MT; ++mt) {
+            #pragma unroll
+            for (int ks = 0; ks < KS; ++ks) {
+              const int i = KS * t + ks, o = g + 8 * mt;
+              ta[mt][ks] = (i < D && o < D) ? c[i * D + o] : 0.0;
+            }
           }
-        }
+        };
+        load_ta(cx);
 
         /* ty[mt2][nt][r] = c[2t+r+8nt][g+8mt2]: A fragments of stage 2 (Ty),
          * kept in registers unless that costs too many (then loaded per use, from L1) */
         constexpr bool HoistTy = (KS <= 4);
         auto load_ty = [&](int mt2, int nt, int r) {
           const int y = 2 * t + r + 8 * nt, yp = g + 8 * mt2;
-          return (y < D && yp < D) ? c[y * D + yp] : 0.0;
+          return (y < D && yp < D) ? cy[y * D + yp] : 0.0;
         };
         double ty[HoistTy ? MT : 1][HoistTy ? MT : 1][2];
         if constexpr (HoistTy) {
@@ -266,6 +274,7 @@ namespace mra {
         if constexpr (WarpScope) __syncwarp(); else SYNCTHREADS();
 
         if (active) {
+          if (cz != cx) load_ta(cz);
           /* the pairs (n, n+1) stored below are both in range or both out of it if D is even */
           const bool vec_store = (D % 2 == 0) && ((reinterpret_cast<std::uintptr_t>(result) % 16) == 0);
           for (int tile = warp; tile < NT; tile += nwarps) {
@@ -321,9 +330,9 @@ namespace mra {
         extern __shared__ __align__(16) double transform_mma_smem[];
         const unsigned need = D * D * (4 * KS + 1) * sizeof(double);
         if (dynamic_smem_bytes() >= need) {
-          transform_mma_ks<KS, true>(D, f, D, D * D, c, result, transform_mma_smem);
+          transform_mma_ks<KS, true>(D, f, D, D * D, c, c, c, result, transform_mma_smem);
         } else {
-          transform_mma_ks<KS, false>(D, f, D, D * D, c, result, workspace);
+          transform_mma_ks<KS, false>(D, f, D, D * D, c, c, c, result, workspace);
         }
       }
 
@@ -369,11 +378,11 @@ namespace mra {
       static_assert(std::is_same_v<T, double> && NDIM == 3, "transform_warp: double, NDIM=3 only");
       constexpr int Epi = 1 + (int)E;
       switch (transform_mma_ks(D)) {
-        case 1: detail::transform_mma_ks<1, true, true, Epi>(D, f, ldy, ldz, c, result, W, alpha); break;
-        case 2: detail::transform_mma_ks<2, true, true, Epi>(D, f, ldy, ldz, c, result, W, alpha); break;
-        case 3: detail::transform_mma_ks<3, true, true, Epi>(D, f, ldy, ldz, c, result, W, alpha); break;
-        case 4: detail::transform_mma_ks<4, true, true, Epi>(D, f, ldy, ldz, c, result, W, alpha); break;
-        case 5: detail::transform_mma_ks<5, true, true, Epi>(D, f, ldy, ldz, c, result, W, alpha); break;
+        case 1: detail::transform_mma_ks<1, true, true, Epi>(D, f, ldy, ldz, c, c, c, result, W, alpha); break;
+        case 2: detail::transform_mma_ks<2, true, true, Epi>(D, f, ldy, ldz, c, c, c, result, W, alpha); break;
+        case 3: detail::transform_mma_ks<3, true, true, Epi>(D, f, ldy, ldz, c, c, c, result, W, alpha); break;
+        case 4: detail::transform_mma_ks<4, true, true, Epi>(D, f, ldy, ldz, c, c, c, result, W, alpha); break;
+        case 5: detail::transform_mma_ks<5, true, true, Epi>(D, f, ldy, ldz, c, c, c, result, W, alpha); break;
         default: break;
       }
     }
@@ -396,6 +405,31 @@ namespace mra {
           case 3: detail::transform_mma_dispatch_w<3>(D, f, c, result, workspace); return true;
           case 4: detail::transform_mma_dispatch_w<4>(D, f, c, result, workspace); return true;
           case 5: detail::transform_mma_dispatch_w<5>(D, f, c, result, workspace); return true;
+          default: return false;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * As transform, but with the matrix c0, c1, c2 for dimension 0 (z), 1 (y)
+     * and 2 (x), i.e. mra::general_transform:
+     *   result[i'][j'][k'] = sum_{i,j,k} f[i][j][k] c0[i][i'] c1[j][j'] c2[k][k'].
+     * The result is scaled by alpha. W always lives in workspace (D^3 elements,
+     * distinct from f and result), so the matrices may be in dynamic shared memory.
+     */
+    template<typename T, Dimension NDIM>
+    __device__ bool general_transform(size_type D, const T* f, const T* c0, const T* c1, const T* c2,
+                                      T* result, T* workspace, T alpha = T(1)) {
+      constexpr int Epi = 1 + (int)TransformEpilogue::Scale;
+      if constexpr (std::is_same_v<T, double> && NDIM == 3) {
+        if (D == 0 || D > transform_mma_max_dim || block_size() < MRA_WARP_SIZE) return false;
+        switch (transform_mma_ks(D)) {
+          case 1: detail::transform_mma_ks<1, false, false, Epi>(D, f, D, D * D, c2, c1, c0, result, workspace, alpha); return true;
+          case 2: detail::transform_mma_ks<2, false, false, Epi>(D, f, D, D * D, c2, c1, c0, result, workspace, alpha); return true;
+          case 3: detail::transform_mma_ks<3, false, false, Epi>(D, f, D, D * D, c2, c1, c0, result, workspace, alpha); return true;
+          case 4: detail::transform_mma_ks<4, false, false, Epi>(D, f, D, D * D, c2, c1, c0, result, workspace, alpha); return true;
+          case 5: detail::transform_mma_ks<5, false, false, Epi>(D, f, D, D * D, c2, c1, c0, result, workspace, alpha); return true;
           default: return false;
         }
       }

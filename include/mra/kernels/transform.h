@@ -144,6 +144,21 @@ namespace mra {
        * data so we don't have to modify the input views */
       using result_view_type = std::decay_t<decltype(result_in)>;
       constexpr const mra::Dimension ndim = result_view_type::ndim();
+#ifdef MRA_HAVE_TRANSFORM_DMMA
+      if constexpr (ndim == 3) {
+        /* FP64 tensor cores for cubes, see mra/kernels/impl/transform_cuda_mma.h */
+        using T = typename result_view_type::value_type;
+        const size_type D = t.dim(0);
+        bool cube = true;
+        for (Dimension d = 0; d < ndim; ++d) {
+          cube = cube && t.dim(d) == D && result_in.dim(d) == D && c[d].dim(0) == D && c[d].dim(1) == D;
+        }
+        if (cube && accel::mma::general_transform<T, ndim>(D, t.data(), c[0].data(), c[1].data(), c[2].data(),
+                                                           result_in.data(), result_tmp_in.data())) {
+          return;
+        }
+      }
+#endif // MRA_HAVE_TRANSFORM_DMMA
       SHARED result_view_type result, result_tmp;
       if (is_team_lead()) {
         result = result_view_type(result_in.data(), result_in.dims());

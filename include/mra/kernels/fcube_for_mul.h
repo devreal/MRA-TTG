@@ -56,7 +56,7 @@ namespace mra {
   {
 
     using T = typename std::decay_t<decltype(phi)>::value_type;
-    T scale = std::pow(2.0, (np-nc));
+    T scale = std::ldexp(T(1), int(np) - int(nc)); // 2^(np-nc), exact
 
     /**
      * The first K threads compute.
@@ -90,7 +90,7 @@ namespace mra {
       }
     }
     SYNCTHREADS();
-    T scale_phi = std::pow(2.0, 0.5*np);
+    T scale_phi = std::sqrt(std::ldexp(T(1), int(np))); // 2^(np/2)
     phi *= scale_phi;
   }
 
@@ -114,7 +114,7 @@ namespace mra {
     else if (child.level() == parent.level()) {
       // coeffs_to_values()
       transform(coeffs, phibar, result_values, workspace);
-      T scale = std::pow(2.0, 0.5*NDIM*parent.level())/std::sqrt(D.template get_volume<T>());
+      T scale = std::sqrt(std::ldexp(T(1), int(NDIM*parent.level())) / D.template get_volume<T>());
       result_values *= scale;
     }
     else {

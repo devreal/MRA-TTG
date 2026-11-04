@@ -23,6 +23,62 @@ namespace mra {
     return 6*K2NDIM; // workspace, left_tmp, center_tmp, right_tmp and 2xtmp_result
   }
 
+#ifdef MRA_HAVE_TRANSFORM_DMMA
+  namespace detail {
+    /**
+     * parent_to_child for a child below its parent on FP64 tensor cores, see
+     * parent_to_child: the values at the child's quadrature points of the
+     * parent's polynomials, phi[d](i, mu) (phi_for_mul without its scaling, all
+     * dimensions at once, in dynamic shared memory as in fcube_for_mul), are
+     * applied by one general_transform, then the values are projected by phibar.
+     * The scales of fcube_for_mul and parent_to_child (phi_for_mul's 2^(np/2) per
+     * dimension, 1/sqrt(vol) and sqrt(vol*2^(-NDIM*nc))) are applied at once in
+     * the first transform: they come to 2^(NDIM*(np-nc)/2).
+     * Returns false, without touching anything, if there is no tensor-core path.
+     */
+    template <typename T, Dimension NDIM>
+    DEVSCOPE bool parent_to_child_mma(
+      const Key<NDIM>& parent,
+      const Key<NDIM>& child,
+      const T* coeffs,
+      T* result,
+      T* result_tmp,
+      const T* phibar,
+      const concepts::TensorView<1> auto& quad_x,
+      const size_type K,
+      T* tmp)
+    {
+      if constexpr (NDIM == 3 && std::is_same_v<T, double>) {
+        if (K == 0 || K > accel::mma::transform_mma_max_dim || block_size() < MRA_WARP_SIZE) return false;
+        extern SHARED T phi[];
+        const int np = parent.level(), nc = child.level();
+        const T xscale = std::ldexp(T(1), np - nc);
+        for (size_type idx = thread_id(); idx < NDIM*K; idx += block_size()) {
+          const size_type d = idx / K, mu = idx % K;
+          T* phid = phi + d*K*K;
+          const T xmu = xscale * (quad_x(mu) + child.translation()[d]) - parent.translation()[d];
+          const T x = T(2)*xmu - 1;
+          T pm0 = 1.0, pm1 = x;
+          phid[mu] = pm0;
+          if (K > 1) phid[K + mu] = pm1 * std::sqrt(T(3));
+          for (size_type i = 2; i < K; ++i) {
+            const T pm2 = (x * pm1 - pm0) * (T(i-1) / T(i)) + x * pm1;
+            phid[i*K + mu] = pm2 * std::sqrt(T(2*i + 1));
+            pm0 = pm1;
+            pm1 = pm2;
+          }
+        }
+        SYNCTHREADS();
+        const T alpha = std::sqrt(std::ldexp(T(1), int(NDIM)*(np - nc)));
+        accel::mma::general_transform<T, NDIM>(K, coeffs, phi, phi + K*K, phi + 2*K*K, result_tmp, tmp, alpha);
+        /* phi is dead, the transform may use the shared memory */
+        return accel::mma::transform<T, NDIM>(K, result_tmp, phibar, result, tmp);
+      }
+      return false;
+    }
+  } // namespace detail
+#endif // MRA_HAVE_TRANSFORM_DMMA
+
   template <typename T, Dimension NDIM>
   SCOPE void parent_to_child(
     const Domain<NDIM>& D,
@@ -42,12 +98,20 @@ namespace mra {
       } else if (parent == child || parent.is_invalid() || child.is_invalid()) {
         result = coeffs;
       } else {
+#ifdef MRA_HAVE_TRANSFORM_DMMA
+        if (coeffs.size() == K*K*K && result.size() == K*K*K && result_tmp.size() == K*K*K &&
+            phibar.dim(0) == K && phibar.dim(1) == K &&
+            detail::parent_to_child_mma<T, NDIM>(parent, child, coeffs.data(), result.data(), result_tmp.data(),
+                                                 phibar.data(), quad_x, K, tmp)) {
+          return;
+        }
+#endif // MRA_HAVE_TRANSFORM_DMMA
         fcube_for_mul(D, child, parent, coeffs, result_tmp, phibar, phi, quad_x, K, tmp);
         //std::cout << "PARENT TO CHILD: parent " << parent << " child " << child
         //          << " phibar " << normf(phibar)
         //          << " fcube_for_mul result " << normf(result_tmp)
         //          << " scale " << std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level()))) << std::endl;
-        T scale = std::sqrt(D.template get_volume<T>()*std::pow(T(0.5), T(NDIM*child.level())));
+        T scale = std::sqrt(std::ldexp(D.template get_volume<T>(), -int(NDIM*child.level())));
         result_tmp *= scale;
         //std::cout << "PARENT TO CHILD: result_tmp " << result_tmp << std::endl;
         //std::cout << "PARENT TO CHILD: phibar " << phibar << std::endl;
@@ -109,6 +173,109 @@ namespace mra {
     #endif
 
     /**
+     * deriv = scale * sum_t sum_k src[t](.., k, ..) * op[t](k, j) with k and j the index
+     * along axis, i.e., the sum of transform_dir(src[t], op[t], axis) without the
+     * intermediate results. Each thread computes a line of deriv along axis, KK is the
+     * compile-time K (0 for K > MRA_MAX_K). src[t] are contiguous K^NDIM cubes or nullptr
+     * (zero), op[t] the K x K operators, deriv may not alias any of src.
+     */
+    template <typename T, Dimension NDIM, int KK, int NT>
+    DEVSCOPE void derivative_apply_k(
+      const T* const (&src)[NT],
+      const T* const (&op)[NT],
+      T* __restrict__ deriv,
+      const T scale,
+      const size_type K,
+      const size_type axis)
+    {
+      constexpr int MAXK = KK > 0 ? KK : 1;
+      size_type s = 1;  // the stride of axis
+      for (size_type d = axis+1; d < NDIM; ++d) s *= K;
+      size_type nlines = 1;
+      for (size_type d = 1; d < NDIM; ++d) nlines *= K;
+      for (size_type line = thread_id(); line < nlines; line += block_size()) {
+        const size_type base = (line / s) * s * K + line % s;
+        if constexpr (KK > 0) {
+          T acc[MAXK];
+#pragma unroll
+          for (int j = 0; j < KK; ++j) acc[j] = T(0);
+#pragma unroll
+          for (int t = 0; t < NT; ++t) {
+            if (src[t] == nullptr) continue;
+            const T* __restrict__ in = src[t] + base;
+            const T* __restrict__ o = op[t];
+            T v[MAXK];
+#pragma unroll
+            for (int k = 0; k < KK; ++k) v[k] = in[k*s];
+#pragma unroll
+            for (int k = 0; k < KK; ++k) {
+#pragma unroll
+              for (int j = 0; j < KK; ++j) acc[j] += v[k] * o[k*KK + j];
+            }
+          }
+#pragma unroll
+          for (int j = 0; j < KK; ++j) deriv[base + j*s] = scale * acc[j];
+        } else {
+          for (size_type j = 0; j < K; ++j) {
+            T acc = T(0);
+            for (int t = 0; t < NT; ++t) {
+              if (src[t] == nullptr) continue;
+              for (size_type k = 0; k < K; ++k) acc += src[t][base + k*s] * op[t][k*K + j];
+            }
+            deriv[base + j*s] = scale * acc;
+          }
+        }
+      }
+      SYNCTHREADS();
+    }
+
+    template <typename T, Dimension NDIM, int NT>
+    DEVSCOPE void derivative_apply(
+      const T* const (&src)[NT],
+      const T* const (&op)[NT],
+      T* deriv,
+      const T scale,
+      const size_type K,
+      const size_type axis)
+    {
+      switch (K) {
+#define MRA_DERIV_APPLY_CASE(k) \
+        case k: if constexpr (k <= MRA_MAX_K) { derivative_apply_k<T, NDIM, k, NT>(src, op, deriv, scale, K, axis); return; } break;
+        MRA_DERIV_APPLY_CASE(4)  MRA_DERIV_APPLY_CASE(5)  MRA_DERIV_APPLY_CASE(6)  MRA_DERIV_APPLY_CASE(7)
+        MRA_DERIV_APPLY_CASE(8)  MRA_DERIV_APPLY_CASE(9)  MRA_DERIV_APPLY_CASE(10) MRA_DERIV_APPLY_CASE(11)
+        MRA_DERIV_APPLY_CASE(12)
+#undef MRA_DERIV_APPLY_CASE
+        default: break;
+      }
+      derivative_apply_k<T, NDIM, 0, NT>(src, op, deriv, scale, K, axis);
+    }
+
+    /**
+     * The coefficients of node (the coefficients of the function at src_key) at
+     * target_key: node itself if it is at target_key, else projected into result
+     * (see parent_to_child). Returns nullptr if the function has no coefficients.
+     */
+    template <typename T, Dimension NDIM>
+    DEVSCOPE const T* derivative_source(
+      const Domain<NDIM>& D,
+      const Key<NDIM>& src_key,
+      const Key<NDIM>& target_key,
+      const concepts::TensorView<NDIM> auto& node,
+      concepts::TensorView<NDIM> auto& result,
+      concepts::TensorView<NDIM> auto& result_tmp,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<1> auto& quad_x,
+      const size_type K,
+      T* workspace)
+    {
+      if (node.data() == nullptr) return nullptr;
+      if (src_key == target_key || src_key.is_invalid() || target_key.is_invalid()) return node.data();
+      parent_to_child(D, src_key, target_key, node, result, result_tmp, phibar, phi, quad_x, K, workspace);
+      return result.data();
+    }
+
+    /**
      * See the comment on multiply_kernel_impl in mra/kernels/multiply.h for
      * why this uses explicitly-named template parameters instead of the
      * abbreviated (concept-constrained `auto`) form used elsewhere: too many
@@ -160,32 +327,19 @@ namespace mra {
       }
       SYNCTHREADS();
 
-      deriv = 0;
-
-      //std::cout << "DERIVATIVE " << key << " axis " << axis << std::endl;
-
-      parent_to_child(D, left,   key.neighbor(axis, -1), node_left, left_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-      transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RPT), tmp_result, transform_result, axis);
-      deriv += transform_result;
-      //std::cout << "DERIVATIVE " << key << " axis " << axis  << " left " << left << " " << normf(node_left)<< " left_tmp " << normf(left_tmp) << std::endl;
-
-      parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-      transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::R0T), tmp_result, transform_result, axis);
-      deriv += transform_result;
-      //std::cout << "DERIVATIVE " << key << " axis " << axis << " center " << center << " "
-      //          << normf(node_center) << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
-
-      parent_to_child(D, right,  key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-      transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RMT), tmp_result, transform_result, axis);
-      deriv += transform_result;
-
-      //std::cout << "DERIVATIVE " << key << " axis " << axis << " right " << right << " neighbor " << key.neighbor(axis, 1) << " "
-      //          << normf(node_right) << " right_tmp " << normf(right_tmp) << std::endl;
-
-      T scale = D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level()));
-      T thresh = T(1e-12);
-      deriv *= scale;
-      deriv.reduce_rank(thresh);
+      /* the coefficients of the neighbors at the neighbor keys of key, the center is key itself */
+      const T* src[3];
+      src[0] = derivative_source<T, NDIM>(D, left, key.neighbor(axis, -1), node_left, left_tmp, tmp_result,
+                                          phibar, phi, quad_x, K, workspace);
+      src[1] = derivative_source<T, NDIM>(D, center, key, node_center, center_tmp, tmp_result,
+                                          phibar, phi, quad_x, K, workspace);
+      src[2] = derivative_source<T, NDIM>(D, right, key.neighbor(axis, 1), node_right, right_tmp, tmp_result,
+                                          phibar, phi, quad_x, K, workspace);
+      const T* op[3] = {operators((int)FunctionData<T, NDIM>::DerivOp::RPT).data(),
+                        operators((int)FunctionData<T, NDIM>::DerivOp::R0T).data(),
+                        operators((int)FunctionData<T, NDIM>::DerivOp::RMT).data()};
+      T scale = D.template get_reciprocal_width<T>(axis)*std::ldexp(T(1), int(key.level()));
+      derivative_apply<T, NDIM>(src, op, deriv.data(), scale, K, axis);
       //std::cout << "INNER " << key << " axis " << axis << " scale " << scale << " RESULT "<< " deriv " << normf(deriv) << std::endl;
     }
 
@@ -238,36 +392,26 @@ namespace mra {
       SYNCTHREADS();
 
 
-      deriv = T(0);
-
+      const T* src[2];
+      const T* op[2];
       if (key.is_left_boundary(axis)){
-
-        parent_to_child(D, right, key.neighbor(axis, 1), node_right, right_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-        parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-
-        transform_dir(right_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::LEFT_RMT), tmp_result, transform_result, axis);
-        deriv += transform_result;
-        //std::cout << "BOUNDARY " << key << " axis " << axis << " right_tmp " << normf(right_tmp) << " deriv " << normf(deriv) << std::endl;
-        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::LEFT_R0T), tmp_result, transform_result, axis);
-        deriv += transform_result;
-        //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
+        src[0] = derivative_source<T, NDIM>(D, right, key.neighbor(axis, 1), node_right, right_tmp, tmp_result,
+                                            phibar, phi, quad_x, K, workspace);
+        src[1] = derivative_source<T, NDIM>(D, center, key, node_center, center_tmp, tmp_result,
+                                            phibar, phi, quad_x, K, workspace);
+        op[0] = operators((int)FunctionData<T, NDIM>::DerivOp::LEFT_RMT).data();
+        op[1] = operators((int)FunctionData<T, NDIM>::DerivOp::LEFT_R0T).data();
       }
       else {
-        parent_to_child(D, center, key, node_center, center_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-        parent_to_child(D, left, key.neighbor(axis, -1), node_left, left_tmp, tmp_result, phibar, phi, quad_x, K, workspace);
-
-        transform_dir(center_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_R0T), tmp_result, transform_result, axis);
-        deriv += transform_result;
-        //std::cout << "BOUNDARY " << key << " axis " << axis << " center_tmp " << normf(center_tmp) << " deriv " << normf(deriv) << std::endl;
-        transform_dir(left_tmp, operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_RPT), tmp_result, transform_result, axis);
-        deriv += transform_result;
-        //std::cout << "BOUNDARY " << key << " axis " << axis << " left_tmp " << normf(left_tmp) << " deriv " << normf(deriv) << std::endl;
+        src[0] = derivative_source<T, NDIM>(D, center, key, node_center, center_tmp, tmp_result,
+                                            phibar, phi, quad_x, K, workspace);
+        src[1] = derivative_source<T, NDIM>(D, left, key.neighbor(axis, -1), node_left, left_tmp, tmp_result,
+                                            phibar, phi, quad_x, K, workspace);
+        op[0] = operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_R0T).data();
+        op[1] = operators((int)FunctionData<T, NDIM>::DerivOp::RIGHT_RPT).data();
       }
-
-      T scale = D.template get_reciprocal_width<T>(axis)*std::pow(T(2), T(key.level()));
-      T thresh = T(1e-12);
-      deriv *= scale;
-      deriv.reduce_rank(thresh);
+      T scale = D.template get_reciprocal_width<T>(axis)*std::ldexp(T(1), int(key.level()));
+      derivative_apply<T, NDIM>(src, op, deriv.data(), scale, K, axis);
 
     }
 
@@ -440,9 +584,16 @@ namespace mra {
                       static_cast<size_type>(transform_shmem_size<T, NDIM>(K)));
     }
 
+    /* K^2 threads (K <= MRA_MAX_K) in whole warps: the derivative is a line along the
+     * axis per thread, and the tensor-core transforms of parent_to_child run on whole warps */
     inline Dim3 derivative_thread_dims(size_type K) {
-      size_type max_threads = std::min(K, MRA_MAX_K_SIZET);
-      return Dim3(max_threads, max_threads, 1);
+#if defined(MRA_ENABLE_HIP)
+      constexpr size_type warp = 64;
+#else
+      constexpr size_type warp = 32;
+#endif
+      const size_type k = std::min(K, MRA_MAX_K_SIZET);
+      return Dim3((k*k + warp - 1) / warp * warp, 1, 1);
     }
 
   } // namespace detail
