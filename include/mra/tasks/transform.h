@@ -61,8 +61,14 @@ namespace mra {
         const bool zero_row = std::all_of(U + i*M, U + (i+1)*M, [](T u){ return u == T(0); });
         for (size_type j = 0; j < M; ++j) {
           const bool contributes = U[i*M + j] != T(0);
-          if (!contributes && !(zero_row && j == 0)) continue;
-          if (contributes && !in_node.is_zero(i)) sparsity.set_nonzero(j);
+          const bool adds_tree = zero_row && j == 0;
+          if (!contributes && !adds_tree) continue;
+          /* A node of in_i is interior where it holds coefficients, also when its children
+           * are leafs, and the parent marked it as such. The tree of a zero row added to
+           * out_0 must therefore keep these nodes, with zero coefficients (the kernel only
+           * accumulates U(i,j) != 0): otherwise out_0 has a zero node with leaf children
+           * there, which is a leaf, while its parent says it has children. */
+          if ((contributes || adds_tree) && !in_node.is_zero(i)) sparsity.set_nonzero(j);
           for (int c = 0; c < mra::Key<NDIM>::num_children(); ++c) {
             has_child[j][c] = has_child[j][c] || !in_node.is_child_leaf(i, c);
           }
