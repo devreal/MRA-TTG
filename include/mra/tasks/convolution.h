@@ -864,12 +864,12 @@ namespace mra {
 
 #ifdef MRA_ENABLE_HOST
         auto opnorms_view = op_data->norms.current_view();
-        std::array<DenseTensorView<const T, 4>, NDIM> transr = {op_data->data[0]->R.current_view(), op_data->data[1]->R.current_view(), op_data->data[2]->R.current_view()};
-        std::array<DenseTensorView<const T, 4>, NDIM> transs = {op_data->data[0]->S.current_view(), op_data->data[1]->S.current_view(), op_data->data[2]->S.current_view()};
+        std::array<DenseTensorView<const T, 3>, NDIM> transr = op_data->transr();
+        std::array<DenseTensorView<const T, 3>, NDIM> transs = op_data->transs();
 #else
         auto opnorms_view = res.norms->current_view();
-        std::array<DenseTensorView<const T, 4>, NDIM> transr = {res.dims[0]->R.current_view(), res.dims[1]->R.current_view(), res.dims[2]->R.current_view()};
-        std::array<DenseTensorView<const T, 4>, NDIM> transs = {res.dims[0]->S.current_view(), res.dims[1]->S.current_view(), res.dims[2]->S.current_view()};
+        std::array<DenseTensorView<const T, 3>, NDIM> transr = {res.dims[0]->R.current_view(), res.dims[1]->R.current_view(), res.dims[2]->R.current_view()};
+        std::array<DenseTensorView<const T, 3>, NDIM> transs = {res.dims[0]->S.current_view(), res.dims[1]->S.current_view(), res.dims[2]->S.current_view()};
 #endif // MRA_ENABLE_HOST
         // empty in node view
         auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
@@ -1225,12 +1225,12 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
 
 #ifdef MRA_ENABLE_HOST
-      std::array<DenseTensorView<const T, 4>, NDIM> transr = {op_data->data[0]->R.current_view(), op_data->data[1]->R.current_view(), op_data->data[2]->R.current_view()};
-      std::array<DenseTensorView<const T, 4>, NDIM> transs = {op_data->data[0]->S.current_view(), op_data->data[1]->S.current_view(), op_data->data[2]->S.current_view()};
+      std::array<DenseTensorView<const T, 3>, NDIM> transr = op_data->transr();
+      std::array<DenseTensorView<const T, 3>, NDIM> transs = op_data->transs();
       auto opnorms_view = op_data->norms.current_view();
 #else
-      std::array<DenseTensorView<const T, 4>, NDIM> transr = {res.dims[0]->R.current_view(), res.dims[1]->R.current_view(), res.dims[2]->R.current_view()};
-      std::array<DenseTensorView<const T, 4>, NDIM> transs = {res.dims[0]->S.current_view(), res.dims[1]->S.current_view(), res.dims[2]->S.current_view()};
+      std::array<DenseTensorView<const T, 3>, NDIM> transr = {res.dims[0]->R.current_view(), res.dims[1]->R.current_view(), res.dims[2]->R.current_view()};
+      std::array<DenseTensorView<const T, 3>, NDIM> transs = {res.dims[0]->S.current_view(), res.dims[1]->S.current_view(), res.dims[2]->S.current_view()};
       auto opnorms_view = res.norms->current_view();
 #endif // MRA_ENABLE_HOST
       auto out_view = out.coeffs().current_view();

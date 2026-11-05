@@ -13,6 +13,8 @@
 #include <memory>
 #include <array>
 #include <utility>
+#include <map>
+#include <tuple>
 
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
@@ -37,6 +39,7 @@ namespace mra {
     MUnorm,
     Opnorm, // overall operator norm
     Rank,   // stored rank of the operator
+    Term,   // per (c, i, d): index of the term's 1D R/S in the convolution's transr/transs views
     Count
   };
 
@@ -599,27 +602,27 @@ namespace mra {
     template <typename T, Dimension NDIM>
     struct LevelOp1DTable {
       Level n = 0;
-      // [NDIM, num_op1d_displacements(n), count, rank, 2K, 2K]
-      DenseTensor<T, 6> R;
-      // [NDIM, num_op1d_displacements(n), count, rank, K, K]
-      DenseTensor<T, 6> S;
-      // [NDIM, num_op1d_displacements(n), count, rank, 5]
-      DenseTensor<T, 5> norms1d;
+      // [num_op1d_displacements(n), nterms, 2K, 2K]
+      DenseTensor<T, 4> R;
+      // [num_op1d_displacements(n), nterms, K, K]
+      DenseTensor<T, 4> S;
+      // [num_op1d_displacements(n), nterms, 5]
+      DenseTensor<T, 3> norms1d;
 
       LevelOp1DTable() = default;
-      LevelOp1DTable(Level n, size_type count, size_type rank, size_type K, ttg::scope scope)
+      /// nterms: the distinct 1D terms of the GaussianTermTables owning this table
+      LevelOp1DTable(Level n, size_type nterms, size_type K, ttg::scope scope)
       : n(n)
-      , R(std::array<size_type, 6>{(size_type)NDIM, num_op1d_displacements(n), count, rank, 2 * K, 2 * K}, scope)
-      , S(std::array<size_type, 6>{(size_type)NDIM, num_op1d_displacements(n), count, rank, K, K}, scope)
+      , R(std::array<size_type, 4>{num_op1d_displacements(n), nterms, 2 * K, 2 * K}, scope)
+      , S(std::array<size_type, 4>{num_op1d_displacements(n), nterms, K, K}, scope)
       // norms1d is read back on the host, so allocate its host memory up front
-      , norms1d(std::array<size_type, 5>{(size_type)NDIM, num_op1d_displacements(n), count, rank, (size_type)5},
+      , norms1d(std::array<size_type, 3>{num_op1d_displacements(n), nterms, (size_type)5},
                 (scope == ttg::scope::Allocate) ? ttg::scope::SyncOut : scope)
       { }
     };
 
     /**
-     * A read-only, single-(dimension, translation) slice of a shared
-     * LevelOp1DTable. Cheap enough (a pointer plus a couple of indices)
+     * A read-only, single-translation slice of a shared LevelOp1DTable. Cheap enough (a pointer plus a couple of indices)
      * that GaussianConvolutionOperator::try_get_op() rebuilds a fresh one on
      * every call -- see OpResult::dims -- rather than caching it anywhere;
      * only the assembled norms tensor (which costs a kernel launch to
@@ -636,29 +639,30 @@ namespace mra {
       template <typename TensorT>
       struct FieldView {
         const TensorT* tensor = nullptr;
-        Dimension d = 0;
         size_type l_idx = 0;
 
         auto& buffer() const { return tensor->buffer(); }
-        auto current_view() const { return tensor->current_view()(d, l_idx); }
-        auto view_on(const ttg::device::Device& device) const { return tensor->view_on(device)(d, l_idx); }
+        // [nterms, ...]: the matrices (norms) of every term at this translation
+        auto current_view() const { return tensor->current_view()(l_idx); }
+        auto view_on(const ttg::device::Device& device) const { return tensor->view_on(device)(l_idx); }
       };
 
-      // Owned by the GaussianConvolutionOperator's level table slot, which
-      // outlives every task using it -- no need to keep it alive from here.
+      // Owned by the GaussianTermTables' level table slot, which outlives
+      // every task using it -- no need to keep it alive from here.
       const LevelOp1DTable<T, NDIM>* table = nullptr;
-      FieldView<DenseTensor<T, 6>> R;
-      FieldView<DenseTensor<T, 6>> S;
-      FieldView<DenseTensor<T, 5>> norms1d;
+      FieldView<DenseTensor<T, 4>> R;
+      FieldView<DenseTensor<T, 4>> S;
+      FieldView<DenseTensor<T, 3>> norms1d;
 
       Op1DSliceView() = default;
       // The offset must match the per-level width THIS table was actually
       // allocated with (see LevelOp1DTable's comment), not the global ceiling.
-      Op1DSliceView(const LevelOp1DTable<T, NDIM>* tbl, Dimension d, Translation l)
+      // The table holds every dimension's terms, so a view needs only the translation.
+      Op1DSliceView(const LevelOp1DTable<T, NDIM>* tbl, Translation l)
       : table(tbl)
-      , R{&tbl->R, d, (size_type)(l + max_op1d_displacement(tbl->n))}
-      , S{&tbl->S, d, (size_type)(l + max_op1d_displacement(tbl->n))}
-      , norms1d{&tbl->norms1d, d, (size_type)(l + max_op1d_displacement(tbl->n))}
+      , R{&tbl->R, (size_type)(l + max_op1d_displacement(tbl->n))}
+      , S{&tbl->S, (size_type)(l + max_op1d_displacement(tbl->n))}
+      , norms1d{&tbl->norms1d, (size_type)(l + max_op1d_displacement(tbl->n))}
       { }
 
       // Lets call sites write res.dims[d]->R... (matching the pointer-style
@@ -693,6 +697,190 @@ namespace mra {
     : data()
     , norms(std::array{veccount, rank, NDIM, (size_type)NormId::Count}, ttg::scope::SyncIn)
     { }
+
+    /// The R (S) matrices of each dimension as the convolution kernels index
+    /// them: [term, k, k], where the term of (c, i) is c*rank + i (NormId::Term).
+    std::array<DenseTensorView<const T, 3>, NDIM> transr() const { return trans_views(true); }
+    std::array<DenseTensorView<const T, 3>, NDIM> transs() const { return trans_views(false); }
+
+  private:
+    std::array<DenseTensorView<const T, 3>, NDIM> trans_views(bool r) const {
+      std::array<DenseTensorView<const T, 3>, NDIM> out;
+      for (size_type d = 0; d < NDIM; ++d) {
+        auto v = r ? data[d]->R.current_view() : data[d]->S.current_view();
+        out[d] = DenseTensorView<const T, 3>(v.data(), v.dim(0) * v.dim(1), v.dim(2), v.dim(3));
+      }
+      return out;
+    }
+  };
+
+  /**
+   * The distinct 1D Gaussian terms of one or more GaussianConvolutionOperators,
+   * and their level tables (R, S and their norms at every translation of a
+   * level), each generated on the device by the first task that needs it.
+   *
+   * A term's matrices depend only on its parameters (coeff, expnt, natlev, m),
+   * not on the function, separated term or dimension that uses it: MADNESS
+   * normalizes every 1D Gaussian (coeff = sqrt(expnt/pi)) and keeps the
+   * operator's coefficient in the separated term's fac (see
+   * madness::SeparatedConvolution::initialize -- MADNESS shares the 1D
+   * operators between all its operators in GaussianConvolution1DCache for the
+   * same reason). BSH fits put their exponents on a lattice that does not
+   * depend on mu (madness::GFit::bsh_fit), so the operators of different
+   * orbitals share most of their terms, and an SCF iteration's operators have
+   * the same terms as the previous iteration's. An operator constructed with
+   * existing tables that hold all of its terms reuses every level generated so
+   * far (see GaussianConvolutionOperator's constructors).
+   *
+   * Terms are told apart by what the generator uses, as in MADNESS's cache
+   * (lattice sums and kernel ranges are not supported by the generator).
+   */
+  template <typename T, Dimension NDIM>
+  class GaussianTermTables {
+  public:
+#ifndef MRA_ENABLE_HOST
+    using table_type = detail::LevelOp1DTable<T, NDIM>;
+
+    /// `first` provides the tensors all terms of its order K share (autocorrelation,
+    /// two-scale filters, quadrature); `terms` must be distinct (fac is ignored)
+    GaussianTermTables(const madness::GaussianConvolution1D<T>& first, std::vector<GaussianTermParams<T>> terms)
+    : m_K((size_type)first.k)
+    , m_npt((size_type)first.npt)
+    , m_terms(std::move(terms))
+    {
+      const size_type K = m_K;
+      // Stored as (4K, K, K) rather than MADNESS's own (K, K, 4K) -- i.e.
+      // transposed so the contraction axis (k, summed over in
+      // make_rnlij_device's cten(k,qi,qj)*Rvec[k]) is the OUTERMOST/slowest
+      // dimension and (qi,qj) are the fastest-varying/contiguous ones, so
+      // that on-device, consecutive threads working on consecutive (qi,qj)
+      // output elements for the same k read consecutive addresses.
+      m_shared_c = DenseTensor<T, 3>(std::array{4 * K, K, K}, ttg::scope::SyncIn);
+      m_shared_hgT = DenseTensor<T, 2>(std::array{2 * K, 2 * K}, ttg::scope::SyncIn);
+      m_shared_hgT2k = DenseTensor<T, 2>(std::array{4 * K, 4 * K}, ttg::scope::SyncIn);
+      m_shared_quadx = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
+      m_shared_quadw = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
+      auto c_view = m_shared_c.current_view();
+      auto hgT_view = m_shared_hgT.current_view();
+      auto hgT2k_view = m_shared_hgT2k.current_view();
+      auto qx_view = m_shared_quadx.current_view();
+      auto qw_view = m_shared_quadw.current_view();
+      for (size_type i = 0; i < K; ++i)
+        for (size_type j = 0; j < K; ++j)
+          for (size_type k = 0; k < 4 * K; ++k)
+            c_view(k, i, j) = static_cast<T>(first.c(i, j, k));
+      for (size_type i = 0; i < 2 * K; ++i)
+        for (size_type j = 0; j < 2 * K; ++j)
+          hgT_view(i, j) = static_cast<T>(first.hgT(i, j));
+      for (size_type i = 0; i < 4 * K; ++i)
+        for (size_type j = 0; j < 4 * K; ++j)
+          hgT2k_view(i, j) = static_cast<T>(first.hgT2k(i, j));
+      for (size_type i = 0; i < m_npt; ++i) {
+        qx_view(i) = static_cast<T>(first.quad_x(i));
+        qw_view(i) = static_cast<T>(first.quad_w(i));
+      }
+      for (size_type t = 0; t < m_terms.size(); ++t) {
+        m_terms[t].fac = T(0);
+        [[maybe_unused]] const bool inserted = m_index.emplace(key(m_terms[t]), t).second;
+        assert(inserted && "GaussianTermTables: the terms must be distinct");
+      }
+    }
+
+    /// number of distinct terms
+    size_type size() const { return m_terms.size(); }
+    size_type K() const { return m_K; }
+    size_type npt() const { return m_npt; }
+
+    /// the index of the term with p's parameters (fac aside), or size() if there is none
+    size_type find(const GaussianTermParams<T>& p) const {
+      auto it = m_index.find(key(p));
+      return (it == m_index.end()) ? size() : it->second;
+    }
+
+    /// the cache slot of level n's table
+    detail::AsyncSlot<table_type>& level_slot(Level n) const { return m_level_tables[n]; }
+
+    /// installs a new (not yet generated) table for level n in its slot, which the caller owns
+    table_type* emplace_level(Level n) const {
+      return m_level_tables[n].emplace(std::make_unique<table_type>(n, size(), m_K, ttg::scope::Allocate));
+    }
+
+    auto& shared_c_tensor() const { return m_shared_c; }
+    auto& shared_hgT_tensor() const { return m_shared_hgT; }
+    auto& shared_hgT2k_tensor() const { return m_shared_hgT2k; }
+    auto& shared_quadx_tensor() const { return m_shared_quadx; }
+    auto& shared_quadw_tensor() const { return m_shared_quadw; }
+
+    /// see GaussianConvolutionOperator::add_generation_buffers
+    void add_generation_buffers(ttg::device::Input& input, table_type* level_work,
+                                ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
+      if (!level_work) return;
+      input.add(m_shared_c.buffer());
+      input.add(m_shared_hgT.buffer());
+      input.add(m_shared_hgT2k.buffer());
+      input.add(m_shared_quadx.buffer());
+      input.add(m_shared_quadw.buffer());
+      input.add(level_work->R.buffer());
+      input.add(level_work->S.buffer());
+      input.add(level_work->norms1d.buffer());
+      input.add(items_buf);
+    }
+
+    /// One work item per distinct term, each covering every translation in
+    /// [-max_op1d_displacement(n), max_op1d_displacement(n)], so that a single
+    /// submit_generate_op1d_kernel call fills the whole level table. Host-only.
+    std::vector<GenerateOp1DItem<T>> collect_generation_items(table_type* level_work) const {
+      std::vector<GenerateOp1DItem<T>> items;
+      if (!level_work) return items;
+      const Translation max_disp = max_op1d_displacement(level_work->n);
+      items.reserve(size());
+      for (size_type t = 0; t < size(); ++t) {
+        GenerateOp1DItem<T> item;
+        item.params = m_terms[t];
+        item.n = level_work->n;
+        item.lmin = -max_disp;
+        item.lmax = max_disp;
+        item.t = t;
+        items.push_back(item);
+      }
+      return items;
+    }
+
+    /// see GaussianConvolutionOperator::submit_generation_kernel
+    void submit_generation_kernel(table_type* level_work, const std::vector<GenerateOp1DItem<T>>& items,
+                                  ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
+      if (items.empty()) return;
+      auto& table = *level_work;
+      submit_generate_op1d_kernel<T>(
+          items_buf.current_device_ptr(), items.size(), num_op1d_displacements(table.n), m_K,
+          m_shared_c.current_view(), m_shared_hgT.current_view(), m_shared_hgT2k.current_view(),
+          m_shared_quadx.current_view().data(), m_shared_quadw.current_view().data(), m_npt,
+          max_op1d_displacement(table.n),
+          table.R.current_view(), table.S.current_view(), table.norms1d.current_view(),
+          ttg::device::current_stream());
+    }
+
+    /// marks a generated table Available to every operator using these tables
+    void publish(table_type* level_work) const { m_level_tables[level_work->n].publish(); }
+
+  private:
+    static auto key(const GaussianTermParams<T>& p) { return std::make_tuple(p.expnt, p.coeff, p.natlev, p.m); }
+
+    size_type m_K = 0;
+    size_type m_npt = 0;
+    std::vector<GaussianTermParams<T>> m_terms;
+    std::map<std::tuple<T, T, Level, int>, size_type> m_index;
+    // Shared (not per-term) tensors, depending only on K and npt
+    DenseTensor<T, 3> m_shared_c;      // 4K x K x K autocorrelation tensor (k outermost)
+    DenseTensor<T, 2> m_shared_hgT;    // 2K x 2K two-scale filter (transpose)
+    DenseTensor<T, 2> m_shared_hgT2k;  // 4K x 4K two-scale filter for order-2K
+    DenseTensor<T, 1> m_shared_quadx;  // npt Gauss-Legendre quadrature points
+    DenseTensor<T, 1> m_shared_quadw;  // npt Gauss-Legendre quadrature weights
+    // Exactly one task per level generates the level's table (every term, every
+    // translation) in a single kernel launch; every other task at that level,
+    // of any operator using these tables, reads it. Never evicted.
+    mutable std::array<detail::AsyncSlot<table_type>, MAX_LEVEL + 1> m_level_tables;
+#endif // !MRA_ENABLE_HOST
   };
 
   /**
@@ -702,10 +890,14 @@ namespace mra {
    *
    * Functions are NOT assumed to share the same separated-expansion rank:
    * m_max_rank (the max over every function's own SeparatedConvolution::
-   * get_rank()) sizes shared per-level/per-operator allocations (the table's
-   * `rank` axis, m_term_params/m_shared_fac's layout), but the actual
-   * generation work in collect_generation_items() only ever covers each
-   * function's own real rank -- see that function's comment.
+   * get_rank()) sizes the per-operator allocations (m_shared_fac's and
+   * m_shared_term's layout, the norms tensors), but only each function's own
+   * real rank is ever read.
+   *
+   * On the device path the 1D operator matrices of the terms are generated
+   * once per distinct term (GaussianTermTables), which operators constructed
+   * from the same tables share; the kernels find the matrices of term (c, i)
+   * in dimension d at index NormId::Term of the norms tensor.
    */
   template <typename T, Dimension NDIM>
   class GaussianConvolutionOperator {
@@ -713,21 +905,22 @@ namespace mra {
   public:
 
     /**
-     * Construct a convolution operator
+     * Construct a convolution operator. With `tables` that hold every term of
+     * the operator (see GaussianTermTables), the operator uses them, and the
+     * levels they have generated already; otherwise it makes its own.
      */
-    GaussianConvolutionOperator(std::shared_ptr<madness::SeparatedConvolution<T, NDIM>> mad_conv_sep)
-    : m_mad_conv_sep_vec(std::move(std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>(1, mad_conv_sep)))
-    , m_max_rank(mad_conv_sep->get_rank())
-    {
-#ifndef MRA_ENABLE_HOST
-      extract_gaussian_terms_for_device();
-#endif // !MRA_ENABLE_HOST
-    }
+    GaussianConvolutionOperator(std::shared_ptr<madness::SeparatedConvolution<T, NDIM>> mad_conv_sep,
+                                std::shared_ptr<GaussianTermTables<T, NDIM>> tables = {})
+    : GaussianConvolutionOperator(std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>(1, mad_conv_sep),
+                                  std::move(tables))
+    { }
 
     /**
-     * Construct a convolution operator
+     * Construct a convolution operator, one MADNESS operator per function. See
+     * above for `tables`.
      */
-    GaussianConvolutionOperator(const std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>& mad_conv_sep)
+    GaussianConvolutionOperator(const std::vector<std::shared_ptr<madness::SeparatedConvolution<T, NDIM>>>& mad_conv_sep,
+                                [[maybe_unused]] std::shared_ptr<GaussianTermTables<T, NDIM>> tables = {})
     : m_mad_conv_sep_vec(mad_conv_sep)
     {
       // find the highest rank
@@ -735,9 +928,13 @@ namespace mra {
         m_max_rank = std::max(m_max_rank, mad_conv->get_rank());
       }
 #ifndef MRA_ENABLE_HOST
-      extract_gaussian_terms_for_device();
+      extract_gaussian_terms_for_device(std::move(tables));
 #endif // !MRA_ENABLE_HOST
     }
+
+    /// The term tables of this operator, to construct later operators with
+    /// (null on the host path, which uses MADNESS's own 1D operators).
+    std::shared_ptr<GaussianTermTables<T, NDIM>> term_tables() const { return m_tables; }
 
     /**
      * Returns the number of operators
@@ -763,13 +960,13 @@ namespace mra {
     /// see try_get_op()'s has_generation_work()/submit_generation_kernel()
     /// comments for the sequence the caller must run these through (select()
     /// before reading their views).
-    auto& shared_c_tensor() const { return m_shared_c; }
-    auto& shared_hgT_tensor() const { return m_shared_hgT; }
-    auto& shared_hgT2k_tensor() const { return m_shared_hgT2k; }
-    auto& shared_quadx_tensor() const { return m_shared_quadx; }
-    auto& shared_quadw_tensor() const { return m_shared_quadw; }
-    size_type K() const { return m_K; }
-    size_type npt() const { return m_npt; }
+    auto& shared_c_tensor() const { return m_tables->shared_c_tensor(); }
+    auto& shared_hgT_tensor() const { return m_tables->shared_hgT_tensor(); }
+    auto& shared_hgT2k_tensor() const { return m_tables->shared_hgT2k_tensor(); }
+    auto& shared_quadx_tensor() const { return m_tables->shared_quadx_tensor(); }
+    auto& shared_quadw_tensor() const { return m_tables->shared_quadw_tensor(); }
+    size_type K() const { return m_tables->K(); }
+    size_type npt() const { return m_tables->npt(); }
 #endif // !MRA_ENABLE_HOST
 
     /**
@@ -843,6 +1040,9 @@ namespace mra {
             norms_view(c, i, d, (int)NormId::Snormf) = cd_mad->Tnormf;
             norms_view(c, i, d, (int)NormId::NSnormf) = cd_mad->NSnormf;
           }
+          for (int d = 0; d < NDIM; ++d) {
+            norms_view(c, i, d, (int)NormId::Term) = c * m_max_rank + i; // see ConvolutionData::transr()
+          }
           auto fac = mad_ops[i].getfac();
           norms_view(c, i, 0, (int)NormId::Fac) = fac;
           norms_view(c, i, 0, (int)NormId::MUnorm) = munorm2_ns(c, n, i, data->norms) * std::abs(fac);
@@ -854,6 +1054,7 @@ namespace mra {
             norms_view(c, i, d, (int)NormId::Rnormf) = 0.0;
             norms_view(c, i, d, (int)NormId::Snormf) = 0.0;
             norms_view(c, i, d, (int)NormId::NSnormf) = 0.0;
+            norms_view(c, i, d, (int)NormId::Term) = c * m_max_rank + i;
           }
           norms_view(c, i, 0, (int)NormId::Fac) = 0.0;
           norms_view(c, i, 0, (int)NormId::MUnorm) = 0.0;
@@ -868,9 +1069,10 @@ namespace mra {
     }
 
 #ifndef MRA_ENABLE_HOST
-    // Plain pointers: tables and norms tensors are owned by this operator's
-    // slots (_level_tables/_norms_slots), which are never evicted, and the
-    // operator outlives every convolution task using it.
+    // Plain pointers: tables and norms tensors are owned by the slots of the
+    // term tables and of this operator (_norms_slots), which are never evicted,
+    // and the operator (holding the term tables) outlives every convolution
+    // task using it.
     using table_pointer_type = const detail::LevelOp1DTable<T, NDIM>*;
     // Only the assembled norms tensor is cached on the device path -- the
     // R/S views (OpResult::dims) are cheap enough (a pointer + a couple
@@ -949,15 +1151,14 @@ namespace mra {
 
       OpResult out;
       table_pointer_type table;
-      auto& level_slot = _level_tables[n];
+      auto& level_slot = m_tables->level_slot(n);
       auto level_res = level_slot.try_get();
       if (level_res.status == detail::AsyncCacheStatus::Pending) {
         out.status = Status::Pending;
         return out;
       }
       if (level_res.status == detail::AsyncCacheStatus::Owned) {
-        out.level_work = level_slot.emplace(std::make_unique<detail::LevelOp1DTable<T, NDIM>>(
-            n, m_mad_conv_sep_vec.size(), m_max_rank, m_K, ttg::scope::Allocate));
+        out.level_work = m_tables->emplace_level(n);
         table = out.level_work; // not yet computed, but a valid object to slice views into
       } else {
         table = level_res.value; // Available
@@ -1002,13 +1203,12 @@ namespace mra {
     LevelTableResult try_get_level_table(Level n) const {
       check_level(n);
       LevelTableResult out;
-      auto& level_slot = _level_tables[n];
+      auto& level_slot = m_tables->level_slot(n);
       auto level_res = level_slot.try_get();
       if (level_res.status == detail::AsyncCacheStatus::Pending) {
         out.pending = true;
       } else if (level_res.status == detail::AsyncCacheStatus::Owned) {
-        out.level_work = level_slot.emplace(std::make_unique<detail::LevelOp1DTable<T, NDIM>>(
-            n, m_mad_conv_sep_vec.size(), m_max_rank, m_K, ttg::scope::Allocate));
+        out.level_work = m_tables->emplace_level(n);
         out.table = out.level_work; // not yet computed
       } else {
         out.table = level_res.value;
@@ -1047,7 +1247,7 @@ namespace mra {
 
       std::array<detail::Op1DSliceView<T, NDIM>, NDIM> dims;
       for (Dimension d = 0; d < NDIM; ++d) {
-        dims[d] = detail::Op1DSliceView<T, NDIM>(table, d, disp.translation()[d]);
+        dims[d] = detail::Op1DSliceView<T, NDIM>(table, disp.translation()[d]);
       }
       const size_type count = m_mad_conv_sep_vec.size();
       auto opnorms = std::make_unique<std::vector<T>>(count);
@@ -1058,8 +1258,9 @@ namespace mra {
           double prod = 1.0, sum = 0.0;
           for (Dimension d = 0; d < NDIM; ++d) {
             auto n1d = dims[d].norms1d.view_on(ttg::device::Device::host());
-            const double a = n1d(c, i, (int)NormId::NSnormf);
-            const double b = n1d(c, i, (int)NormId::Snormf);
+            const size_type t = term_index(c, i, d);
+            const double a = n1d(t, (int)NormId::NSnormf);
+            const double b = n1d(t, (int)NormId::Snormf);
             const double aa = std::min(a, b), bb = std::max(a, b);
             prod *= bb;
             if (bb > 0.0) sum += aa / bb;
@@ -1155,6 +1356,7 @@ namespace mra {
     void add_assembly_buffers(ttg::device::Input& input, DenseTensor<T, 4>& norms) const {
       input.add(m_shared_fac.buffer());
       input.add(m_shared_rank.buffer());
+      input.add(m_shared_term.buffer());
       input.add(norms.buffer());
     }
 
@@ -1228,7 +1430,8 @@ namespace mra {
       submit_assemble_op1d_norms_kernel<T, NDIM>(
           count, rank, n, lx, max_op1d_displacement(n),
           table.norms1d.current_view(), m_shared_fac.current_view(),
-          norms.current_view(), m_shared_rank.current_view(), ttg::device::current_stream());
+          norms.current_view(), m_shared_rank.current_view(), m_shared_term.current_view(),
+          ttg::device::current_stream());
       submit_assemble_op1d_opnorm_kernel<T>(
           count, rank, norms.current_view(), m_shared_rank.current_view(), ttg::device::current_stream());
     }
@@ -1241,7 +1444,7 @@ namespace mra {
      * A device task may call co_await ttg::device::select() only ONCE over
      * its whole execution, so collect_generation_items() must be (and is)
      * callable BEFORE that one select() -- it only reads host-side state
-     * (m_term_params, res.level_work->n), never a device view -- letting the
+     * (the term tables' parameters, res.level_work->n), never a device view -- letting the
      * caller fold every buffer this generation round needs (the shared
      * generator tables, the level table's R/S/norms1d, and items_buf) into
      * that single select() call alongside it. Call-site sequence for
@@ -1283,70 +1486,16 @@ namespace mra {
     /// `input`. Adds nothing unless level_work is set.
     void add_generation_buffers(ttg::device::Input& input, detail::LevelOp1DTable<T, NDIM>* level_work,
                                 ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
-      if (!level_work) return;
-      input.add(m_shared_c.buffer());
-      input.add(m_shared_hgT.buffer());
-      input.add(m_shared_hgT2k.buffer());
-      input.add(m_shared_quadx.buffer());
-      input.add(m_shared_quadw.buffer());
-      input.add(level_work->R.buffer());
-      input.add(level_work->S.buffer());
-      input.add(level_work->norms1d.buffer());
-      input.add(items_buf);
+      m_tables->add_generation_buffers(input, level_work, items_buf);
     }
 
-    /// Builds the flat (dimension, count-index, term) work-item list
-    /// covering the table in level_work -- each item generates every
-    /// translation in [-max_op1d_displacement(n), max_op1d_displacement(n)]
-    /// for its own (d, c, i), which is narrower than the full
-    /// [-MRA_OP1D_MAX_DISPLACEMENT, MRA_OP1D_MAX_DISPLACEMENT] ceiling at low
-    /// levels (see max_op1d_displacement's comment) -- so a single
-    /// submit_generate_op1d_kernel call fills every matrix this level's table
-    /// actually holds. The `i` loop only runs up to count-index c's own REAL
-    /// separated-expansion rank (get_rank()), not the operator-wide
-    /// m_max_rank every count-index's table row is allocated with -- a
-    /// count-index with fewer terms than another simply gets fewer items,
-    /// leaving its table's higher-i rows (and this level's norms1d there)
-    /// untouched rather than generating a zero-filled placeholder for them
-    /// (that used to be necessary because generate_op1d_one's coeff==0
-    /// sentinel was the only way the old, uniform-m_max_rank item list could
-    /// mark "nothing here"; now there's simply no item for those slots to
-    /// begin with). Nothing downstream reads an untouched slot: the
-    /// application kernel (mra/kernels/convolution.h) already loops only
-    /// [0, real_rank) per count-index via the Rank norm, and
-    /// assemble_op1d_norms_kernel/assemble_op1d_opnorm_kernel (generate_op1d.h)
-    /// are bounded by m_shared_rank the same way -- see their own comments.
-    /// Host-only (no device view read) -- see has_generation_work()'s comment
-    /// for why that matters here -- so safe to call before the round's one
-    /// select().
+    /// One work item per distinct term of the term tables (see
+    /// GaussianTermTables::collect_generation_items), covering the whole
+    /// level table in a single submit_generate_op1d_kernel call. Host-only
+    /// (no device view read) -- see has_generation_work()'s comment for why
+    /// that matters here -- so safe to call before the round's one select().
     std::vector<GenerateOp1DItem<T>> collect_generation_items(detail::LevelOp1DTable<T, NDIM>* level_work) const {
-      std::vector<GenerateOp1DItem<T>> items;
-      if (!level_work) return items;
-      const size_type count = m_mad_conv_sep_vec.size();
-      const size_type max_rank = (size_type)m_max_rank; // stride into m_term_params only -- see below
-      const Level n = level_work->n;
-      const Translation max_disp = max_op1d_displacement(n);
-      items.reserve((size_type)NDIM * count * max_rank); // upper bound; real count is usually smaller once per-count-index rank is applied below
-      for (Dimension d = 0; d < NDIM; ++d) {
-        for (size_type c = 0; c < count; ++c) {
-          const size_type rank = (size_type)m_mad_conv_sep_vec[c]->get_rank(); // this count-index's own REAL rank
-          for (size_type i = 0; i < rank; ++i) {
-            GenerateOp1DItem<T> item;
-            // m_term_params is laid out with stride m_max_rank (see
-            // extract_gaussian_terms_for_device()), regardless of this
-            // count-index's own smaller real rank.
-            item.params = m_term_params[(c * max_rank + i) * NDIM + d];
-            item.n = n;
-            item.d = d;
-            item.c = c;
-            item.i = i;
-            item.lmin = -max_disp;
-            item.lmax =  max_disp;
-            items.push_back(std::move(item));
-          }
-        }
-      }
-      return items;
+      return m_tables->collect_generation_items(level_work);
     }
 
     /// Call only after co_await-ing make_generation_input()'s select();
@@ -1354,16 +1503,7 @@ namespace mra {
     /// into that same select() call (via make_generation_input).
     void submit_generation_kernel(detail::LevelOp1DTable<T, NDIM>* level_work, const std::vector<GenerateOp1DItem<T>>& items,
                                    ttg::Buffer<GenerateOp1DItem<T>>& items_buf) const {
-      if (items.empty()) return;
-      auto& table = *level_work;
-      const Translation max_disp = max_op1d_displacement(table.n);
-      submit_generate_op1d_kernel<T>(
-          items_buf.current_device_ptr(), items.size(), num_op1d_displacements(table.n), m_K,
-          m_shared_c.current_view(), m_shared_hgT.current_view(), m_shared_hgT2k.current_view(),
-          m_shared_quadx.current_view().data(), m_shared_quadw.current_view().data(), m_npt,
-          max_disp,
-          table.R.current_view(), table.S.current_view(), table.norms1d.current_view(),
-          ttg::device::current_stream());
+      m_tables->submit_generation_kernel(level_work, items, items_buf);
     }
 
     /// Call only once the generating task has completed (e.g. via
@@ -1378,7 +1518,7 @@ namespace mra {
     void publish_generation_work(detail::LevelOp1DTable<T, NDIM>* level_work) const {
       if (!level_work) return;
       if (validate_ops_enabled()) validate_level_table(*level_work); // DEBUG
-      _level_tables[level_work->n].publish();
+      m_tables->publish(level_work);
     }
 #endif // !MRA_ENABLE_HOST
 
@@ -1451,7 +1591,8 @@ namespace mra {
       const Level n = table.n;
       const size_type count = m_mad_conv_sep_vec.size();
       const size_type rank = (size_type)m_max_rank;
-      const size_type K = m_K, K2 = 2 * m_K;
+      const size_type nterms = m_tables->size();
+      const size_type K = m_tables->K(), K2 = 2 * K;
       const Translation max_disp = max_op1d_displacement(n);
       const size_type num_disp = num_op1d_displacements(n);
       // R/S normally stay on the device (only norms1d is pulled back to the
@@ -1477,7 +1618,7 @@ namespace mra {
             // is intentionally untouched (not zero), so there's nothing
             // meaningful to compare it against.
             for (size_type i = 0; i < mad_ops.size(); ++i) {
-              const size_type entry = ((d * num_disp + li) * count + c) * rank + i;
+              const size_type entry = li * nterms + term_index(c, i, d);
               const T* r = have_RS ? R + entry * K2 * K2 : nullptr;
               const T* s = have_RS ? S + entry * K * K : nullptr;
               const T* nn = N1 + entry * 5;
@@ -1544,7 +1685,7 @@ namespace mra {
       auto at = [&](size_type c, size_type i, size_type d, NormId id) {
         return got[((c * rank + i) * NDIM + d) * nk + (size_type)id];
       };
-      const char* names[] = {"Rnorm", "Snorm", "Rnormf", "Snormf", "NSnormf", "Fac", "MUnorm", "Opnorm", "Rank"};
+      const char* names[] = {"Rnorm", "Snorm", "Rnormf", "Snormf", "NSnormf", "Fac", "MUnorm", "Opnorm", "Rank", "Term"};
       std::array<ValidationError, (size_type)NormId::Count> err;
       const madness::Key<NDIM> mkey = Key<NDIM>(0, n, disp.translation()).to_madness_key();
       for (size_type c = 0; c < count; ++c) {
@@ -1607,7 +1748,7 @@ namespace mra {
     /// (n, disp) -- the part of try_get_op() after the level table is known.
     void lookup_op_norms(OpResult& out, table_pointer_type table, Level n, const Key<NDIM>& disp) const {
       for (Dimension d = 0; d < NDIM; ++d) {
-        out.dims[d] = detail::Op1DSliceView<T, NDIM>(table, d, disp.translation()[d]);
+        out.dims[d] = detail::Op1DSliceView<T, NDIM>(table, disp.translation()[d]);
       }
       auto norms_res = norms_slot(n, disp).try_get();
       if (norms_res.status == detail::AsyncCacheStatus::Available) {
@@ -1643,61 +1784,52 @@ namespace mra {
       }
     }
 
+    // the distinct 1D terms and their level tables, possibly shared with other
+    // operators (device path only; null on the host path)
+    std::shared_ptr<GaussianTermTables<T, NDIM>> m_tables;
+
 #ifndef MRA_ENABLE_HOST
     // Device-path caches: try_get()/publish() only, no acquire()/MutexWaiter --
     // see detail::AsyncSlot's class comment and try_get_op() above. Both are
-    // plain arrays indexed by level (and displacement), owning their values
+    // plain arrays indexed by level and displacement, owning their values
     // for the operator's lifetime, so lookups take no lock and touch no
-    // reference count.
-    // Exactly one caller per level generates the whole
-    // detail::LevelOp1DTable (every dimension, every translation in
-    // [-max_op1d_displacement(n), max_op1d_displacement(n)]) in a single
-    // kernel launch; every other displacement at that level just reads it.
-    mutable std::array<detail::AsyncSlot<detail::LevelOp1DTable<T, NDIM>>, MAX_LEVEL + 1> _level_tables;
+    // reference count. The level tables themselves live in m_tables.
     // Caches only the assembled norms tensor per (level, displacement) --
     // not a whole aggregate -- since R/S (OpResult::dims) are cheap enough
     // to rebuild from the level table on every try_get_op() call; see
-    // OpResult's comment.
+    // OpResult's comment. Depends on fac, so it is per operator.
     mutable detail::LevelDisplacementSlots<DenseTensor<T, 4>, NDIM> _norms_slots;
     // Screener-only, host-only Opnorm per (level, displacement) -- kept apart
     // from _norms_slots so nothing host-assembled is ever a device input; see
     // try_get_opnorms().
     mutable detail::LevelDisplacementSlots<std::vector<T>, NDIM> _opnorm_slots;
 
-    // Shared (not per-term) tensors extracted once, at construction, from
-    // MADNESS's Convolution1D base -- identical for every term/dimension of
-    // this operator since they depend only on K and npt, never on
-    // (coeff, expnt). See extract_gaussian_terms_for_device().
-    size_type m_K = 0;
-    size_type m_npt = 0;
-    DenseTensor<T, 3> m_shared_c;      // 4K x K x K autocorrelation tensor (k outermost -- see extract_gaussian_terms_for_device())
-    DenseTensor<T, 2> m_shared_hgT;    // 2K x 2K two-scale filter (transpose)
-    DenseTensor<T, 2> m_shared_hgT2k;  // 4K x 4K two-scale filter for order-2K
-    DenseTensor<T, 1> m_shared_quadx;  // npt Gauss-Legendre quadrature points
-    DenseTensor<T, 1> m_shared_quadw;  // npt Gauss-Legendre quadrature weights
     // Per-(count-index, term) Fac, d-invariant (mad_ops[i].getfac() doesn't
-    // depend on dimension) -- read by submit_assemble_norms_kernel() so it
-    // doesn't need m_term_params (a per-d-too, host-only vector) uploaded.
+    // depend on dimension) -- read by submit_assemble_norms_kernel().
     DenseTensor<T, 2> m_shared_fac;    // count x rank
     // Per-count-index real separated-expansion rank (get_ops().size()) --
     // an operator-wide constant, independent of level/displacement, so
     // extracted once here rather than recomputed (or, worse, re-derived via
     // a MADNESS call) on every submit_assemble_norms_kernel() round.
     DenseTensor<T, 1> m_shared_rank;   // count
+    // Per-(count-index c, term i, dimension d) index of the 1D term in
+    // m_tables, on the host (m_term_index, flattened as (c*m_max_rank + i)*NDIM + d)
+    // and for the norms assembly (m_shared_term, copied into NormId::Term);
+    // padding slots (i beyond c's real rank) are never read and hold 0.
+    std::vector<size_type> m_term_index;
+    DenseTensor<T, 3> m_shared_term;   // count x rank x NDIM
 
-    // Per-(count-index c, term i, dimension d) Gaussian parameters, extracted
-    // once. Flattened as m_term_params[(c*m_max_rank + i)*NDIM + d]; padding
-    // slots (i beyond count-index c's real rank) are left default-constructed
-    // (coeff==0), which generate_op1d_one's own sentinel check zero-fills.
-    std::vector<GaussianTermParams<T>> m_term_params;
+    size_type term_index(size_type c, size_type i, Dimension d) const {
+      return m_term_index[(c * (size_type)m_max_rank + i) * NDIM + d];
+    }
 
     /**
      * Extracts everything the on-device generator (mra/kernels/generate_op1d.h)
      * needs from MADNESS's already-built GaussianConvolution1D term objects --
-     * called once, from both constructors, guarded to device builds only. This
-     * still touches MADNESS, but it is a one-time, per-run setup cost, not the
-     * per-(level,translation)-key cost that motivated moving generation to the
-     * GPU in the first place (see this file's header comment).
+     * called once, from the constructor, guarded to device builds only: the
+     * parameters of every (c, i, d), the distinct ones of which make up the
+     * term tables -- `tables` if they hold all of them (reusing what they
+     * generated), new ones otherwise -- and the map from (c, i, d) to them.
      *
      * Requires every term/dimension to actually be a GaussianConvolution1D --
      * true for the Gaussian-separated-expansion operators this codebase
@@ -1707,10 +1839,9 @@ namespace mra {
      * dynamic_pointer_cast below). Throws rather than silently mis-generating
      * if that assumption doesn't hold.
      */
-    void extract_gaussian_terms_for_device() {
-      m_K = (size_type)m_mad_conv_sep_vec.front()->get_k();
-      const size_type K = m_K;
-
+    void extract_gaussian_terms_for_device(std::shared_ptr<GaussianTermTables<T, NDIM>> tables) {
+      const size_type count = m_mad_conv_sep_vec.size();
+      const size_type max_rank = (size_type)m_max_rank;
       auto first_ops = m_mad_conv_sep_vec.front()->get_ops();
       auto first = std::dynamic_pointer_cast<const madness::GaussianConvolution1D<T>>(first_ops[0].getop(0));
       if (!first) {
@@ -1719,56 +1850,20 @@ namespace mra {
             "on-device transition-matrix generation only supports Gaussian-based "
             "separated expansions.");
       }
-      m_npt = (size_type)first->npt;
 
-      // Stored as (4K, K, K) rather than MADNESS's own (K, K, 4K) -- i.e.
-      // transposed so the contraction axis (k, summed over in
-      // make_rnlij_device's cten(k,qi,qj)*Rvec[k]) is the OUTERMOST/slowest
-      // dimension and (qi,qj) are the fastest-varying/contiguous ones. This
-      // is a one-time, host-side transpose (this whole extraction runs once
-      // per operator construction), done so that on-device, consecutive
-      // threads working on consecutive (qi,qj) output elements for the same
-      // k read consecutive addresses -- coalesced -- instead of addresses
-      // 4K elements apart under MADNESS's native layout.
-      m_shared_c = DenseTensor<T, 3>(std::array{4 * K, K, K}, ttg::scope::SyncIn);
-      m_shared_hgT = DenseTensor<T, 2>(std::array{2 * K, 2 * K}, ttg::scope::SyncIn);
-      m_shared_hgT2k = DenseTensor<T, 2>(std::array{4 * K, 4 * K}, ttg::scope::SyncIn);
-      m_shared_quadx = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
-      m_shared_quadw = DenseTensor<T, 1>(m_npt, ttg::scope::SyncIn);
-      auto c_view = m_shared_c.current_view();
-      auto hgT_view = m_shared_hgT.current_view();
-      auto hgT2k_view = m_shared_hgT2k.current_view();
-      auto qx_view = m_shared_quadx.current_view();
-      auto qw_view = m_shared_quadw.current_view();
-      for (size_type i = 0; i < K; ++i)
-        for (size_type j = 0; j < K; ++j)
-          for (size_type k = 0; k < 4 * K; ++k)
-            c_view(k, i, j) = static_cast<T>(first->c(i, j, k));
-      for (size_type i = 0; i < 2 * K; ++i)
-        for (size_type j = 0; j < 2 * K; ++j)
-          hgT_view(i, j) = static_cast<T>(first->hgT(i, j));
-      for (size_type i = 0; i < 4 * K; ++i)
-        for (size_type j = 0; j < 4 * K; ++j)
-          hgT2k_view(i, j) = static_cast<T>(first->hgT2k(i, j));
-      for (size_type i = 0; i < m_npt; ++i) {
-        qx_view(i) = static_cast<T>(first->quad_x(i));
-        qw_view(i) = static_cast<T>(first->quad_w(i));
-      }
-
-      m_term_params.assign(m_mad_conv_sep_vec.size() * (size_type)m_max_rank * NDIM, GaussianTermParams<T>{});
-      m_shared_fac = DenseTensor<T, 2>(std::array<size_type, 2>{(size_type)m_mad_conv_sep_vec.size(), (size_type)m_max_rank},
-                                       ttg::scope::SyncIn);
-      {
-        auto fac_view = m_shared_fac.current_view();
-        for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c)
-          for (size_type i = 0; i < (size_type)m_max_rank; ++i)
-            fac_view(c, i) = T(0); // padding default; real entries overwritten below
-      }
-      for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
+      // the parameters of every (c, i, d) with i below c's real rank
+      std::vector<GaussianTermParams<T>> params(count * max_rank * NDIM);
+      m_shared_fac = DenseTensor<T, 2>(std::array<size_type, 2>{count, max_rank}, ttg::scope::SyncIn);
+      m_shared_rank = DenseTensor<T, 1>(count, ttg::scope::SyncIn);
+      auto fac_view = m_shared_fac.current_view();
+      auto rank_view = m_shared_rank.current_view();
+      for (size_type c = 0; c < count; ++c) {
         auto& mad_ops = m_mad_conv_sep_vec[c]->get_ops();
+        rank_view(c) = (T)mad_ops.size();
+        for (size_type i = 0; i < max_rank; ++i) fac_view(c, i) = T(0); // padding
         for (size_type i = 0; i < (size_type)mad_ops.size(); ++i) {
-          T fac = static_cast<T>(mad_ops[i].getfac());
-          m_shared_fac.current_view()(c, i) = fac;
+          const T fac = static_cast<T>(mad_ops[i].getfac());
+          fac_view(c, i) = fac;
           for (Dimension d = 0; d < NDIM; ++d) {
             auto term = std::dynamic_pointer_cast<const madness::GaussianConvolution1D<T>>(mad_ops[i].getop(d));
             if (!term) {
@@ -1781,20 +1876,49 @@ namespace mra {
             p.natlev = static_cast<Level>(term->natlev);
             p.m = static_cast<int>(term->m);
             p.fac = fac;
-            m_term_params[(c * (size_type)m_max_rank + i) * NDIM + d] = p;
+            params[(c * max_rank + i) * NDIM + d] = p;
           }
         }
-        // padding entries (i >= mad_ops.size(), up to m_max_rank) are left
-        // default-constructed (coeff==0) -- see this function's header comment.
+      }
+      auto for_each_term = [&](auto&& f) {
+        for (size_type c = 0; c < count; ++c) {
+          const size_type rank = (size_type)m_mad_conv_sep_vec[c]->get_ops().size();
+          for (size_type i = 0; i < rank; ++i)
+            for (Dimension d = 0; d < NDIM; ++d) f(c, i, d, params[(c * max_rank + i) * NDIM + d]);
+        }
+      };
+
+      // reuse the given tables if they hold every term, otherwise make new ones of this operator's terms
+      bool reuse = tables && tables->K() == (size_type)first->k && tables->npt() == (size_type)first->npt;
+      if (reuse) {
+        for_each_term([&](size_type, size_type, Dimension, const GaussianTermParams<T>& p) {
+          if (tables->find(p) == tables->size()) reuse = false;
+        });
+      }
+      if (reuse) {
+        m_tables = std::move(tables);
+      } else {
+        std::vector<GaussianTermParams<T>> distinct;
+        std::map<std::tuple<T, T, Level, int>, size_type> seen;
+        for_each_term([&](size_type, size_type, Dimension, const GaussianTermParams<T>& p) {
+          if (seen.emplace(std::make_tuple(p.expnt, p.coeff, p.natlev, p.m), distinct.size()).second)
+            distinct.push_back(p);
+        });
+        m_tables = std::make_shared<GaussianTermTables<T, NDIM>>(*first, std::move(distinct));
       }
 
-      m_shared_rank = DenseTensor<T, 1>((size_type)m_mad_conv_sep_vec.size(), ttg::scope::SyncIn);
-      {
-        auto rank_view = m_shared_rank.current_view();
-        for (size_type c = 0; c < m_mad_conv_sep_vec.size(); ++c) {
-          rank_view(c) = (T)m_mad_conv_sep_vec[c]->get_ops().size();
-        }
-      }
+      m_term_index.assign(count * max_rank * NDIM, 0);
+      m_shared_term = DenseTensor<T, 3>(std::array<size_type, 3>{count, max_rank, (size_type)NDIM}, ttg::scope::SyncIn);
+      auto term_view = m_shared_term.current_view();
+      for (size_type c = 0; c < count; ++c)
+        for (size_type i = 0; i < max_rank; ++i)
+          for (Dimension d = 0; d < NDIM; ++d) term_view(c, i, d) = T(0); // padding
+      for_each_term([&](size_type c, size_type i, Dimension d, const GaussianTermParams<T>& p) {
+        const size_type t = m_tables->find(p);
+        assert(t < m_tables->size());
+        m_term_index[(c * max_rank + i) * NDIM + d] = t;
+        term_view(c, i, d) = (T)t;
+      });
     }
 #endif // !MRA_ENABLE_HOST
 

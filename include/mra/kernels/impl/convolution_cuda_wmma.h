@@ -97,7 +97,7 @@ namespace mra {
 
 #ifdef MRA_HAVE_MMA
     template<typename T, Dimension NDIM, NormId Term,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewResult>
@@ -222,11 +222,13 @@ namespace mra {
              */
             FragB b_frags[K_WARP_TILES][N_WARP_TILES];
             if (has_work) {
+              // the matrix of term mu in this dimension (see NormId::Term)
+              const T* tmat = trans[d]((size_type)opnorms(opid, mu, d, (size_type)NormId::Term)).data();
               #pragma unroll
               for (int i = 0; i < K_WARP_TILES; ++i) {
                 #pragma unroll
                 for (int j = 0; j < N_WARP_TILES; ++j) {
-                  mma::load_b(b_frags[i][j], trans[d](opid, mu).data(),
+                  mma::load_b(b_frags[i][j], tmat,
                               i * mma::K,                            /* contraction offset */
                               j * mma::N,                            /* col in B           */
                               K);                                    /* row-major ldm      */
@@ -311,8 +313,8 @@ namespace mra {
      *
      */
     template<typename T, Dimension NDIM,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewF0,

@@ -81,10 +81,13 @@ namespace mra {
 
 
   /**
-   * One (term, dimension, count-index) unit of work: generate R/S and their
+   * One distinct 1D Gaussian term's unit of work: generate R/S and their
    * norms for EVERY translation lx in [lmin, lmax] at level n, writing into
-   * this item's own (d, *, c, i) slice of the shared, level-wide R/S/norms1d
-   * views (see detail::LevelOp1DTable in conv_mad.h) -- the kernel receives
+   * this item's own (*, t) slice of the shared, level-wide R/S/norms1d
+   * views (see detail::LevelOp1DTable in conv_mad.h). A term's matrices depend
+   * only on its parameters, never on which function, separated term or
+   * dimension uses it (the operator coefficient lives in fac), so each
+   * distinct term is generated once (see GaussianTermTables). The kernel receives
    * those full views directly (see generate_op1d_kernel/submit_generate_op1d_kernel)
    * rather than each item carrying its own already-sliced destination view,
    * so there's one buffer per field to select() regardless of how many
@@ -98,9 +101,7 @@ namespace mra {
     Level n = 0;
     Translation lmin = 0;
     Translation lmax = 0;
-    Dimension d = 0;
-    size_type c = 0;
-    size_type i = 0;
+    size_type t = 0; // the term's index in the level table
   };
 
   namespace detail {
@@ -654,8 +655,8 @@ namespace mra {
      * defined).
      */
     template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
-              concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
-              concepts::TensorView<5> ViewNorms>
+              concepts::TensorView<2> ViewHgT2k, concepts::TensorView<4> ViewR, concepts::TensorView<4> ViewS,
+              concepts::TensorView<3> ViewNorms>
     DEVSCOPE void generate_op1d_one(const GenerateOp1DItem<T>& item, Translation lx, auto K,
                                      const ViewC& cten,
                                      const ViewHgT& hgT,
@@ -665,9 +666,9 @@ namespace mra {
                                      ViewR& R, ViewS& S, ViewNorms& norms) {
       const auto& p = item.params;
       const size_type l_idx = (size_type)(lx + l_offset);
-      auto R_dst = R(item.d, l_idx, item.c, item.i);
-      auto S_dst = S(item.d, l_idx, item.c, item.i);
-      auto norms_dst = norms(item.d, l_idx, item.c, item.i);
+      auto R_dst = R(l_idx, item.t);
+      auto S_dst = S(l_idx, item.t);
+      auto norms_dst = norms(l_idx, item.t);
 
       // coeff==0 would be the sentinel for a padding slot (i beyond a given
       // count-index's real separated-expansion rank), but conv_mad.h's
@@ -918,8 +919,8 @@ namespace mra {
    * generate_op1d_one's header comment.
    */
   template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
-            concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
-            concepts::TensorView<5> ViewNorms>
+            concepts::TensorView<2> ViewHgT2k, concepts::TensorView<4> ViewR, concepts::TensorView<4> ViewS,
+            concepts::TensorView<3> ViewNorms>
   // 3 blocks per SM: make_rnlp_leaf_ct keeps its 2K accumulators in registers,
   // which spill to local memory at the 64 registers a minimum of 4 blocks allows
   LAUNCH_BOUNDS_P(MAX_THREADS_PER_BLOCK, 3)
@@ -959,8 +960,8 @@ namespace mra {
    * level.
    * `R`/`S`/`norms` are the FULL, level-wide destination views
    * (detail::LevelOp1DTable's own tensors, already select()-ed by the
-   * caller) -- every (item, translation) pair writes into its own (d, *, c,
-   * i) slice of these, indexed by translation via `l_offset` (added to a
+   * caller) -- every (item, translation) pair writes into its own (*, t)
+   * slice of these, indexed by translation via `l_offset` (added to a
    * translation to get its index along the translation axis; conv_mad.h
    * passes max_op1d_displacement(n), matching how the table was sized for
    * this level).
@@ -972,8 +973,8 @@ namespace mra {
    * item's own range are harmless no-ops).
    */
   template <typename T, concepts::TensorView<3> ViewC, concepts::TensorView<2> ViewHgT,
-            concepts::TensorView<2> ViewHgT2k, concepts::TensorView<6> ViewR, concepts::TensorView<6> ViewS,
-            concepts::TensorView<5> ViewNorms>
+            concepts::TensorView<2> ViewHgT2k, concepts::TensorView<4> ViewR, concepts::TensorView<4> ViewS,
+            concepts::TensorView<3> ViewNorms>
   void submit_generate_op1d_kernel(
       const GenerateOp1DItem<T>* items, size_type n_items, size_type max_range_len, size_type K,
       const ViewC& c, const ViewHgT& hgT,
@@ -1022,7 +1023,11 @@ namespace mra {
      * plus two scalars), so only the team lead does anything -- no
      * cooperative distribution or SYNCTHREADS needed. Index order in the
      * last dimension of `norms` matches conv_mad.h's NormId exactly: Rnorm,
-     * Snorm, Rnormf, Snormf, NSnormf, Fac, MUnorm, Opnorm, Rank.
+     * Snorm, Rnormf, Snormf, NSnormf, Fac, MUnorm, Opnorm, Rank, Term.
+     *
+     * `term` maps (c, i, d) to the index of that 1D term in the level table
+     * (conv_mad.h's m_shared_term); it is copied into Term, where the
+     * convolution kernels look up the term's R/S.
      *
      * `rank_tensor` is the per-count-index REAL separated-expansion rank
      * (conv_mad.h's m_shared_rank): a block whose `i` is beyond count-index
@@ -1032,12 +1037,12 @@ namespace mra {
      * padding placeholder; now it's simply untouched memory, so reading it
      * here would be garbage, not a harmless zero).
      */
-    template <typename T, Dimension NDIM, concepts::TensorView<5> ViewNorms1d, concepts::TensorView<2> ViewFac,
-              concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
+    template <typename T, Dimension NDIM, concepts::TensorView<3> ViewNorms1d, concepts::TensorView<2> ViewFac,
+              concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank, concepts::TensorView<3> ViewTerm>
     GLOBALSCOPE void assemble_op1d_norms_kernel(
         size_type count, size_type rank, Level n,
         std::array<Translation, NDIM> lx, Translation l_offset,
-        ViewNorms1d norms1d, ViewFac fac, ViewNorms norms, ViewRank rank_tensor) {
+        ViewNorms1d norms1d, ViewFac fac, ViewNorms norms, ViewRank rank_tensor, ViewTerm term) {
       const size_type idx = blockIdx.x;
       const size_type c = idx / rank;
       const size_type i = idx % rank;
@@ -1049,12 +1054,14 @@ namespace mra {
       T snormf[NDIM];
       for (Dimension d = 0; d < NDIM; ++d) {
         const size_type l_idx = (size_type)(lx[d] + l_offset);
-        auto src = norms1d(d, l_idx, c, i);
+        const T t = term(c, i, d);
+        auto src = norms1d(l_idx, (size_type)t);
         norms(c, i, d, 0) = src[0]; // Rnorm
         norms(c, i, d, 1) = src[1]; // Snorm
         norms(c, i, d, 2) = src[2]; // Rnormf
         norms(c, i, d, 3) = src[3]; // Snormf
         norms(c, i, d, 4) = src[4]; // NSnormf
+        norms(c, i, d, 9) = t;      // Term
         nsnormf[d] = src[4];
         snormf[d] = src[3];
       }
@@ -1144,16 +1151,17 @@ namespace mra {
    * `rank_tensor`). Must be followed by submit_assemble_op1d_opnorm_kernel
    * (same stream) to fill in Opnorm/Rank -- see that function's comment.
    */
-  template <typename T, Dimension NDIM, concepts::TensorView<5> ViewNorms1d, concepts::TensorView<2> ViewFac,
-            concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
+  template <typename T, Dimension NDIM, concepts::TensorView<3> ViewNorms1d, concepts::TensorView<2> ViewFac,
+            concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank, concepts::TensorView<3> ViewTerm>
   void submit_assemble_op1d_norms_kernel(
       size_type count, size_type rank, Level n, std::array<Translation, NDIM> lx, Translation l_offset,
       const ViewNorms1d& norms1d, const ViewFac& fac, const ViewNorms& norms, const ViewRank& rank_tensor,
-      ttg::device::Stream stream) {
+      const ViewTerm& term, ttg::device::Stream stream) {
     if (count == 0 || rank == 0) return;
     Dim3 thread_dims{1, 1, 1};
-    CALL_KERNEL((detail::assemble_op1d_norms_kernel<T, NDIM, ViewNorms1d, ViewFac, ViewNorms, ViewRank>),
-                count * rank, thread_dims, 0, stream, (count, rank, n, lx, l_offset, norms1d, fac, norms, rank_tensor));
+    CALL_KERNEL((detail::assemble_op1d_norms_kernel<T, NDIM, ViewNorms1d, ViewFac, ViewNorms, ViewRank, ViewTerm>),
+                count * rank, thread_dims, 0, stream,
+                (count, rank, n, lx, l_offset, norms1d, fac, norms, rank_tensor, term));
     checkSubmit();
   }
 

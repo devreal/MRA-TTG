@@ -129,7 +129,7 @@ namespace mra {
      * of {Tx, Ty, Tz}.
      */
     template<typename T, Dimension NDIM, NormId Term,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewResult>
@@ -207,7 +207,7 @@ namespace mra {
 
       /**
        * Raw indexing into opnorms (opid, mu, d, NormId) and trans[d]
-       * (opid, mu, k, k): TensorView's operator() keeps its strides in local
+       * (term, k, k): TensorView's operator() keeps its strides in local
        * memory, which is too expensive in this loop.
        */
       const T* norms = opnorms.data();
@@ -254,14 +254,15 @@ namespace mra {
        * i = mt*KS + ks, Ty fragments i = (mt2*MT + nt)*2 + r (see the
        * stages below for the element each fragment holds).
        * Thread tid copies the elements e = tid + j*block_size() of tbuf (Tx,
-       * Ty, Tz one after the other) from csrc[j] + mu*k*k; csrc[j], the
-       * source for term 0, is computed once. Full pointers also keep the
+       * Ty, Tz one after the other) from csrc[j] plus the offset of term mu's
+       * matrix cmat[j]; csrc[j], the element's position in a matrix, is
+       * computed once. Full pointers also keep the
        * compiler from reloading trans[].data() from global memory for every
        * copy (each cp.async has a "memory" clobber).
        */
       constexpr int CJ = (3 * k * k + NW * MRA_WARP_SIZE - 1) / (NW * MRA_WARP_SIZE);  // copies per thread
-      const size_type trans_rank = trans[0].dim(1);
-      const T* csrc[CJ];  // source of copy j for term 0, nullptr if none
+      const T* csrc[CJ];  // source of copy j in the matrix of term 0, nullptr if none
+      unsigned cmat[CJ];  // which matrix copy j reads (0: Tx, 1: Ty, 2: Tz)
       #pragma unroll
       for (int j = 0; j < CJ; ++j) {
         /* unsigned: all divisors are powers of 2, so / and % become shifts and masks */
@@ -280,14 +281,20 @@ namespace mra {
           col = fg + 8 * (fi / KS);
         }
         const T* base = (m == 0) ? trans[2].data() : (m == 1) ? trans[1].data() : trans[0].data();
-        csrc[j] = (e < 3u * k * k) ? base + opid * trans_rank * k * k + row * k + col : nullptr;
+        csrc[j] = (e < 3u * k * k) ? base + row * k + col : nullptr;
+        cmat[j] = m;
       }
       auto prefetch = [&](int mu, T* tbuf) {
+        /* the matrices of term mu: trans[d] holds them at the term's index (see NormId::Term) */
+        const size_type off_x = (size_type)norm(mu, 2, NormId::Term) * k * k;
+        const size_type off_y = (size_type)norm(mu, 1, NormId::Term) * k * k;
+        const size_type off_z = (size_type)norm(mu, 0, NormId::Term) * k * k;
         #pragma unroll
         for (int j = 0; j < CJ; ++j) {
           if (csrc[j] != nullptr) {
+            const size_type off = (cmat[j] == 0) ? off_x : (cmat[j] == 1) ? off_y : off_z;
             const unsigned dst = static_cast<unsigned>(__cvta_generic_to_shared(&tbuf[tid + j * block_size()]));
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" :: "r"(dst), "l"(csrc[j] + mu * k * k) : "memory");
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" :: "r"(dst), "l"(csrc[j] + off) : "memory");
           }
         }
         asm volatile("cp.async.commit_group;" ::: "memory");
@@ -507,6 +514,11 @@ namespace mra {
         return mu;
       }
 
+      /* the offset of term mu's k x k matrix in trans[d] (see NormId::Term) */
+      DEVSCOPE size_type offset(int mu, int d, int k) const {
+        return (size_type)norm(mu, d, NormId::Term) * k * k;
+      }
+
       /* the factor of term mu (sign-flipped for S) */
       DEVSCOPE T mufac(int mu) const {
         T mufac = norm(mu, 0, NormId::Fac);
@@ -559,7 +571,7 @@ namespace mra {
      * conflicts.
      */
     template<typename T, Dimension NDIM, NormId Term,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewResult>
@@ -696,12 +708,10 @@ namespace mra {
         plan_x  |= plan_entry(i, true) << (8 * p);
         plan_yz |= plan_entry(i, false) << (8 * p);
       }
-      const size_type trans_rank = trans[0].dim(1);
       auto prefetch = [&](int mu, T* tbuf) {
-        const size_type offset = (opid * trans_rank + mu) * k * k;
         #pragma unroll
         for (int m = 0; m < 3; ++m) {  // 0: Tx, 1: Ty, 2: Tz
-          const T* src = trans[2 - m].data() + offset;
+          const T* src = trans[2 - m].data() + terms.offset(mu, 2 - m, k);
           const uint32_t plan = (m == 0) ? plan_x : plan_yz;
           #pragma unroll
           for (int p = 0; p < PJ; ++p) {
@@ -885,7 +895,7 @@ namespace mra {
      * registers while the current term is computed.
      */
     template<typename T, Dimension NDIM, NormId Term,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewResult>
@@ -955,11 +965,10 @@ namespace mra {
 
       /* this lane's A-fragment elements of term mu: a[m][j] = T[c(t,j)][g] of
        * Tx, Ty, Tz (m = 0, 1, 2), zero for padding */
-      const size_type trans_rank = trans[0].dim(1);
       auto load_frags = [&](int mu, T (&a)[3][2]) {
-        const size_type offset = (opid * trans_rank + mu) * k * k + 2 * t * k + g;
         #pragma unroll
         for (int m = 0; m < 3; ++m) {
+          const size_type offset = terms.offset(mu, 2 - m, k) + 2 * t * k + g;
           #pragma unroll
           for (int j = 0; j < 2; ++j) {
             a[m][j] = valid ? trans[2 - m].data()[offset + j * k] : 0.0;
@@ -1063,7 +1072,7 @@ namespace mra {
      * apply_term_needs.
      */
     template<typename T, Dimension NDIM, NormId Term,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewResult>
@@ -1113,8 +1122,8 @@ namespace mra {
      * configured at compile time. Returns false if it does not apply.
      */
     template<typename T, Dimension NDIM,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewF0,

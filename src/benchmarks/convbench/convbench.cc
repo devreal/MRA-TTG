@@ -273,8 +273,8 @@ namespace {
       co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
 
-      std::array<DenseTensorView<const T, 4>, NDIM> transr = {op_data->data[0]->R.current_view(), op_data->data[1]->R.current_view(), op_data->data[2]->R.current_view()};
-      std::array<DenseTensorView<const T, 4>, NDIM> transs = {op_data->data[0]->S.current_view(), op_data->data[1]->S.current_view(), op_data->data[2]->S.current_view()};
+      std::array<DenseTensorView<const T, 3>, NDIM> transr = op_data->transr();
+      std::array<DenseTensorView<const T, 3>, NDIM> transs = op_data->transs();
       auto opnorms_view = op_data->norms.current_view();
       auto out_view = out.coeffs().current_view();
       auto f_view = f_node.coeffs().current_view();

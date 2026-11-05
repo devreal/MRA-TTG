@@ -120,15 +120,14 @@ namespace mra{
 
 
     template <typename T, Dimension NDIM,
-              concepts::TensorViewArray<4, (size_t)NDIM> ViewTrans,
+              concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
               concepts::TensorView<NDIM> ViewF,
               concepts::TensorView<NDIM> ViewResult,
               concepts::TensorView<NDIM> ViewWork1,
               concepts::TensorView<NDIM> ViewWork2>
     DEVSCOPE void conv_transform(
-      int opid,
+      const std::array<size_type, NDIM>& terms, // index of the term's matrix in each trans[d]
       const size_type dimk,
-      const size_type mu,
       const T mufac,
       const ViewTrans& trans,
       const ViewF& f,
@@ -149,15 +148,15 @@ namespace mra{
       T* work2ptr = work2.data();
 
       //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size
-      //          << " norm f " << normf(f) << " trans " << 0 << normf(trans[0](opid, mu)) << std::endl;
-      mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0](opid, mu).data());
+      //          << " norm f " << normf(f) << " trans " << 0 << normf(trans[0](terms[0])) << std::endl;
+      mTxmq(dimi, rank, dimk, work1ptr, f.data(), trans[0](terms[0]).data());
 
       size = rank * size / dimk;
       dimi = size / dimk;
 
       for (size_type d = 1; d < NDIM; ++d) {
         //std::cout << "CONV_TRANSFORM: dimk " << dimk << " rank " << rank << " size " << size  << " trans " << d << " norm " << norm(trans[d]) << std::endl;
-        mTxmq(dimi, rank, dimk, work2ptr, work1ptr, trans[d](opid, mu).data());
+        mTxmq(dimi, rank, dimk, work2ptr, work1ptr, trans[d](terms[d]).data());
         size = rank * size / dimk;
         dimi = size / dimk;
         std::swap(work1ptr, work2ptr);
@@ -177,8 +176,8 @@ namespace mra{
      * EDG front-end assertion ("check_name_hiding_by_template_parameters").
      */
     template<typename T, Dimension NDIM,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewF0,
@@ -207,18 +206,22 @@ namespace mra{
       ViewWork1k& work1_k,
       ViewWork2k& work2_k)
     {
+      // the matrices of this term in the R/S views of each dimension
+      std::array<size_type, NDIM> terms;
+      for (Dimension d=0; d<NDIM; ++d) terms[d] = (size_type)opnorms(opid, mu, d, (size_type)NormId::Term);
+
       // R term
       double Rnorm = 1.0;
       for (Dimension d=0; d<NDIM; ++d) Rnorm *= opnorms(opid, mu, d, (size_type)NormId::Rnorm);
       if (at[0] && Rnorm > 1.e-20) {
-        conv_transform<T, NDIM>(opid, 2*K, mu, mufac, transr, f, result, work1, work2);
+        conv_transform<T, NDIM>(terms, 2*K, mufac, transr, f, result, work1, work2);
       }
 
       // S term
       double Snorm = 1.0;
       for (Dimension d=0; d<NDIM; ++d) Snorm *= opnorms(opid, mu, d, (size_type)NormId::Snorm);
       if (at[1] && Snorm > 0.0) {
-        conv_transform<T, NDIM>(opid, K, mu, -mufac, transs, f0, resultc, work1_k, work2_k);
+        conv_transform<T, NDIM>(terms, K, -mufac, transs, f0, resultc, work1_k, work2_k);
       }
     }
 
@@ -249,8 +252,8 @@ namespace mra{
     }
 
     template<typename T, Dimension NDIM,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-             concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+             concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
              concepts::TensorView<NDIM> ViewF0,
@@ -353,8 +356,8 @@ namespace mra{
 
     /** See the comment on muopxv_fast above. */
     template <typename T, Dimension NDIM,
-              concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-              concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+              concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+              concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
               concepts::TensorView<4> ViewOpnorms,
               concepts::TensorView<NDIM> ViewIn,
               concepts::TensorView<NDIM> ViewF,
@@ -602,8 +605,8 @@ namespace mra{
               concepts::TensorView<NDIM+1> ViewF,
               concepts::TensorView<NDIM+1> ViewResult,
               concepts::TensorView<1> ViewResnorms,
-              concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-              concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+              concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+              concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
               concepts::TensorView<4> ViewOpnorms,
               typename KT>
     LAUNCH_BOUNDS(conv_launch_threads<KT>())
@@ -664,8 +667,8 @@ namespace mra{
             concepts::TensorView<NDIM+1> ViewF,
             concepts::TensorView<NDIM+1> ViewResult,
             concepts::TensorView<1> ViewResnorms,
-            concepts::TensorViewArray<4, (size_t)NDIM> ViewTransr,
-            concepts::TensorViewArray<4, (size_t)NDIM> ViewTranss,
+            concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
+            concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
             concepts::TensorView<4> ViewOpnorms>
   void submit_convolution_kernel(
     Key<NDIM> key,
@@ -758,8 +761,8 @@ namespace mra{
       // ensure_scratch / submit_convolution_kernel_batched), indexed by
       // blockIdx.x rather than this member's own local position.
       size_type,                               // n: number of blocks (functions) this member contributes
-      std::array<DenseTensorView<const T, 4>, NDIM>, // transr (this member's own operator data)
-      std::array<DenseTensorView<const T, 4>, NDIM>, // transs
+      std::array<DenseTensorView<const T, 3>, NDIM>, // transr (this member's own operator data)
+      std::array<DenseTensorView<const T, 3>, NDIM>, // transs
       DenseTensorView<T, 4>,                   // opnorms
       T,                                       // tol: this member's own truncate_tol(...)
       std::array<bool, 2>                      // at: this member's own apply-terms flags
@@ -1125,8 +1128,8 @@ namespace mra{
     const SparseTensorView<double, 3+1>& contribution,
     SparseTensorView<double, 3+1>& result,
     SparseTensorView<double, 1>& resnorms,
-    const std::array<SparseTensorView<double, 4>, 3>& transr,
-    const std::array<SparseTensorView<double, 4>, 3>& transs,
+    const std::array<SparseTensorView<double, 3>, 3>& transr,
+    const std::array<SparseTensorView<double, 3>, 3>& transs,
     const DenseTensorView<double, 4>& opnorms,
     const std::array<bool, 2>& at,
     double* tmp,
