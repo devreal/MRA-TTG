@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdint>
+#include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -22,6 +25,26 @@
 
 namespace mra::vmra {
 
+namespace detail {
+  /**
+   * Which children of a node are interior, per function: bit c of mask[fnid] is set if
+   * child c (Key::childindex) is interior for function fnid. Held by the owner of the node.
+   */
+  struct ChildInterior {
+    std::vector<std::uint32_t> mask;
+
+    void set(std::size_t N, int child, const std::vector<std::uint8_t>& interior) {
+      mask.resize(N, 0);
+      for (std::size_t fnid = 0; fnid < N; ++fnid) {
+        if (interior[fnid]) mask[fnid] |= std::uint32_t(1) << child;
+      }
+    }
+
+    template <typename Archive>
+    void serialize(Archive& ar) { ar & mask; }
+  };
+} // namespace detail
+
 /**
  * Load a vector of MADNESS functions, aggregating nodes with the same key into a single
  * FunctionNode (Reconstructed or Compressed) and sending each node on the output edge.
@@ -29,13 +52,18 @@ namespace mra::vmra {
  * NodeT must be FunctionsReconstructedNode<T,NDIM> or FunctionsCompressedNode<T,NDIM>.
  * All functions must share the same process map (same owner per key) and the same K.
  *
- * Two TTG tasks are created:
- *  - dispatch: triggered by `control`, enumerates all locally owned MADNESS nodes across
- *              all functions and sends their keys to the load task.
- *  - load:     for each key, builds the aggregated NodeT from the local MADNESS data.
+ * Three TTG tasks are created:
+ *  - dispatch:  triggered by `control` (once per batch, as by make_start), starts one
+ *               enumerate task on every process.
+ *  - enumerate: enumerates all locally owned MADNESS nodes across all functions and
+ *               sends their keys to the load task.
+ *  - load:      for each key, builds the aggregated NodeT from the local MADNESS data.
  *
- * For distributed operation the caller must trigger `control` once per MPI rank so that
- * each rank enumerates its own local MADNESS nodes.
+ * Compressed nodes mark which of their children are leafs. Children may live on another
+ * process, so before the graph executes every process tells the owners of the parents of
+ * its nodes which are interior (a MADNESS fence: collective, outside of graph execution).
+ * The load task then reads only local data: blocking on a remote MADNESS lookup inside a
+ * TTG task would execute other tasks nested in it.
  */
 template<typename T, Dimension NDIM, typename NodeT>
 auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& vmra,
@@ -61,6 +89,7 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
     }
   }
 
+  ttg::Edge<int, void> dispatch_to_enumerate("dispatch_to_enumerate");
   ttg::Edge<mra::Key<NDIM>, void> dispatch_to_load("dispatch_to_load");
 
   /* All functions are assumed to share the same process map; use the first impl as keymap. */
@@ -69,11 +98,51 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
     return impl->get_coeffs().owner(key.to_madness_key());
   };
 
-  /* Dispatch task: iterate all locally owned MADNESS nodes across all functions and
-   * forward each unique MRA key to the load task. */
+  /* For compressed nodes: which children of each node are interior, held by the node's owner */
+  using ChildMap = madness::WorldContainer<madness::Key<NDIM>, detail::ChildInterior>;
+  std::shared_ptr<ChildMap> child_interior;
+  if constexpr (std::is_same_v<NodeT, FunctionsCompressedNode<T, NDIM>>) {
+    const size_type N = vmra.size();
+    const size_type K = impl->get_k();
+    madness::World& world = vmra.front().world();
+    child_interior = std::make_shared<ChildMap>(world, impl->get_pmap());
+    /* as in the load task: interior if it has children or holds wavelet coefficients */
+    std::map<madness::Key<NDIM>, std::vector<std::uint8_t>> local;
+    for (size_type fnid = 0; fnid < N; ++fnid) {
+      const auto& coeffs = vmra[fnid].get_impl()->get_coeffs();
+      for (auto it = coeffs.begin(); it != coeffs.end(); ++it) {
+        const auto& mad_node = it->second;
+        const bool interior = mad_node.has_children() ||
+                              (mad_node.has_coeff() && mad_node.coeff().dim(0) == long(2*K));
+        if (it->first.level() == 0 || !interior) continue;
+        auto& flags = local[it->first];
+        flags.resize(N, 0);
+        flags[fnid] = 1;
+      }
+    }
+    for (const auto& [mad_key, flags] : local) {
+      std::array<Translation, NDIM> l;
+      for (Dimension d = 0; d < NDIM; ++d) l[d] = mad_key.translation()[d];
+      const int child = mra::Key<NDIM>(0, static_cast<Level>(mad_key.level()), l).childindex();
+      child_interior->send(mad_key.parent(), &detail::ChildInterior::set, std::size_t(N), child, flags);
+    }
+    world.gop.fence();
+  }
+
+  /* Dispatch task: every process enumerates its own MADNESS nodes, one enumerate task
+   * per (batch, process). */
   auto dispatch_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
-    [&vmra, ignore_leaf](const mra::Key<NDIM>& key) {
-      const Batch batch = key.batch();
+    [](const mra::Key<NDIM>& key) {
+      const int nproc = ttg::default_execution_context().size();
+      for (int p = 0; p < nproc; ++p) ttg::sendk<0>(int(key.batch()*nproc + p));
+    }, ttg::edges(control), ttg::edges(dispatch_to_enumerate),
+    name + "-dispatch", {"control"}, {"enumerate"});
+
+  /* Enumerate task: iterate all locally owned MADNESS nodes across all functions and
+   * forward each unique MRA key to the load task. */
+  auto enumerate_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
+    [&vmra, ignore_leaf](const int& id) {
+      const Batch batch = id / ttg::default_execution_context().size();
       std::set<mra::Key<NDIM>> key_set;
       for (const auto& fn : vmra) {
         const auto& coeffs = fn.get_impl()->get_coeffs();
@@ -86,12 +155,15 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
       for (const auto& k : key_set) {
         ttg::sendk<0>(k);
       }
-    }, ttg::edges(control), ttg::edges(dispatch_to_load),
-    name + "-dispatch", {"control"}, {"dispatch"});
+    }, ttg::edges(dispatch_to_enumerate), ttg::edges(dispatch_to_load),
+    name + "-enumerate", {"enumerate"}, {"dispatch"});
+  enumerate_tt->set_keymap([](const int& id) {
+    return id % ttg::default_execution_context().size();
+  });
 
   /* Load task: for a given key, aggregate coefficients from all functions into one NodeT. */
   auto do_load_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(
-    [&vmra](const mra::Key<NDIM>& key) {
+    [&vmra, child_interior](const mra::Key<NDIM>& key) {
       const Batch batch = key.batch();
       const size_type N = vmra.size();
       const size_type K = vmra.front().get_impl()->get_k();
@@ -111,12 +183,12 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
         auto has_wavelets = [K](const auto& mad_node) {
           return mad_node.has_coeff() && mad_node.coeff().dim(0) == long(2*K);
         };
-        auto is_interior = [&](const auto& coeffs, const madness::Key<NDIM>& k) {
-          auto acc = coeffs.find(k);
-          if (acc.get() == coeffs.end()) return false;
-          const auto& mad_node = acc.get()->second;
-          return mad_node.has_children() || has_wavelets(mad_node);
-        };
+        /* which children are interior, from the pass before execution (local to this node) */
+        std::vector<std::uint32_t> child_mask(N, 0);
+        {
+          auto acc = child_interior->find(mad_key);
+          if (acc.get() != child_interior->end()) child_mask = acc.get()->second.mask;
+        }
 
         std::vector<bool> interior(N, false);
         SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
@@ -146,7 +218,7 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
             }
             /* MRA encodes leaf information in the *parent* node via set_child_leaf. */
             for (auto child : children(key)) {
-              result.set_child_leaf(fnid, child, !is_interior(coeffs, child.to_madness_key()));
+              result.set_child_leaf(fnid, child, !(child_mask[fnid] & (std::uint32_t(1) << child.childindex())));
             }
           }
         }
@@ -199,9 +271,10 @@ auto make_vmra_load(const std::vector<madness::Function<T, (std::size_t)NDIM>>& 
 
   auto ins = std::make_tuple(dispatch_tt->template in<0>());
   auto outs = std::make_tuple(do_load_tt->template out<0>());
-  std::vector<std::unique_ptr<ttg::TTBase>> ops(2);
+  std::vector<std::unique_ptr<ttg::TTBase>> ops(3);
   ops[0] = std::move(dispatch_tt);
-  ops[1] = std::move(do_load_tt);
+  ops[1] = std::move(enumerate_tt);
+  ops[2] = std::move(do_load_tt);
 
   return make_ttg(std::move(ops), ins, outs, name);
 }
