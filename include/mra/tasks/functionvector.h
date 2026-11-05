@@ -25,7 +25,10 @@ namespace mra {
    *
    * Every process holds the nodes that were stored on it, i.e., whatever the
    * keymap of the store task assigned to it. Feeding sends each process's nodes
-   * from that process.
+   * from that process. Pass the store and the feed the process and device maps of
+   * the tasks producing and consuming the nodes. A feed with a different process
+   * map than the store moves each node to its new process, where the next store
+   * keeps it: redistributing a vector takes a feed and a store.
    *
    * Only compressed (not non-standard) trees are supported.
    *
@@ -122,7 +125,9 @@ namespace mra {
      * The task is a deferred writer: it takes the nodes over once all other
      * consumers of `in` are done with them, without copying.
      */
-    auto make_store(ttg::Edge<key_type, node_type>& in, size_type N, const std::string& name = "store") {
+    template <typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
+    auto make_store(ttg::Edge<key_type, node_type>& in, size_type N, const std::string& name = "store",
+                    ProcMap procmap = {}, DeviceMap devicemap = {}) {
       if (!empty()) {
         throw std::runtime_error(name + ": FunctionVector must be empty before storing into it");
       }
@@ -137,6 +142,8 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(in), ttg::edges(), name, {"input"}, {});
       tt->set_defer_writer(true);
+      if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
+      if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
       return tt;
     }
 
@@ -146,10 +153,13 @@ namespace mra {
      * the vector now, while the graph is built. With `keep`, they are put back
      * after all consumers of `out` are done with them, so the vector is unchanged.
      */
+    template <typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
     auto make_feed(ttg::Edge<key_type, void>& control,
                    ttg::Edge<key_type, node_type>& out,
                    bool keep,
-                   const std::string& name = "feed") {
+                   const std::string& name = "feed",
+                   ProcMap procmap = {},
+                   DeviceMap devicemap = {}) {
       /* the nodes this process sends, taken out of the vector now */
       struct Source {
         map_type nodes;
@@ -188,8 +198,8 @@ namespace mra {
        * share with read-only consumers without copying it. Moving it on from the
        * task that took it over marks it read-only, after which TTG shares it among
        * all consumers of `out` (and defers a single consumer that takes it over).
-       * Same (default) keymap as the store, so the node stays on its process. A
-       * device task, as the store, so that the node is not pushed out to the host. */
+       * With the keymap of the store the node stays on its process. A device task,
+       * as the store, so that the node is not pushed out to the host. */
       auto forward_tt = ttg::make_tt<Space>([](const key_type& key, node_type&& node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::send<0>(key, std::move(node));
@@ -197,6 +207,8 @@ namespace mra {
         ttg::send<0>(key, std::move(node));
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(forward_e), ttg::edges(out), name + "-forward", {"input"}, {"output"});
+      if constexpr (!std::is_same_v<ProcMap, ttg::Void>) forward_tt->set_keymap(procmap);
+      if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) forward_tt->set_devicemap(devicemap);
 
       auto ins = std::make_tuple(dispatch_tt->template in<0>());
       auto outs = std::make_tuple(forward_tt->template out<0>());
@@ -214,6 +226,8 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
         }, ttg::edges(out), ttg::edges(), name + "-restore", {"input"}, {});
         restore_tt->set_defer_writer(true);
+        if constexpr (!std::is_same_v<ProcMap, ttg::Void>) restore_tt->set_keymap(procmap);
+        if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) restore_tt->set_devicemap(devicemap);
         ops.push_back(std::move(restore_tt));
       }
       return make_ttg(std::move(ops), ins, outs, name);
