@@ -209,6 +209,61 @@ namespace mra {
 #endif // HAVE_DEVICE_ARCH
     }
 
+    /**
+     * find_nth_allocated_warp that also counts, in the same pass, the
+     * allocated entries of a and b before the index it finds, so
+     * a.offset_of(index) == a_before * a.entry_size(). a and b have N
+     * entries; one without storage counts 0. Same calling convention as
+     * find_nth_pred_warp.
+     */
+    template<typename ViewT, typename AViewT, typename BViewT>
+    SCOPE size_type find_nth_allocated_warp(size_type N, size_type pos, const ViewT& view,
+                                            const AViewT& a, size_type& a_before,
+                                            const BViewT& b, size_type& b_before) {
+      const bool a_ok = a.storage() != nullptr;
+      const bool b_ok = b.storage() != nullptr;
+#if defined(HAVE_DEVICE_ARCH)
+      const ScanWarp sw;
+      size_type count = 0, ca = 0, cb = 0;
+      for (size_type base = 0; base < N; base += sw.nlanes) {
+        const size_type i = base + sw.lane;
+        const bool in = i < N;
+        const auto bits = sw.ballot(in && view.is_allocated(i));
+        const auto abits = sw.ballot(in && a_ok && a.is_allocated(i));
+        const auto bbits = sw.ballot(in && b_ok && b.is_allocated(i));
+        const size_type c = ScanWarp::popc(bits);
+        if (pos < count + c) {
+          const size_type lane = ScanWarp::nth_set_bit(bits, pos - count);
+          const auto below = (decltype(bits)(1) << lane) - 1;
+          a_before = ca + ScanWarp::popc(abits & below);
+          b_before = cb + ScanWarp::popc(bbits & below);
+          return base + lane;
+        }
+        count += c;
+        ca += ScanWarp::popc(abits);
+        cb += ScanWarp::popc(bbits);
+      }
+      assert(false && "find_nth_allocated_warp: pos out of range for the number of allocated entries in view");
+      return N;
+#else  // HAVE_DEVICE_ARCH
+      const size_type idx = find_nth_allocated(N, pos, view);
+      a_before = b_before = 0;
+      for (size_type j = 0; j < idx; ++j) {
+        a_before += a_ok && a.is_allocated(j);
+        b_before += b_ok && b.is_allocated(j);
+      }
+      return idx;
+#endif // HAVE_DEVICE_ARCH
+    }
+
+    /** The same with one counted view. */
+    template<typename ViewT, typename AViewT>
+    SCOPE size_type find_nth_allocated_warp(size_type N, size_type pos, const ViewT& view,
+                                            const AViewT& a, size_type& a_before) {
+      size_type unused;
+      return find_nth_allocated_warp(N, pos, view, a, a_before, a, unused);
+    }
+
     /** Warp-cooperative find_nth_nonzero, see find_nth_pred_warp. */
     template<typename ViewT>
     SCOPE size_type find_nth_nonzero_warp(size_type N, size_type pos, const ViewT& view) {
@@ -675,18 +730,23 @@ namespace mra {
      */
     SCOPE std::size_t offset_of(std::size_t i) const {
       std::size_t offset = 0;
-      /* count the size of each non-zero tensor in the 1:NDIM-1 dimensions */
-      std::size_t data_size = static_cast<const Derived*>(this)->dim(1);
-      auto dims = static_cast<const Derived*>(this)->dims();
-      for (std::size_t i = 2; i < static_cast<const Derived*>(this)->ndim(); ++i) {
-        data_size *= dims[i];
-      }
+      const std::size_t data_size = entry_size();
       for (std::size_t j = 0; j < i; ++j) {
         if (is_allocated(j)) {
           offset += data_size;
         }
       }
       return offset;
+    }
+
+    /** The size of one entry: the product of dimensions 1..NDIM-1. */
+    SCOPE std::size_t entry_size() const {
+      std::size_t data_size = static_cast<const Derived*>(this)->dim(1);
+      auto dims = static_cast<const Derived*>(this)->dims();
+      for (std::size_t i = 2; i < static_cast<const Derived*>(this)->ndim(); ++i) {
+        data_size *= dims[i];
+      }
+      return data_size;
     }
 
 

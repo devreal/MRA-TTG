@@ -251,7 +251,7 @@ namespace mra{
       work2_k = Work2KT(work2.data(), detail::broadcast_dims<typename Work2KT::dims_type>(K, std::make_index_sequence<NDIM>{}));
     }
 
-    template<typename T, Dimension NDIM,
+    template<typename T, Dimension NDIM, bool SDone = false,
              concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
              concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
              concepts::TensorView<4> ViewOpnorms,
@@ -289,11 +289,20 @@ namespace mra{
 
       T optol = 0.01*tol/rank; // can potentially be a parameter
 
-      f0 = f(s0);
+      if constexpr (!SDone) {
+        f0 = f(s0);
+      }
 
       // TODO: do we care about modified() operators?
-      auto accel_done = mra::accel::apply_conv<T, NDIM>(opid, K, optol, transr, transs, opnorms, at, f, f0,
-                                 resultc, result);
+      // SDone: resultc already holds the S term; only mma::apply_conv takes SDone
+      bool accel_done;
+      if constexpr (SDone) {
+        accel_done = mra::accel::apply_conv<T, NDIM, true>(opid, K, optol, transr, transs, opnorms, at, f, f0,
+                                   resultc, result);
+      } else {
+        accel_done = mra::accel::apply_conv<T, NDIM>(opid, K, optol, transr, transs, opnorms, at, f, f0,
+                                   resultc, result);
+      }
       if (!accel_done) {
 
         result = 0.0;
@@ -355,7 +364,7 @@ namespace mra{
     }
 
     /** See the comment on muopxv_fast above. */
-    template <typename T, Dimension NDIM,
+    template <typename T, Dimension NDIM, bool SDone = false,
               concepts::TensorViewArray<3, (size_t)NDIM> ViewTransr,
               concepts::TensorViewArray<3, (size_t)NDIM> ViewTranss,
               concepts::TensorView<4> ViewOpnorms,
@@ -394,7 +403,7 @@ namespace mra{
       //std::cout << "MRA-APPLY key " << key << " disp " << displacement << " cnorm " << cnorm
       //          << " opnorm " << opnorm << " tol " << tol << std::endl;
       if ((cnorm * opnorm) > (tol / fac)) {
-        apply_conv<T, NDIM>(opid, K, (tol / fac / cnorm), transr, transs,
+        apply_conv<T, NDIM, SDone>(opid, K, (tol / fac / cnorm), transr, transs,
                    opnorms, at, f, f0, resultc,
                    result, work1, work2);
       } else {
@@ -421,12 +430,12 @@ namespace mra{
      * separate confirmed nvcc miscompile site) rather than passing K/TWOK
      * straight to the variadic-Dims constructor.
      */
-    template<typename T, Dimension NDIM, typename KT, typename TwoKT, typename InViewT, typename FViewT, typename ResultViewT,
+    template<typename T, Dimension NDIM, typename KT, typename TwoKT,
              typename F0T, typename ResultcT, typename Work1T, typename Work2T, typename StagedInT, typename FT, typename InT, typename ResultT>
     DEVSCOPE void convolution_process_one_leader(
-      const InViewT& in_view,
-      const FViewT& f_view,
-      ResultViewT& result_view,
+      const T* in_data,   // in_view(i).data() etc., see row_data
+      const T* f_data,
+      T* result_data,
       T* tmp,
       KT K,
       TwoKT TWOK,
@@ -442,7 +451,8 @@ namespace mra{
       InT& in,
       ResultT& result,
       size_type fnid,
-      size_type& i)
+      size_type& i,
+      T* resultc_ptr)
     {
       // fnid: the function id of position tmp_pos, see convolution_process_one
       i = fnid;
@@ -452,13 +462,24 @@ namespace mra{
       T* block_tmp_ptr = &tmp[tmp_slot*convolution_tmp_size<NDIM>(K)];
       // construct temporaries and pass them to conv_transform
       f0        = F0T(&block_tmp_ptr[                      0], detail::broadcast_dims<typename F0T::dims_type>(K, std::make_index_sequence<NDIM>{}));
-      resultc   = ResultcT(&block_tmp_ptr[                 K2NDIM], detail::broadcast_dims<typename ResultcT::dims_type>(K, std::make_index_sequence<NDIM>{}));
+      // resultc_ptr: the S term computed by another kernel (SDone), else in tmp
+      resultc   = ResultcT(resultc_ptr ? resultc_ptr : &block_tmp_ptr[K2NDIM], detail::broadcast_dims<typename ResultcT::dims_type>(K, std::make_index_sequence<NDIM>{}));
       work1     = Work1T(&block_tmp_ptr[              2*K2NDIM], detail::broadcast_dims<typename Work1T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
       work2     = Work2T(&block_tmp_ptr[  TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename Work2T::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
       staged_in = StagedInT(&block_tmp_ptr[2*TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename StagedInT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
-      in        = make_ct_tensorview_from(in_view(i), TWOK);
-      f         = make_ct_tensorview_from(f_view(i), TWOK);
-      result    = make_ct_tensorview_from(result_view(i), TWOK);
+      in        = InT(in_data, detail::broadcast_dims<typename InT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      f         = FT(f_data, detail::broadcast_dims<typename FT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      result    = ResultT(result_data, detail::broadcast_dims<typename ResultT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+    }
+
+    /**
+     * view(i).data() without view(i)'s scan, given the number of allocated
+     * entries before i (from find_nth_allocated_warp). Where view is zero at
+     * i it calls view(i), which needs no scan there.
+     */
+    template <typename ViewT>
+    DEVSCOPE auto row_data(ViewT& view, size_type i, size_type before) {
+      return view.is_zero(i) ? view(i).data() : &view.data()[before * view.entry_size()];
     }
 
     /**
@@ -474,7 +495,7 @@ namespace mra{
      * the computed norm turned out to be exactly zero -- no extra
      * synchronization needed, and no separate kernel launch either.
      */
-    template <typename T, Dimension NDIM, typename TransrT, typename TranssT, typename OpnormsViewT,
+    template <typename T, Dimension NDIM, bool SDone = false, typename TransrT, typename TranssT, typename OpnormsViewT,
               typename InViewT, typename FViewT, typename ResultViewT, typename ResnormsT>
     DEVSCOPE size_type convolution_process_one(
       Key<NDIM> key,
@@ -493,7 +514,8 @@ namespace mra{
       T* tmp,
       size_type N,
       size_type tmp_pos,
-      size_type tmp_slot)
+      size_type tmp_slot,
+      T* resultc_ptr = nullptr)  // with SDone: where resultc already is
     {
       auto TWOK = Int<2>{}*K;
       using dims_k_type = decltype(make_dims<NDIM>(K));
@@ -512,16 +534,25 @@ namespace mra{
       // Excluded (zero) functions' resnorms entries are pre-filled with
       // 0.0 host-side (see mra/tasks/convolution.h) since no block visits
       // them here.
+      // The first warp finds the function and its data in the three views
+      // in one pass.
       size_type fnid = N;
+      const T* in_data = nullptr;
+      const T* f_data = nullptr;
+      T* result_data = nullptr;
 #ifdef HAVE_DEVICE_ARCH
       if (thread_id() < MRA_WARP_SIZE)
 #endif
       {
-        fnid = find_nth_allocated_warp(N, tmp_pos, result_view);
+        size_type in_before, f_before;
+        fnid = find_nth_allocated_warp(N, tmp_pos, result_view, in_view, in_before, f_view, f_before);
+        in_data = row_data(in_view, fnid, in_before);
+        f_data = row_data(f_view, fnid, f_before);
+        result_data = row_data(result_view, fnid, tmp_pos);
       }
       if (is_team_lead()) {
-        convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos, tmp_slot,
-                                                f0, resultc, work1, work2, staged_in, f, in, result, fnid, i);
+        convolution_process_one_leader<T, NDIM>(in_data, f_data, result_data, tmp, K, TWOK, N, tmp_pos, tmp_slot,
+                                                f0, resultc, work1, work2, staged_in, f, in, result, fnid, i, resultc_ptr);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -548,7 +579,7 @@ namespace mra{
 
       int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0; // TODO: this is a bit hacky, can we do better?
 
-      convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
+      convolution_kernel_impl<T, NDIM, SDone>(key, opid, displacement, K, fac, tol,
                                        transr, transs, opnorms_view, at, staged_in, f, f0,
                                        resultc, result, work1, work2,
                                        resnorms.empty() ? nullptr : &resnorms[i]);
@@ -788,6 +819,49 @@ namespace mra{
     };
 
     /**
+     * The S term (k = K) of every non-zero position, one warp per position,
+     * into s_result[pos * K^3], for the Ks of apply_conv_splits_s.
+     * convolution_kernel_batched adds it to the R term afterwards (SDone).
+     * Skipped: f zero or gated out (s_result is not read), and at[1] false
+     * (the main kernel zeroes it).
+     */
+    template <typename T, Dimension NDIM, typename KT>
+    LAUNCH_BOUNDS(mra::accel::apply_conv_s_warps * 32)
+    GLOBALSCOPE void convolution_s_kernel_batched(
+      ConvolutionBatchArg<T, NDIM>* args,     // device ptr, size == num_members
+      const size_type* member_offsets,        // device ptr, size == num_members+1
+      size_type num_members,
+      size_type total_nonzero,
+      T* s_result,                            // total_nonzero x K^3
+      KT K,
+      const T fac)
+    {
+      using idx = ConvolutionBatchArgIdx;
+      constexpr int NW = mra::accel::apply_conv_s_warps;
+      static_assert(conv_launch_threads<KT>() == 256,
+                    "convolution_s_kernel_batched: the norm of f is replayed for 256 threads per block");
+      const int warp = thread_id() / 32;
+      const size_type nwarps = size_type(gridDim.x) * NW;
+      const size_type K2NDIM = mra::pow(K, Int<NDIM>{});
+      for (size_type pos = size_type(blockIdx.x) * NW + warp; pos < total_nonzero; pos += nwarps) {
+        size_type local_pos;
+        const size_type member = find_member_for_pos_warp(member_offsets, num_members, pos, &local_pos);
+        auto& arg = args[member];
+        if (!std::get<idx::at>(arg)[1]) continue;
+        const auto& f_view = std::get<idx::f_view>(arg);
+        size_type f_before;
+        const size_type i = find_nth_allocated_warp(std::get<idx::n>(arg), local_pos, std::get<idx::result_view>(arg),
+                                                    f_view, f_before);
+        if (f_view.is_zero(i)) continue;
+        const auto& opnorms = std::get<idx::opnorms>(arg);
+        const int opid = opnorms.dim(0) > 1 ? static_cast<int>(i) : 0;
+        T* resultc = &s_result[pos * K2NDIM];
+        mra::accel::apply_conv_s_warp<T, NDIM>(opid, K, fac, std::get<idx::tol>(arg), std::get<idx::transs>(arg),
+                                               opnorms, row_data(f_view, i, f_before), resultc);
+      }
+    }
+
+    /**
      * One combined launch covering every non-zero function position across
      * all members of the batch, flattened into a single 1D grid of size
      * total_nonzero -- no padding blocks for members with fewer functions
@@ -813,6 +887,7 @@ namespace mra{
       T* shared_tmp,                          // one shared, occupancy-sized scratch pool for
                                                // the whole launch -- indexed by blockIdx.x, not
                                                // per-member (see GroupedBatchPool::ensure_scratch)
+      T* s_result,                            // with SDone: the S terms (convolution_s_kernel_batched)
       KT K,
       const T fac)
     {
@@ -836,12 +911,14 @@ namespace mra{
         auto& result_view = std::get<idx::result_view>(arg);
         auto& resnorms_view = std::get<idx::resnorms_view>(arg);
 
-        size_type i = convolution_process_one<T, NDIM>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<idx::tol>(arg),
+        constexpr bool SDone = mra::accel::apply_conv_splits_s<KT>();
+        size_type i = convolution_process_one<T, NDIM, SDone>(Key<NDIM>{}, Key<NDIM>{}, K, fac, std::get<idx::tol>(arg),
                                          std::get<idx::transr>(arg), std::get<idx::transs>(arg),
                                          std::get<idx::opnorms>(arg), std::get<idx::at>(arg),
                                          std::get<idx::in_view>(arg), std::get<idx::f_view>(arg),
                                          result_view, resnorms_view,
-                                         shared_tmp, member_N, local_pos, blockIdx.x);
+                                         shared_tmp, member_N, local_pos, blockIdx.x,
+                                         SDone ? &s_result[pos * mra::pow(K, Int<NDIM>{})] : nullptr);
         // See convolution_kernel's comment: demote this member's result_view
         // state for i now that resnorms_view[i] is known -- same inline
         // check as the unbatched path, replacing the old, separately
@@ -964,11 +1041,34 @@ namespace mra{
     detail::with_ct_K(K, [&](auto ctK) {
       size_type grid_cap = detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, decltype(ctK)>, threads, smem_size);
       size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
-      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * convolution_tmp_size<NDIM>(K));
+      const std::size_t tmp_elems = static_cast<std::size_t>(grid_cap) * convolution_tmp_size<NDIM>(K);
+      T* shared_tmp = nullptr;
+      T* s_result = nullptr;
+      if constexpr (mra::accel::apply_conv_splits_s<decltype(ctK)>()) {
+        // The S terms go after the blocks' scratch, so this launch's size sets
+        // the region's size. grow() is safe: acquire() only hands out a slot
+        // whose launches have finished (see FixedDeviceRegion).
+        const std::size_t s_elems = static_cast<std::size_t>(total_nonzero) * mra::pow(K, Int<NDIM>{});
+        slot.dev_scratch.grow(pool.device_id, (tmp_elems + s_elems) * sizeof(T));
+        shared_tmp = reinterpret_cast<T*>(slot.dev_scratch.get());
+        s_result = shared_tmp + tmp_elems;
+        // the S term first, one warp per position (see convolution_s_kernel_batched)
+        constexpr int s_warps = mra::accel::apply_conv_s_warps;
+        constexpr int s_threads = s_warps * 32;
+        size_type grid_s = std::min<size_type>((total_nonzero + s_warps - 1) / s_warps,
+            detail::kernel_grid_cap(detail::convolution_s_kernel_batched<T, NDIM, decltype(ctK)>, s_threads, 0, 1));
+        // an empty grid is an invalid launch (as below)
+        if (grid_s > 0) {
+          CALL_KERNEL((detail::convolution_s_kernel_batched<T, NDIM>), grid_s, s_threads, 0, stream,
+                      (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, s_result, ctK, fac));
+        }
+      } else {
+        shared_tmp = pool.template ensure_scratch<T>(slot, tmp_elems);
+      }
       // an empty grid (no nonzero function in the batch) is an invalid launch
       if (grid_x > 0) {
         CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, ctK, fac));
+                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, s_result, ctK, fac));
       }
     });
     checkSubmit();
