@@ -266,7 +266,8 @@ int main(int argc, char **argv) {
 
   double coeff = std::pow(2.0*expnt/std::numbers::pi, 0.25*3);
   madness::World world(SafeMPI::COMM_WORLD);
-  auto mad_conv = std::make_shared<madness::SeparatedConvolution<double,3>>(madness::CoulombOperator(world, 1e-6 /*lo*/, precision));
+  // WorldObject's copy constructor aborts, so construct the operator in place (as convbench does)
+  auto mad_conv = std::shared_ptr<madness::SeparatedConvolution<double,3>>(madness::CoulombOperatorPtr(world, 1e-6 /*lo*/, precision));
 
 
   if (ttg::default_execution_context().rank() == 0) {
