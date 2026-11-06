@@ -707,8 +707,12 @@ namespace mra {
       size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
       T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * compress_tmp_size<NDIM>(K));
 
-      CALL_KERNEL((detail::compress_kernel_batched<T, NDIM, HgtT, KT>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, Kc, is_ns, hgT));
+      // a batch of empty nodes (no nonzero function) has nothing to compute, and a launch
+      // with an empty grid is invalid
+      if (grid_x > 0) {
+        CALL_KERNEL((detail::compress_kernel_batched<T, NDIM, HgtT, KT>), grid_x, thread_dims, smem_size, stream,
+                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, Kc, is_ns, hgT));
+      }
     });
     checkSubmit();
 
