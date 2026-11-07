@@ -286,36 +286,6 @@ namespace detail {
       ttg::Buffer<T, DeviceAllocator<T>> tmp_scratch;
       if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
 
-#ifdef MRA_CHECK_NORMS
-      // DEBUG: host-side breakdown of the exact same views the device-side
-      // verify kernel checks, keyed the same way (key + translation), so a
-      // device-side mismatch can be cross-referenced against the TRUE host
-      // bits for the same key -- tells us whether a residual discrepancy is
-      // a real host/device coherence gap (host bits differ from what the
-      // device reports for node/from_parent) or a remaining logic gap in
-      // this widened union (host bits agree with what SHOULD be there, but
-      // n_nonzero/the device scan still doesn't match).
-      {
-        static std::mutex dbg_mtx_host_breakdown;
-        std::lock_guard<std::mutex> lg(dbg_mtx_host_breakdown);
-        std::ostringstream oss;
-        oss << "RECONSTRUCT-HOST-BREAKDOWN key=(" << key.level() << ",["
-            << key.translation()[0] << "," << key.translation()[1] << "," << key.translation()[2]
-            << "]) n_nonzero=" << n_nonzero << " N=" << N << "\n";
-        for (size_type i = 0; i < N; ++i) {
-          oss << "  i=" << i
-              << " node=" << (int)node.sparsity().is_nonzero(i)
-              << " from_parent=" << (int)from_parent.sparsity().is_nonzero(i)
-              << " result=" << (int)result.sparsity().is_nonzero(i)
-              << " r_arr=[";
-          for (std::size_t c = 0; c < mra::Key<NDIM>::num_children(); ++c) {
-            oss << (int)r_arr[c].sparsity().is_nonzero(i) << (c+1<mra::Key<NDIM>::num_children() ? "," : "");
-          }
-          oss << "]\n";
-        }
-        std::cout << oss.str() << std::flush;
-      }
-#endif // MRA_CHECK_NORMS
 
       // compute norms
       auto norms = [&]<std::size_t... Is>(std::index_sequence<Is...>){

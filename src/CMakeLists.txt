@@ -14,6 +14,10 @@ target_compile_definitions(mra-base INTERFACE TTG_USE_PARSEC=1)
 if (MRA_ENABLE_EXPLICIT_INSTANTIATION)
   target_compile_definitions(mra-base INTERFACE MRA_ENABLE_EXPLICIT_INSTANTIATION=1)
 endif()
+if (MRA_ENABLE_DEBUG)
+  # the norm/sparsity checks live in headers: consumers must see the definition too
+  target_compile_definitions(mra-base INTERFACE MRA_CHECK_NORMS=1)
+endif()
 
 include(MRAGPUWrappers)
 
