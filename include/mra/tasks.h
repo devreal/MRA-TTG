@@ -24,6 +24,7 @@
 #include "mra/tasks/concat.h"
 #include "mra/tasks/multiply_compressed.h"
 #include "mra/tasks/gradient_compressed.h"
+#include "mra/tasks/replicate.h"
 
 
 #endif // HAVE_TASKS_H

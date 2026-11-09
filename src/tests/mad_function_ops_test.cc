@@ -944,6 +944,101 @@ static void test_batched_vmra(madness::World& world, mra::size_type K, vec_t& v,
   check_well_formed(world, out, what + "stored back");
 }
 
+/**
+ * Operations on functions in batches, against MADNESS: a single function applied to all of
+ * them (loaded in batch 0, replicated into every batch, make_replicate), and a transform that
+ * is block-diagonal in the batches (each batch transforms its own functions).
+ */
+static void test_batched_ops(madness::World& world, mra::size_type K, real_function_t& a, vec_t& v,
+                             const std::vector<mra::size_type>& sizes) {
+  const int nproc = world.size(), rank = world.rank();
+  const mra::size_type N = v.size();
+  const mra::Batch nb = mra::Batch(sizes.size());
+  std::string what = "batched ops, batches";
+  for (auto s : sizes) what += " " + std::to_string(s);
+  what += ": ";
+  const mra::BatchGroups groups(nb, nproc);
+  auto layout = std::make_shared<const mra::BatchLayout>(sizes, groups, rank);
+  auto fns = mra::make_functionset<mra::Gaussian<T, NDIM>>(std::const_pointer_cast<mra::BatchLayout>(layout));
+  /* the single function: one batch, and replicated, one in each batch */
+  auto one = std::make_shared<mra::BatchLayout>(mra::BatchLayout::even(1, 1, nproc, rank));
+  auto fns_one = mra::make_functionset<mra::Gaussian<T, NDIM>>(one);
+  auto fns_rep = mra::make_functionset<mra::Gaussian<T, NDIM>>(
+                   std::make_shared<mra::BatchLayout>(std::vector<mra::size_type>(nb, 1), groups, rank));
+  auto keymap = [groups](const mra::Key<NDIM>& key) {
+    const auto [first, last] = groups.batch_pes(key.batch());
+    const auto anc = key.level() <= 2 ? key : key.parent(key.level() - 2);
+    return first + int(anc.hash() % (last - first));
+  };
+  auto db = make_domain();
+  vec_t av = {a};
+  madness::reconstruct(world, av);
+  madness::reconstruct(world, v);
+
+  /* the functions in batches, and a in batch 0 */
+  auto load = [&](Graph& G, CompressedEdge& v_e, CompressedEdge& a_e) {
+    madness::reconstruct(world, av);   // the references leave them compressed
+    madness::reconstruct(world, v);
+    ReconstructedEdge v_r, a_r;
+    G.add(mra::vmra::make_vmra_load(v, G.control, v_r, "load_v", layout));
+    G.add(mra::make_compress(fns, K, false, G.functiondata, v_r, v_e, "compress_v", keymap));
+    G.add(mra::vmra::make_vmra_load(av, G.control, a_r, "load_a"));
+    G.add(mra::make_compress(fns_one, K, false, G.functiondata, a_r, a_e, "compress_a", keymap));
+  };
+
+  /* a * v_i, a replicated into every batch */
+  {
+    Graph G(K);
+    CompressedEdge v_e, a_e, a_rep, c_e;
+    ReconstructedEdge prod_e;
+    load(G, v_e, a_e);
+    G.add(mra::make_replicate<T, NDIM>(a_e, a_rep, nb, "replicate", keymap));
+    G.add(mra::make_multiply_compressed<T, NDIM>(db, fns_rep, fns, G.functiondata, K, a_rep, v_e, prod_e,
+                                                 "multiply", keymap));
+    G.add(mra::make_compress(fns, K, false, G.functiondata, prod_e, c_e, "compress", keymap));
+    vec_t result = empty_like(v.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, c_e, true /* add_leaves */, madness::TreeState::compressed, "store", layout));
+    G.execute();
+    vec_t ref = madness::mul(world, a, v);
+    check_close(what + "a * v_i, a replicated", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, what + "a * v_i, a replicated");
+  }
+
+  /* sum_i v_i U(i,j) with U block-diagonal in the batches */
+  {
+    madness::Tensor<double> U(N, N);
+    for (mra::Batch b = 0; b < nb; ++b) {
+      const auto o = layout->offset(b), n = layout->batch_size(b);
+      for (mra::size_type i = 0; i < n; ++i)
+        for (mra::size_type j = 0; j < n; ++j) U(o + i, o + j) = 0.3 + 0.1*double(i) - 0.25*double(j) + (i == j ? 1.0 : 0.0);
+    }
+    Graph G(K);
+    CompressedEdge v_e, a_e, t_e;
+    load(G, v_e, a_e);
+    G.add(mra::make_transform<T, NDIM>(fns, fns, K, device_matrix(U), v_e, t_e, "transform", keymap));
+    vec_t result = empty_like(v.front(), N);
+    G.add(mra::vmra::make_vmra_store(result, t_e, true /* add_leaves */, madness::TreeState::compressed, "store", layout));
+    G.execute();
+    vec_t ref = madness::transform(world, v, U);
+    check_close(what + "transform block-diagonal in the batches", max_diff_norm(world, ref, result), max_norm(world, ref));
+    check_well_formed(world, result, what + "transform block-diagonal in the batches");
+
+    /* a U that couples batches is refused */
+    if (nb > 1) {
+      madness::Tensor<double> V = copy(U);
+      V(0, N - 1) = 1.0;
+      bool refused = false;
+      try {
+        CompressedEdge v2_e, t2_e;
+        auto tt = mra::make_transform<T, NDIM>(fns, fns, K, device_matrix(V), v2_e, t2_e, "transform", keymap);
+      } catch (const std::runtime_error&) {
+        refused = true;
+      }
+      check(refused, what + "a transform that couples batches is refused", refused ? 0 : 1, 0);
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   auto opt = mra::OptionParser(argc, argv);
   mra::size_type K = opt.parse("-K", 8);
@@ -988,6 +1083,9 @@ int main(int argc, char** argv) {
     test_batched_vmra(world, K, f, {2, 1});
     test_batched_vmra(world, K, g, {1, 1, 1, 1});
     test_batched_vmra(world, K, g, {3, 1});
+    test_batched_ops(world, K, a, f, {2, 1});
+    test_batched_ops(world, K, a, g, {1, 1, 1, 1});
+    test_batched_ops(world, K, a, g, {3, 1});
 
     if (ttg::default_execution_context().rank() == 0) {
       std::cout << (failures == 0 ? "All tests passed" : std::to_string(failures) + " test(s) failed") << std::endl;

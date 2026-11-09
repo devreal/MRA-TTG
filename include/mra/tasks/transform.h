@@ -76,8 +76,44 @@ namespace mra {
       }
     }
 
-    /* U arrives at the root on U_in, or, if U_fixed is given, is sent there by the dispatch
-     * task; the propagate tasks pass it on to the children that receive input nodes */
+    /** the index in the set of the first function of a batch */
+    template <typename FunctionSet>
+    size_type batch_offset(const FunctionSet& fns, Batch b) {
+      size_type offset = 0;
+      for (Batch c = 0; c < b; ++c) offset += fns.batchman()->batch_size(c);
+      return offset;
+    }
+
+    /**
+     * The block of U, over all input and output functions, for the functions of batch b: its
+     * rows of b's input functions and columns of b's output functions. Each batch transforms
+     * its own functions, so U must not couple the functions of another batch into b's outputs.
+     */
+    template <typename T, typename FunctionSetIn, typename FunctionSetOut>
+    mra::DenseTensor<T, 2> batch_block(const mra::DenseTensor<T, 2>& U, const FunctionSetIn& fns_in,
+                                       const FunctionSetOut& fns_out, Batch b, const std::string& name) {
+      const size_type N = U.dim(0), M = U.dim(1);
+      const size_type i0 = batch_offset(fns_in, b), n = fns_in.batchman()->batch_size(b);
+      const size_type j0 = batch_offset(fns_out, b), m = fns_out.batchman()->batch_size(b);
+      const T* u = U.buffer().host_ptr();
+      for (size_type i = 0; i < N; ++i) {
+        if (i >= i0 && i < i0 + n) continue;
+        for (size_type j = j0; j < j0 + m; ++j) {
+          if (u[i*M + j] != T(0))
+            throw std::runtime_error(name + ": U couples the functions of another batch into this one");
+        }
+      }
+      mra::DenseTensor<T, 2> block(std::array<size_type, 2>{n, m});
+      T* blk = block.buffer().host_ptr();
+      for (size_type i = 0; i < n; ++i)
+        for (size_type j = 0; j < m; ++j) blk[i*m + j] = u[(i0 + i)*M + j0 + j];
+      return block;
+    }
+
+    /* U arrives at the root of each batch on U_in, sized for the batch, or, if U_fixed is given,
+     * is sent there by the dispatch task: with several batches U_fixed is over the functions of
+     * all and each root gets its batch's block (batch_block), the transform is block-diagonal in
+     * the batches. The propagate tasks pass U on to the children that receive input nodes. */
     template <typename T, Dimension NDIM, typename FunctionSetIn, typename FunctionSetOut,
               typename ProcMap, typename DeviceMap>
     auto make_transform_impl(const std::shared_ptr<FunctionSetIn>& fns_in,
@@ -118,7 +154,7 @@ namespace mra {
      * Forward the input nodes to the propagate and transform tasks and seed the root
      * with U, if it is fixed.
      */
-    auto dispatch_fn = [U_fixed](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
+    auto dispatch_fn = [U_fixed, fns_in, fns_out, name](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward(ttg::device::send<0>(key, node), ttg::device::send<1>(key, node));
 #else  // MRA_ENABLE_HOST
@@ -126,9 +162,7 @@ namespace mra {
       ttg::send<1>(key, node);
 #endif // MRA_ENABLE_HOST
       if (key.level() == 0 && U_fixed) {
-        matrix_type U(std::array<size_type, 2>{U_fixed->dim(0), U_fixed->dim(1)});
-        std::copy(U_fixed->buffer().host_ptr(), U_fixed->buffer().host_ptr() + U_fixed->dim(0) * U_fixed->dim(1),
-                  U.buffer().host_ptr());
+        matrix_type U = batch_block<T>(*U_fixed, *fns_in, *fns_out, key.batch(), name);
 #ifndef MRA_ENABLE_HOST
         sends.push_back(ttg::device::send<2>(key, std::move(U)));
 #else  // MRA_ENABLE_HOST
@@ -252,7 +286,8 @@ namespace mra {
     }
 #ifndef MRA_ENABLE_HOST
     if (enable_batching) {
-      transform_tt->set_batch_matcher([](const mra::Key<NDIM>&, const mra::Key<NDIM>&) { return true; },
+      /* the tasks of a batch of functions share U: its block when there are several */
+      transform_tt->set_batch_matcher([](const mra::Key<NDIM>& a, const mra::Key<NDIM>& b) { return a.batch() == b.batch(); },
                                       max_batch_size);
     }
 #endif // MRA_ENABLE_HOST
@@ -282,6 +317,13 @@ namespace mra {
   {
     if (U->dim(0) != fns_in->num_functions() || U->dim(1) != fns_out->num_functions()) {
       throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
+    }
+    if (fns_in->num_batches() != fns_out->num_batches()) {
+      throw std::runtime_error(name + ": the input and output must have the same number of batches");
+    }
+    /* each batch transforms its own functions: refuse a U that couples batches now, not in a task */
+    for (Batch b = 0; fns_in->num_batches() > 1 && b < Batch(fns_in->num_batches()); ++b) {
+      (void)detail::batch_block<T>(*U, *fns_in, *fns_out, b, name);
     }
     return detail::make_transform_impl<T, NDIM>(fns_in, fns_out, K, ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 2>>(),
                                                 U, in, out, name, procmap, devicemap);
