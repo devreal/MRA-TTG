@@ -222,9 +222,14 @@ static void test_transform(madness::World& world, mra::size_type K, vec_t& f, do
   for (long i = 0; i < N; ++i) Usparse(i, i) = 1.0;
   Usparse(0, N) = 0.5;
   Usparse(N - 1, N) = -0.5;
+  /* selecting the last function: the other rows are zero, and their trees must not be added to
+   * the output's (a function's tree would depend on the others in the set) */
+  madness::Tensor<double> Uselect(N, 1);
+  Uselect(N - 1, 0) = 1.0;
 
   for (const auto& [name, U] : {std::pair<std::string, madness::Tensor<double>>{"dense", Udense},
-                                std::pair<std::string, madness::Tensor<double>>{"sparse", Usparse}}) {
+                                std::pair<std::string, madness::Tensor<double>>{"sparse", Usparse},
+                                std::pair<std::string, madness::Tensor<double>>{"select", Uselect}}) {
     for (bool truncate : {false, true}) {
       const std::string what = "transform " + name + (truncate ? " + truncate" : "");
       const mra::size_type M = U.dim(1);
@@ -247,6 +252,10 @@ static void test_transform(madness::World& world, mra::size_type K, vec_t& f, do
       check_close(what, max_diff_norm(world, ref, result), max_norm(world, ref),
                   truncate ? 10*thresh : 1e-12);
       check_well_formed(world, result, what);
+      if (name == "select" && !truncate) {
+        const double nodes = double(result[0].tree_size()), ref_nodes = double(f[N - 1].tree_size());
+        check(nodes == ref_nodes, what + ": the tree of the selected function", nodes - ref_nodes, 0);
+      }
     }
   }
 }

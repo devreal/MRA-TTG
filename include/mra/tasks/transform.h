@@ -33,10 +33,13 @@ namespace mra {
    * The tree of out_j is the union of the trees of the in_i with U(i,j) != 0.
    * It is determined locally from the child information of the input node: a
    * function not present at a key has zero coefficients and only leaf children
-   * there, so it contributes nothing. An output node is sent at every key with
-   * an input node. For this to match the child information of the output, the
-   * tree of an input function that no output depends on (a zero row of U) is
-   * added to out_0, which only adds nodes with zero coefficients to out_0.
+   * there, so it contributes nothing. An output node is sent at every key where
+   * some output function continues. Below a key where only input functions that
+   * no output depends on (zero rows of U) continue, the input nodes are consumed
+   * without output: the propagate task sends an empty U down those subtrees.
+   * (Adding such trees to an output instead would make that output's tree, and
+   * the products and convolutions computed from it, depend on the other
+   * functions of the input set.)
    *
    * U is passed down the tree by a separate propagate task that does not touch
    * device data, so it runs ahead of the transform kernels and exposes more tasks
@@ -58,17 +61,9 @@ namespace mra {
     {
       has_child.assign(M, {});
       for (size_type i = 0; i < N; ++i) {
-        const bool zero_row = std::all_of(U + i*M, U + (i+1)*M, [](T u){ return u == T(0); });
         for (size_type j = 0; j < M; ++j) {
-          const bool contributes = U[i*M + j] != T(0);
-          const bool adds_tree = zero_row && j == 0;
-          if (!contributes && !adds_tree) continue;
-          /* A node of in_i is interior where it holds coefficients, also when its children
-           * are leafs, and the parent marked it as such. The tree of a zero row added to
-           * out_0 must therefore keep these nodes, with zero coefficients (the kernel only
-           * accumulates U(i,j) != 0): otherwise out_0 has a zero node with leaf children
-           * there, which is a leaf, while its parent says it has children. */
-          if ((contributes || adds_tree) && !in_node.is_zero(i)) sparsity.set_nonzero(j);
+          if (U[i*M + j] == T(0)) continue;
+          if (!in_node.is_zero(i)) sparsity.set_nonzero(j);
           for (int c = 0; c < mra::Key<NDIM>::num_children(); ++c) {
             has_child[j][c] = has_child[j][c] || !in_node.is_child_leaf(i, c);
           }
@@ -180,7 +175,9 @@ namespace mra {
 
     /**
      * Pass U to the transform task at this key and to the children that receive input
-     * nodes. Only host metadata is read, so this runs ahead of the kernels.
+     * nodes: U where some output function continues, an empty U (no output there or
+     * below) where only functions that no output depends on do. Only host metadata is
+     * read, so this runs ahead of the kernels.
      */
     auto propagate_fn = [fns_in, fns_out, name](const mra::Key<NDIM>& key,
                                                 const node_type& in_node,
@@ -188,7 +185,8 @@ namespace mra {
       if (in_node.is_ns()) {
         throw std::runtime_error(name + ": input must be compressed, not non-standard");
       }
-      if (U.dim(0) != fns_in->num_functions(key) || U.dim(1) != fns_out->num_functions(key)) {
+      const bool skip = (U.dim(0) == 0);
+      if (!skip && (U.dim(0) != fns_in->num_functions(key) || U.dim(1) != fns_out->num_functions(key))) {
         throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
       }
 
@@ -198,15 +196,35 @@ namespace mra {
       ttg::send<0>(key, U);
 #endif // MRA_ENABLE_HOST
 
-      std::vector<mra::Key<NDIM>> U_children;
+      /* the output functions that continue below each child */
+      std::array<bool, num_children> live{};
+      if (!skip) {
+        const size_type N = fns_in->num_functions(key), M = fns_out->num_functions(key);
+        SparsityInfo sparsity(M, SparsityInfo::InitType::AllZero);
+        std::vector<std::array<bool, num_children>> has_child;
+        detail::transform_structure<T, NDIM>(in_node, U.buffer().host_ptr(), N, M, has_child, sparsity);
+        for (size_type j = 0; j < M; ++j)
+          for (int c = 0; c < num_children; ++c) live[c] = live[c] || has_child[j][c];
+      }
+      std::vector<mra::Key<NDIM>> U_children, skip_children;
+      int c = 0;
       for (auto child : children(key)) {
-        if (!in_node.is_all_child_leaf(child)) U_children.push_back(child);
+        if (!in_node.is_all_child_leaf(child)) (live[c] ? U_children : skip_children).push_back(child);
+        ++c;
       }
       if (!U_children.empty()) {
 #ifndef MRA_ENABLE_HOST
         sends.push_back(ttg::device::broadcast<1>(std::move(U_children), U));
 #else  // MRA_ENABLE_HOST
         ttg::broadcast<1>(std::move(U_children), U);
+#endif // MRA_ENABLE_HOST
+      }
+      if (!skip_children.empty()) {
+        matrix_type none(std::array<size_type, 2>{0, 0});
+#ifndef MRA_ENABLE_HOST
+        sends.push_back(ttg::device::broadcast<1>(std::move(skip_children), std::move(none)));
+#else  // MRA_ENABLE_HOST
+        ttg::broadcast<1>(std::move(skip_children), std::move(none));
 #endif // MRA_ENABLE_HOST
       }
 #ifndef MRA_ENABLE_HOST
@@ -225,6 +243,13 @@ namespace mra {
                                                       const matrix_type& U) -> TASKTYPE {
       const size_type N = fns_in->num_functions(key);
       const size_type M = fns_out->num_functions(key);
+      if (U.dim(0) == 0) {   // no output function here or below (see propagate)
+#ifndef MRA_ENABLE_HOST
+        co_return;
+#else  // MRA_ENABLE_HOST
+        return;
+#endif // MRA_ENABLE_HOST
+      }
 
       /* output functions with a non-zero node here, and with children below here */
       SparsityInfo sparsity(M, SparsityInfo::InitType::AllZero);
