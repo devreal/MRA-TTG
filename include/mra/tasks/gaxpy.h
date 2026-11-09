@@ -22,6 +22,13 @@
 #include <ttg/serialization/std/array.h>
 
 namespace mra{
+  /**
+   * scalarA * in1 + scalarB * in2, node by node. A node is forwarded unchanged where one input
+   * is empty (with all children leafs) and the other's scalar is 1, or where a scalar is 0.
+   * With forward == false every result node is a new node instead: then an input node is never
+   * passed on, as a graph must not do with nodes a FunctionVector feeds with `keep` if they could
+   * reach a consumer that takes them over (a store, make_truncate).
+   */
   template<typename T, mra::Dimension NDIM, typename FunctionSetT,
            typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
   auto make_gaxpy(const T scalarA, const T scalarB,
@@ -32,7 +39,8 @@ namespace mra{
                   ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> out,
                   const char* name = "gaxpy",
                   ProcMap procmap = {},
-                  DeviceMap devicemap = {})
+                  DeviceMap devicemap = {},
+                  bool forward = true)
   {
     ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> S1, S2; // to balance trees
 
@@ -51,7 +59,7 @@ namespace mra{
     std::nullptr_t batch_pool = nullptr; // never used, only captured
 #endif // MRA_ENABLE_HOST
 
-    auto func = [fns, K, scalarA, scalarB, name, enable_batching, batch_pool, total_functions](
+    auto func = [fns, K, scalarA, scalarB, name, enable_batching, batch_pool, total_functions, forward](
               const mra::Key<NDIM>& key,
               const mra::FunctionsCompressedNode<T, NDIM>& t1,
               const mra::FunctionsCompressedNode<T, NDIM>& t2) -> TASKTYPE {
@@ -81,10 +89,10 @@ namespace mra{
         mra::apply_leaf_info(out, t1, t2);
         //std::cout << name << " " << key << " t1 empty, t2 empty, all leafs " << out.is_all_child_leaf() << std::endl;
         send_out(std::move(out));
-      } else if ((scalarA == 0.0 || (t1.empty() && scalarB == 1.0)) && t1.is_all_child_leaf()) {
+      } else if (forward && (scalarA == 0.0 || (t1.empty() && scalarB == 1.0)) && t1.is_all_child_leaf()) {
         // just send t2, t1 is empty and all children are leafs
         send_out(t2);
-      } else if ((scalarB == 0.0 || (t2.empty() && scalarA == 1.0)) && t2.is_all_child_leaf()) {
+      } else if (forward && (scalarB == 0.0 || (t2.empty() && scalarA == 1.0)) && t2.is_all_child_leaf()) {
         // just send t1, t2 is empty and all children are leafs
         send_out(t1);
       } else {
