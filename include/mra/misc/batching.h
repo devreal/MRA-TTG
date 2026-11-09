@@ -491,11 +491,16 @@ namespace mra {
    * first nproc % nbatch batches one more); with more batches than processes, contiguous runs of
    * batches share a process. The functions of a batch are then spread over its group only, and
    * operations local to the functions stay within it.
+   *
+   * Batches that share a process also share its devices: each has a slot (s, n), the s-th of the
+   * n batches on its process, and takes the s-th of n contiguous shares of the process's devices
+   * (batch_devices); a batch with a group of its own has the slot (0, 1), all devices.
    */
   class BatchGroups {
     Batch m_num_batches;
     int m_num_pes;
     std::vector<std::pair<int, int>> m_ranges;   // explicit groups, if not empty
+    std::vector<std::pair<int, int>> m_slots;    // their slots, if not empty (default: (0, 1))
 
   public:
     explicit BatchGroups(Batch num_batches = 1, int num_pes = ttg::default_execution_context().size())
@@ -507,15 +512,32 @@ namespace mra {
 
     /// batches on explicit groups: batch b on the processes ranges[b] = [first, last), e.g., the
     /// pairs of batches of two sets, each on the group of one of its batches
-    BatchGroups(std::vector<std::pair<int, int>> ranges, int num_pes)
+    BatchGroups(std::vector<std::pair<int, int>> ranges, int num_pes, std::vector<std::pair<int, int>> slots = {})
     : m_num_batches(Batch(ranges.size()))
     , m_num_pes(num_pes)
     , m_ranges(std::move(ranges))
+    , m_slots(std::move(slots))
     {
       if (m_ranges.empty() || num_pes < 1) throw std::invalid_argument("BatchGroups: need a batch and a process");
       for (const auto& [first, last] : m_ranges) {
         if (first < 0 || first >= last || last > num_pes) throw std::invalid_argument("BatchGroups: invalid group");
       }
+      if (!m_slots.empty() && m_slots.size() != m_ranges.size())
+        throw std::invalid_argument("BatchGroups: one slot per group");
+      for (const auto& [s, n] : m_slots) {
+        if (n < 1 || s < 0 || s >= n) throw std::invalid_argument("BatchGroups: invalid slot");
+      }
+    }
+
+    /// batches placed as the batches homes[i] of this one: on their groups, in their slots (e.g.,
+    /// the pairs of batches of two sets, each computed where one of its batches is)
+    BatchGroups placed_as(const std::vector<Batch>& homes) const {
+      std::vector<std::pair<int, int>> ranges, slots;
+      for (Batch h : homes) {
+        ranges.push_back(batch_pes(h));
+        slots.push_back(batch_slot(h));
+      }
+      return BatchGroups(std::move(ranges), m_num_pes, std::move(slots));
     }
 
     Batch num_batches() const { return m_num_batches; }
@@ -533,6 +555,30 @@ namespace mra {
       }
       const int pe = int((long(b) * m_num_pes) / m_num_batches);
       return {pe, pe + 1};
+    }
+
+    /// the slot (s, n) of batch b: the s-th of the n batches on its process ((0, 1) for a batch
+    /// with a group of its own)
+    std::pair<int, int> batch_slot(Batch b) const {
+      assert(b >= 0 && b < m_num_batches);
+      if (!m_ranges.empty()) return m_slots.empty() ? std::pair<int, int>{0, 1} : m_slots[b];
+      if (m_num_batches <= m_num_pes) return {0, 1};
+      /* the batches on process pe are [ceil(pe*nb/np), ceil((pe+1)*nb/np)) */
+      const long nb = m_num_batches, np = m_num_pes;
+      const long pe = (long(b) * np) / nb;
+      const long first = (pe * nb + np - 1) / np, last = ((pe + 1) * nb + np - 1) / np;
+      return {int(b - first), int(last - first)};
+    }
+
+    /// the devices [first, last) of batch b among the num_devices of each process of its group:
+    /// its slot's share of them, or, with more batches on the process than devices, one device
+    /// shared with others
+    std::pair<int, int> batch_devices(Batch b, int num_devices) const {
+      const auto [s, n] = batch_slot(b);
+      if (num_devices < 1) return {0, 1};
+      if (n <= num_devices) return {s * num_devices / n, (s + 1) * num_devices / n};
+      const int d = int((long(s) * num_devices) / n);
+      return {d, d + 1};
     }
 
     /// whether process pe belongs to the group of batch b
