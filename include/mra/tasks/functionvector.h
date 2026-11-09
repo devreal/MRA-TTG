@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <ttg.h>
+#include "mra/misc/batching.h"
 #include "mra/misc/key.h"
 #include "mra/misc/types.h"
 #include "mra/tensor/functionnode.h"
@@ -54,6 +55,7 @@ namespace mra {
   private:
     struct Impl {
       size_type size = 0;
+      std::shared_ptr<const BatchLayout> layout;   // of the stored functions, null if never stored
       map_type nodes;
       std::mutex mtx;
 
@@ -104,6 +106,9 @@ namespace mra {
     /// number of functions
     size_type size() const { return m_impl->size; }
 
+    /// the batches of the functions, as stored (null before the first store)
+    const std::shared_ptr<const BatchLayout>& layout() const { return m_impl->layout; }
+
     /// number of nodes held by this process
     size_type num_local_nodes() const { return m_impl->nodes.size(); }
 
@@ -121,17 +126,24 @@ namespace mra {
 
     /**
      * Store the nodes arriving on `in`. The vector must be empty (or have been
-     * fed without `keep` in the same graph) and takes the size `N`.
+     * fed without `keep` in the same graph) and takes the size `N` and the batches
+     * of `layout` (by default one batch of all functions).
      * The task is a deferred writer: it takes the nodes over once all other
      * consumers of `in` are done with them, without copying.
      */
     template <typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
     auto make_store(ttg::Edge<key_type, node_type>& in, size_type N, const std::string& name = "store",
-                    ProcMap procmap = {}, DeviceMap devicemap = {}) {
+                    ProcMap procmap = {}, DeviceMap devicemap = {},
+                    std::shared_ptr<const BatchLayout> layout = nullptr) {
       if (!empty()) {
         throw std::runtime_error(name + ": FunctionVector must be empty before storing into it");
       }
+      if (!layout) layout = std::make_shared<const BatchLayout>(BatchLayout::even(N, 1));
+      if (layout->num_functions() != N) {
+        throw std::runtime_error(name + ": the layout must have N functions");
+      }
       m_impl->size = N;
+      m_impl->layout = std::move(layout);
       Impl* impl = m_impl.get();
       /* a device task, though it does no device work: TTG pushes data that is on a
        * device out to the host when it is sent to a host task */

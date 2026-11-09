@@ -866,6 +866,84 @@ static void test_batched_function_vector(madness::World& world, mra::size_type K
   }
 }
 
+/**
+ * MADNESS functions loaded in batches (make_vmra_load with a layout), held by a FunctionVector
+ * on their batches' groups, reduced per batch (norms, <f_i|f_i>) and stored back in batches
+ * (make_vmra_store with the layout), against MADNESS.
+ */
+static void test_batched_vmra(madness::World& world, mra::size_type K, vec_t& v, const std::vector<mra::size_type>& sizes) {
+  const int nproc = world.size(), rank = world.rank();
+  const mra::size_type N = v.size();
+  std::string what = "batched vmra, batches";
+  for (auto s : sizes) what += " " + std::to_string(s);
+  what += ": ";
+  auto layout = std::make_shared<const mra::BatchLayout>(
+                  sizes, mra::BatchGroups(mra::Batch(sizes.size()), nproc), rank);
+  auto fns = mra::make_functionset<mra::Gaussian<T, NDIM>>(std::const_pointer_cast<mra::BatchLayout>(layout));
+  auto keymap = [layout](const mra::Key<NDIM>& key) {
+    const auto [first, last] = layout->batch_pes(key.batch());
+    const auto anc = key.level() <= 2 ? key : key.parent(key.level() - 2);
+    return first + int(anc.hash() % (last - first));
+  };
+  mra::FunctionData<T, NDIM> functiondata(K, mra::FunctionData<T, NDIM>::BC_FREE);
+
+  /* load (reconstructed, compressed in the graph) and store */
+  mra::FunctionVector<T, NDIM> fv;
+  {
+    madness::reconstruct(world, v);
+    Graph G(K);
+    ReconstructedEdge reconstructed;
+    CompressedEdge compressed;
+    G.add(mra::vmra::make_vmra_load(v, G.control, reconstructed, "load", layout));
+    G.add(mra::make_compress(fns, K, false, functiondata, reconstructed, compressed, "compress", keymap));
+    G.add(fv.make_store(compressed, N, "store", keymap, ttg::Void{}, layout));
+    G.execute();
+  }
+  long misplaced = 0;
+  fv.for_each_local_node([&](const auto& key, const auto&) { misplaced += !layout->groups().is_member(key.batch(), rank); });
+  world.gop.sum(misplaced);
+  check(misplaced == 0, what + "nodes on their batch's group", misplaced, 0);
+  check(fv.layout() == layout, what + "the vector keeps its layout", fv.layout() == layout ? 0 : 1, 0);
+
+  /* norms and <f_i|f_i> by batch, and the functions stored back */
+  std::vector<double> norms(N, 0.0), self(N, 0.0);
+  vec_t out = empty_like(v.front(), N);
+  {
+    Graph G(K);
+    std::mutex m;
+    CompressedEdge fed;
+    ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_e, inner_e;
+    G.add(fv.make_feed(G.control, fed, true, "feed", keymap));
+    G.add(mra::make_norm(fns, K, fed, norm_e, "norm", keymap));
+    G.add(mra::make_inner<T, NDIM>(fns, K, fed, fed, inner_e, "inner", keymap));
+    auto sink = [&](std::vector<double>& to) {
+      return [&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& r) {
+        std::lock_guard<std::mutex> lock(m);
+        for (mra::size_type l = 0; l < layout->batch_size(key.batch()); ++l)
+          to[layout->global_index(key.batch(), l)] = r.current_view().data()[l];
+      };
+    };
+    G.add(ttg::make_tt(sink(norms), ttg::edges(norm_e), ttg::edges(), "norm_sink"));
+    G.add(ttg::make_tt(sink(self), ttg::edges(inner_e), ttg::edges(), "inner_sink"));
+    G.add(mra::vmra::make_vmra_store(out, fed, true /* add_leaves */, madness::TreeState::compressed, "store", layout));
+    G.execute();
+  }
+  world.gop.sum(norms.data(), norms.size());
+  world.gop.sum(self.data(), self.size());
+  const std::vector<double> ref_norms = madness::norm2s(world, v);
+  const auto ref_self = madness::inner(world, v, v);
+  double dn = 0.0, ds = 0.0, max = 0.0;
+  for (mra::size_type i = 0; i < N; ++i) {
+    dn = std::max(dn, std::abs(norms[i] - ref_norms[i]));
+    ds = std::max(ds, std::abs(self[i] - ref_self(i)));
+    max = std::max(max, ref_norms[i]);
+  }
+  check_close(what + "norms by batch", dn, max);
+  check_close(what + "<f_i|f_i> by batch", ds, max*max);
+  check_close(what + "stored back", max_diff_norm(world, out, v), max_norm(world, v));
+  check_well_formed(world, out, what + "stored back");
+}
+
 int main(int argc, char** argv) {
   auto opt = mra::OptionParser(argc, argv);
   mra::size_type K = opt.parse("-K", 8);
@@ -907,6 +985,9 @@ int main(int argc, char** argv) {
     test_concat(world, K, f, g);
     test_transform_edge(world, K, f);
     test_batched_function_vector(world, K);
+    test_batched_vmra(world, K, f, {2, 1});
+    test_batched_vmra(world, K, g, {1, 1, 1, 1});
+    test_batched_vmra(world, K, g, {3, 1});
 
     if (ttg::default_execution_context().rank() == 0) {
       std::cout << (failures == 0 ? "All tests passed" : std::to_string(failures) + " test(s) failed") << std::endl;
