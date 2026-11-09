@@ -1,7 +1,10 @@
 #ifndef MRA_TASKS_REPLICATE_H
 #define MRA_TASKS_REPLICATE_H
 
+#include <array>
 #include <stdexcept>
+#include <tuple>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -52,6 +55,53 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
     };
     auto tt = ttg::make_tt<Space>(std::move(fn), ttg::edges(in), ttg::edges(out), name, {"input"}, {"output"});
+    if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
+    if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
+    return tt;
+  }
+
+  /**
+   * As make_rebatch, with several outputs: route(b) gives, for the nodes of batch b, the output
+   * they go to and the batches there (an output out of range, or no batches: the node is
+   * dropped). One task sends each node on, e.g., to either operand of a gaxpy or past it, where
+   * one make_rebatch per output would each receive every node.
+   *
+   * route: a callable Batch -> std::pair<int, std::vector<Batch>>.
+   */
+  template <std::size_t NOUT, typename T, Dimension NDIM, typename Route, typename ProcMap = ttg::Void,
+            typename DeviceMap = ttg::Void>
+  auto make_route(ttg::Edge<Key<NDIM>, FunctionsCompressedNode<T, NDIM>> in,
+                  std::array<ttg::Edge<Key<NDIM>, FunctionsCompressedNode<T, NDIM>>, NOUT> outs,
+                  Route route,
+                  const std::string& name = "route",
+                  ProcMap procmap = {},
+                  DeviceMap devicemap = {})
+  {
+    using node_type = FunctionsCompressedNode<T, NDIM>;
+    auto fn = [route](const Key<NDIM>& key, const node_type& node) -> TASKTYPE {
+      const auto [o, to] = route(key.batch());
+      if (o >= 0 && std::size_t(o) < NOUT && !to.empty()) {
+        std::vector<Key<NDIM>> keys;
+        keys.reserve(to.size());
+        for (Batch b : to) keys.push_back(Key<NDIM>(b, key.level(), key.translation()));
+#ifndef MRA_ENABLE_HOST
+        auto sends = ttg::device::forward();
+        [&]<std::size_t... I>(std::index_sequence<I...>) {
+          ([&] { if (o == int(I)) sends.push_back(ttg::device::broadcast<I>(std::move(keys), node)); }(), ...);
+        }(std::make_index_sequence<NOUT>{});
+        co_await std::move(sends);
+#else  // MRA_ENABLE_HOST
+        [&]<std::size_t... I>(std::index_sequence<I...>) {
+          ([&] { if (o == int(I)) ttg::broadcast<I>(std::move(keys), node); }(), ...);
+        }(std::make_index_sequence<NOUT>{});
+#endif // MRA_ENABLE_HOST
+      }
+#ifndef MRA_ENABLE_HOST
+      co_return;
+#endif // MRA_ENABLE_HOST
+    };
+    auto tt = std::apply([&](auto&... e) { return ttg::make_tt<Space>(std::move(fn), ttg::edges(in), ttg::edges(e...), name); },
+                         outs);
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) tt->set_keymap(procmap);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) tt->set_devicemap(devicemap);
     return tt;
