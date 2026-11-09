@@ -116,6 +116,8 @@ namespace mra {
         if (is_team_lead()) {
           // coeffs_view has exactly n_nonzero non-zero entries, so this
           // always finds a valid function id -- see submit_fcoeffs_kernel.
+          // The sparsity must not change while the blocks run: the functions
+          // that are not leafs are zeroed afterwards (fcoeffs_sparsity_kernel).
           fnid = find_nth_nonzero(N, pos, coeffs_view);
 
           const size_type K2NDIM    = std::pow(K, NDIM);
@@ -148,7 +150,6 @@ namespace mra {
           if (is_team_lead()) {
             //std::cout << "FCOEFFS: key " << key << " function " << fnid << " above initial level, marking as Inner" << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Inner;
-            coeffs_view.set_zero(fnid);
           }
           continue;
         }
@@ -157,8 +158,6 @@ namespace mra {
           if (is_team_lead()) {
             //std::cout << "FCOEFFS: key " << key << " negligible with tol " << truncate_tol << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Invalid;
-            /* zero coeffs */
-            coeffs_view.set_zero(fnid);
           }
           continue;
         }
@@ -181,8 +180,29 @@ namespace mra {
           } else {
             //std::cout << "FCOEFFS: key " << key << " function " << fnid << " is not a leaf, marking as Inner" << std::endl;
             result_leaf_info_view(fnid) = LeafStatus::Inner;
-            coeffs_view.set_zero(fnid);
           }
+        }
+      }
+    }
+
+    /**
+     * After fcoeffs_kernel: zero the coefficients of every function that is not a leaf (only
+     * leafs keep coefficients in reconstructed form). fcoeffs_kernel only records the
+     * statuses: its blocks find their function as the pos-th non-zero entry of coeffs_view's
+     * sparsity, which must not change while they run. Executed by one block, after it on the
+     * same stream.
+     */
+    template<Dimension NDIM>
+    GLOBALSCOPE void
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    fcoeffs_sparsity_kernel(
+      concepts::TensorView<NDIM+1> auto coeffs_view,
+      const DenseTensorView<LeafStatus, 1> result_leaf_info_view,
+      size_type N)
+    {
+      for (size_type fnid = thread_id(); fnid < N; fnid += block_size()) {
+        if (result_leaf_info_view(fnid) != LeafStatus::Leaf && coeffs_view.is_nonzero(fnid)) {
+          coeffs_view.set_zero(fnid);
         }
       }
     }
@@ -223,6 +243,10 @@ namespace mra {
       (D, gldata, fns, key, K, tmp,
        phibar_view, hgT_view, coeffs_view,
        thresh, truncate_tol, leaf_info_view, result_leaf_info_view, n_nonzero));
+    checkSubmit();
+    /* then zero the functions that are not leafs, ordered after the blocks above by the stream */
+    CALL_KERNEL(detail::fcoeffs_sparsity_kernel<NDIM>, 1, thread_dims, 0, stream,
+      (coeffs_view, result_leaf_info_view, fns.dim(0)));
     checkSubmit();
   }
 

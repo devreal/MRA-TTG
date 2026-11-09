@@ -746,11 +746,9 @@ static void test_concat(madness::World& world, mra::size_type K, vec_t& f, vec_t
 
 /**
  * Batches of functions placed on process groups (BatchLayout, BatchGroups): the layout's
- * arithmetic, and functions projected in batches, held by a FunctionVector on their batches'
- * groups and fed by a graph that starts with a single batch. The Gaussians are normalized, so
- * every norm is 1 up to the projection's precision. One function per batch, as make_project
- * projects only the first function of a node correctly: its kernel blocks find their function
- * in the sparsity that the blocks before them modify.
+ * arithmetic, and functions projected in batches of different sizes, held by a FunctionVector
+ * on their batches' groups and fed by a graph that starts with a single batch. The Gaussians
+ * are normalized, so every norm is 1 up to the projection's precision.
  */
 static void test_batched_function_vector(madness::World& world, mra::size_type K) {
   const int nproc = world.size(), rank = world.rank();
@@ -795,10 +793,12 @@ static void test_batched_function_vector(madness::World& world, mra::size_type K
     };
   };
 
-  /* N normalized Gaussians of different widths and centers, one per batch */
-  for (const mra::size_type N : {mra::size_type(7), mra::size_type(2)}) {
-    const std::string what = "batched FunctionVector, " + std::to_string(N) + " batches: ";
-    auto layout = std::make_shared<mra::BatchLayout>(mra::BatchLayout::even(N, mra::Batch(N), nproc, rank));
+  /* N normalized Gaussians of different widths and centers in nb batches: 3 2 2 (several batches
+   * per process), 3 2 (groups of processes on 3 or more), all in one */
+  for (const auto [N, nb] : {std::pair<mra::size_type, mra::Batch>{7, 3}, {5, 2}, {7, 1}}) {
+    const std::string what = "batched FunctionVector, " + std::to_string(N) + " functions in "
+                             + std::to_string(nb) + " batches: ";
+    auto layout = std::make_shared<mra::BatchLayout>(mra::BatchLayout::even(N, nb, nproc, rank));
     auto fns = mra::make_functionset<mra::Gaussian<T, NDIM>>(layout);
     auto view = fns->current_view();
     for (mra::size_type i = 0; i < N; ++i) {
@@ -826,7 +826,7 @@ static void test_batched_function_vector(madness::World& world, mra::size_type K
       ttg::fence();
     }
     long misplaced = 0, batches_held = 0;
-    std::vector<bool> held(N, false);
+    std::vector<bool> held(nb, false);
     v.for_each_local_node([&](const auto& key, const auto&) {
       misplaced += !layout->groups().is_member(key.batch(), rank);
       held[key.batch()] = true;
@@ -835,7 +835,7 @@ static void test_batched_function_vector(madness::World& world, mra::size_type K
     world.gop.sum(misplaced);
     world.gop.sum(batches_held);
     check(misplaced == 0, what + "nodes on their batch's group", misplaced, 0);
-    if (nproc == 1) check(batches_held == long(N), what + "all batches held", batches_held, N);
+    if (nproc == 1) check(batches_held == long(nb), what + "all batches held", batches_held, nb);
 
     /* feed in a graph started with a single batch: the feed sends all batches */
     std::vector<double> norms(N, 0.0);
