@@ -44,7 +44,11 @@ namespace mra {
     }
 
     size_type offset_for_batch(Batch batch) const {
-      // Default implementation returns the offset for the given key
+      // a batch manager with a global layout (BatchLayout) knows the offset of each batch
+      if constexpr (requires { m_batchman->offset(batch); }) {
+        return m_batchman->offset(batch);
+      }
+      // otherwise the functions of the local batches are stored one after the other
       size_type offset = 0;
       m_batchman->foreach_local_batch([&](Batch b) {
         if (b == batch) {

@@ -2,6 +2,10 @@
 #define MRA_MISC_BATCHING_H
 
 #include <algorithm>
+#include <cassert>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "mra/misc/key.h"
 
@@ -479,6 +483,146 @@ namespace mra {
     }
   };
 
+
+
+  /**
+   * Places the batches of a set of functions on groups of processes. With at most as many
+   * batches as processes, batch b gets a contiguous group of about nproc/nbatch processes (the
+   * first nproc % nbatch batches one more); with more batches than processes, contiguous runs of
+   * batches share a process. The functions of a batch are then spread over its group only, and
+   * operations local to the functions stay within it.
+   */
+  class BatchGroups {
+    Batch m_num_batches;
+    int m_num_pes;
+
+  public:
+    explicit BatchGroups(Batch num_batches = 1, int num_pes = ttg::default_execution_context().size())
+    : m_num_batches(num_batches)
+    , m_num_pes(num_pes)
+    {
+      if (num_batches < 1 || num_pes < 1) throw std::invalid_argument("BatchGroups: need a batch and a process");
+    }
+
+    Batch num_batches() const { return m_num_batches; }
+
+    int num_pes() const { return m_num_pes; }
+
+    /// the processes [first, last) of batch b
+    std::pair<int, int> batch_pes(Batch b) const {
+      assert(b >= 0 && b < m_num_batches);
+      if (m_num_batches <= m_num_pes) {
+        const int base = m_num_pes / m_num_batches, extra = m_num_pes % m_num_batches;
+        const int first = b*base + std::min<int>(b, extra);
+        return {first, first + base + (b < extra ? 1 : 0)};
+      }
+      const int pe = int((long(b) * m_num_pes) / m_num_batches);
+      return {pe, pe + 1};
+    }
+
+    /// whether process pe belongs to the group of batch b
+    bool is_member(Batch b, int pe) const {
+      const auto [first, last] = batch_pes(b);
+      return first <= pe && pe < last;
+    }
+  };
+
+
+  /**
+   * An explicit layout of a set of N functions in batches: batch b holds the functions
+   * [offset(b), offset(b) + batch_size(b)) of the set, in order; the sizes may differ. A function's
+   * index within the nodes of its batch is its local index. The batches are placed on process
+   * groups (BatchGroups); the batch manager interface (FunctionSet, make_start) counts as local
+   * the batches whose group holds this process.
+   */
+  class BatchLayout {
+    std::vector<size_type> m_offsets;   // num_batches + 1, ascending, from 0
+    BatchGroups m_groups;
+    int m_rank;
+
+  public:
+    /// batches of the given sizes, placed by groups (which must have as many batches)
+    BatchLayout(const std::vector<size_type>& sizes, BatchGroups groups,
+                int rank = ttg::default_execution_context().rank())
+    : m_offsets(1, 0)
+    , m_groups(groups)
+    , m_rank(rank)
+    {
+      if (sizes.empty() || sizes.size() != std::size_t(groups.num_batches()))
+        throw std::invalid_argument("BatchLayout: one size per batch of the groups");
+      for (size_type s : sizes) m_offsets.push_back(m_offsets.back() + s);
+    }
+
+    /// N functions in num_batches batches whose sizes differ by at most one, on num_pes processes
+    static BatchLayout even(size_type num_functions, Batch num_batches = 1,
+                            int num_pes = ttg::default_execution_context().size(),
+                            int rank = ttg::default_execution_context().rank()) {
+      if (num_batches < 1 || size_type(num_batches) > std::max<size_type>(num_functions, 1))
+        throw std::invalid_argument("BatchLayout::even: between 1 and num_functions batches");
+      std::vector<size_type> sizes(num_batches);
+      for (Batch b = 0; b < num_batches; ++b)
+        sizes[b] = num_functions/num_batches + (size_type(b) < num_functions % num_batches ? 1 : 0);
+      return BatchLayout(sizes, BatchGroups(num_batches, num_pes), rank);
+    }
+
+    size_type num_functions() const { return m_offsets.back(); }
+
+    Batch num_batches() const { return Batch(m_offsets.size() - 1); }
+
+    size_type batch_size(Batch b) const {
+      assert(b >= 0 && b < num_batches());
+      return m_offsets[b+1] - m_offsets[b];
+    }
+
+    /// the index in the set of the first function of batch b
+    size_type offset(Batch b) const {
+      assert(b >= 0 && b <= num_batches());
+      return m_offsets[b];
+    }
+
+    /// the index in the set of function `local` of batch b
+    size_type global_index(Batch b, size_type local) const {
+      assert(local < batch_size(b));
+      return m_offsets[b] + local;
+    }
+
+    /// the batch and local index of function `global` of the set
+    std::pair<Batch, size_type> locate(size_type global) const {
+      assert(global < num_functions());
+      const auto it = std::upper_bound(m_offsets.begin(), m_offsets.end(), global);
+      const Batch b = Batch(it - m_offsets.begin() - 1);
+      return {b, global - m_offsets[b]};
+    }
+
+    /// the batch of function `global` of the set
+    size_type batch_index(size_type global) const { return locate(global).first; }
+
+    const BatchGroups& groups() const { return m_groups; }
+
+    /// the processes [first, last) of batch b
+    std::pair<int, int> batch_pes(Batch b) const { return m_groups.batch_pes(b); }
+
+    int num_pes() const { return m_groups.num_pes(); }
+
+    BatchDistribution distribution() const {
+      return (num_batches() == 1) ? BatchDistribution::FULL : BatchDistribution::BLOCK;
+    }
+
+    /// the number of batches whose group holds this process
+    Batch num_local_batches() const {
+      Batch n = 0;
+      for (Batch b = 0; b < num_batches(); ++b) n += m_groups.is_member(b, m_rank);
+      return n;
+    }
+
+    /// fn(b) for the batches whose group holds this process, until fn returns false
+    template<typename Fn>
+    void foreach_local_batch(Fn&& fn) const {
+      for (Batch b = 0; b < num_batches(); ++b) {
+        if (m_groups.is_member(b, m_rank) && !fn(b)) break;
+      }
+    }
+  };
 
 
   template<Dimension NDIM, typename BatchManager>

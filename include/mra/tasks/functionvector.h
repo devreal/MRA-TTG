@@ -148,10 +148,12 @@ namespace mra {
     }
 
     /**
-     * Feed the stored nodes into `out` once `control` fires (as for make_start,
-     * once per batch at the root key). Without `keep`, the nodes are taken out of
-     * the vector now, while the graph is built. With `keep`, they are put back
-     * after all consumers of `out` are done with them, so the vector is unchanged.
+     * Feed the stored nodes, of all batches, into `out` once `control` fires at the
+     * root key of batch 0 (as make_start sends it; the roots of other batches are
+     * ignored, so the vector does not depend on the batches of the graph's start).
+     * Without `keep`, the nodes are taken out of the vector now, while the graph is
+     * built. With `keep`, they are put back after all consumers of `out` are done
+     * with them, so the vector is unchanged.
      */
     template <typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
     auto make_feed(ttg::Edge<key_type, void>& control,
@@ -171,28 +173,19 @@ namespace mra {
       ttg::Edge<int, void> source_e(name + "-source");
       ttg::Edge<key_type, node_type> forward_e(name + "-forward");
 
-      /* every process sends its own nodes: one source task per (batch, process) */
+      /* every process sends its own nodes, of all batches: one source task per process */
       auto dispatch_tt = ttg::make_tt([](const key_type& key) {
+        if (key.batch() != 0) return;
         const int nproc = ttg::default_execution_context().size();
-        for (int p = 0; p < nproc; ++p) ttg::sendk<0>(int(key.batch()*nproc + p));
+        for (int p = 0; p < nproc; ++p) ttg::sendk<0>(p);
       }, ttg::edges(control), ttg::edges(source_e), name + "-dispatch", {"control"}, {"source"});
 
-      auto source_tt = ttg::make_tt([source](const int& id) {
-        const int nproc = ttg::default_execution_context().size();
-        const Batch batch = id / nproc;
+      auto source_tt = ttg::make_tt([source](const int& pe) {
         std::lock_guard<std::mutex> lock(source->mtx);
-        for (auto it = source->nodes.begin(); it != source->nodes.end(); ) {
-          if (it->first.batch() == batch) {
-            ttg::send<0>(it->first, std::move(it->second));
-            it = source->nodes.erase(it);
-          } else {
-            ++it;
-          }
-        }
+        for (auto& [key, node] : source->nodes) ttg::send<0>(key, std::move(node));
+        source->nodes.clear();
       }, ttg::edges(source_e), ttg::edges(forward_e), name, {"source"}, {"output"});
-      source_tt->set_keymap([](const int& id) {
-        return id % ttg::default_execution_context().size();
-      });
+      source_tt->set_keymap([](const int& pe) { return pe; });
 
       /* A node the source sends becomes a new, mutable TTG datum, which TTG cannot
        * share with read-only consumers without copying it. Moving it on from the

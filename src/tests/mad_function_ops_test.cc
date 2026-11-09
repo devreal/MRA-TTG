@@ -744,6 +744,128 @@ static void test_concat(madness::World& world, mra::size_type K, vec_t& f, vec_t
   }
 }
 
+/**
+ * Batches of functions placed on process groups (BatchLayout, BatchGroups): the layout's
+ * arithmetic, and functions projected in batches, held by a FunctionVector on their batches'
+ * groups and fed by a graph that starts with a single batch. The Gaussians are normalized, so
+ * every norm is 1 up to the projection's precision. One function per batch, as make_project
+ * projects only the first function of a node correctly: its kernel blocks find their function
+ * in the sparsity that the blocks before them modify.
+ */
+static void test_batched_function_vector(madness::World& world, mra::size_type K) {
+  const int nproc = world.size(), rank = world.rank();
+
+  /* the layout: offsets, local indices, and groups that partition the processes */
+  {
+    bool ok = true;
+    const auto layout = mra::BatchLayout::even(10, 4, 3, 0);   // sizes 3 3 2 2 on 3 processes
+    ok = ok && layout.num_functions() == 10 && layout.num_batches() == 4;
+    ok = ok && layout.batch_size(0) == 3 && layout.batch_size(3) == 2 && layout.offset(2) == 6;
+    for (mra::size_type g = 0; g < 10; ++g) {
+      const auto [b, l] = layout.locate(g);
+      ok = ok && layout.global_index(b, l) == g && layout.batch_index(g) == mra::size_type(b);
+    }
+    for (int nb = 1; nb <= 7; ++nb) {   // every process in a group, groups contiguous
+      const mra::BatchGroups groups(nb, 4);
+      std::vector<int> count(4, 0);
+      int prev_last = 0;
+      for (mra::Batch b = 0; b < nb; ++b) {
+        const auto [first, last] = groups.batch_pes(b);
+        ok = ok && first < last && last <= 4 && (nb > 4 ? first >= prev_last - 1 : first == prev_last);
+        for (int p = first; p < last; ++p) ++count[p];
+        prev_last = last;
+      }
+      for (int p = 0; p < 4; ++p) ok = ok && (nb <= 4 ? count[p] == 1 : count[p] >= 1);
+    }
+    check(ok, "BatchLayout and BatchGroups arithmetic", ok ? 0 : 1, 0);
+  }
+
+  auto domain = make_domain();
+  const mra::Domain<NDIM> D = *domain.host_ptr();
+  mra::FunctionData<T, NDIM> functiondata(K, mra::FunctionData<T, NDIM>::BC_FREE);
+  const T precision = 1e-6;
+  const int max_level = 0;   // adaptive: make_project takes a positive level as a forced, uniform one
+
+  /* nodes go to their batch's group, spread over it by their position */
+  auto group_keymap = [](const std::shared_ptr<mra::BatchLayout>& layout) {
+    return [layout](const mra::Key<NDIM>& key) {
+      const auto [first, last] = layout->batch_pes(key.batch());
+      const auto anc = key.level() <= 2 ? key : key.parent(key.level() - 2);
+      return first + int(anc.hash() % (last - first));
+    };
+  };
+
+  /* N normalized Gaussians of different widths and centers, one per batch */
+  for (const mra::size_type N : {mra::size_type(7), mra::size_type(2)}) {
+    const std::string what = "batched FunctionVector, " + std::to_string(N) + " batches: ";
+    auto layout = std::make_shared<mra::BatchLayout>(mra::BatchLayout::even(N, mra::Batch(N), nproc, rank));
+    auto fns = mra::make_functionset<mra::Gaussian<T, NDIM>>(layout);
+    auto view = fns->current_view();
+    for (mra::size_type i = 0; i < N; ++i) {
+      mra::Coordinate<T, NDIM> r;
+      for (std::size_t d = 0; d < NDIM; ++d) r[d] = 0.3*double(i) - 0.5*double(d);
+      view[i] = mra::Gaussian<T, NDIM>(D, 20.0/(i+1), r, 2);
+    }
+
+    /* project and compress, a root per batch, and store */
+    mra::FunctionVector<T, NDIM> v;
+    {
+      std::vector<std::unique_ptr<ttg::TTBase>> tts;
+      ttg::Edge<mra::Key<NDIM>, void> control;
+      ReconstructedEdge projected;
+      CompressedEdge compressed;
+      tts.push_back(mra::make_project(domain, fns, K, max_level, functiondata, precision, 0, T(1.0), control,
+                                      projected, "project", group_keymap(layout)));
+      tts.push_back(mra::make_compress(fns, K, false, functiondata, projected, compressed, "compress",
+                                       group_keymap(layout)));
+      tts.push_back(v.make_store(compressed, N, "store", group_keymap(layout)));
+      auto start = mra::make_start(fns, control);
+      [[maybe_unused]] bool connected = make_graph_executable(start.get());
+      if (rank == 0) start->invoke();
+      ttg::execute();
+      ttg::fence();
+    }
+    long misplaced = 0, batches_held = 0;
+    std::vector<bool> held(N, false);
+    v.for_each_local_node([&](const auto& key, const auto&) {
+      misplaced += !layout->groups().is_member(key.batch(), rank);
+      held[key.batch()] = true;
+    });
+    for (bool h : held) batches_held += h;
+    world.gop.sum(misplaced);
+    world.gop.sum(batches_held);
+    check(misplaced == 0, what + "nodes on their batch's group", misplaced, 0);
+    if (nproc == 1) check(batches_held == long(N), what + "all batches held", batches_held, N);
+
+    /* feed in a graph started with a single batch: the feed sends all batches */
+    std::vector<double> norms(N, 0.0);
+    {
+      std::vector<std::unique_ptr<ttg::TTBase>> tts;
+      std::mutex m;
+      ttg::Edge<mra::Key<NDIM>, void> control;
+      CompressedEdge fed;
+      ttg::Edge<mra::Key<NDIM>, mra::DenseTensor<T, 1>> norm_e;
+      tts.push_back(v.make_feed(control, fed, true, "feed", group_keymap(layout)));
+      tts.push_back(mra::make_norm(fns, K, fed, norm_e, "norm", group_keymap(layout)));
+      tts.push_back(ttg::make_tt([&](const mra::Key<NDIM>& key, const mra::DenseTensor<T, 1>& n) {
+        std::lock_guard<std::mutex> lock(m);
+        for (mra::size_type l = 0; l < layout->batch_size(key.batch()); ++l)
+          norms[layout->global_index(key.batch(), l)] = n.current_view().data()[l];
+      }, ttg::edges(norm_e), ttg::edges(), "norm_sink"));
+      auto start_fns = make_functions(1);
+      auto start = mra::make_start(start_fns, control);
+      [[maybe_unused]] bool connected = make_graph_executable(start.get());
+      if (rank == 0) start->invoke();
+      ttg::execute();
+      ttg::fence();
+    }
+    world.gop.sum(norms.data(), norms.size());
+    double err = 0.0;
+    for (mra::size_type i = 0; i < N; ++i) err = std::max(err, std::abs(norms[i] - 1.0));
+    check(err < 1e-5, what + "norms of the normalized Gaussians", err, 1e-5);
+  }
+}
+
 int main(int argc, char** argv) {
   auto opt = mra::OptionParser(argc, argv);
   mra::size_type K = opt.parse("-K", 8);
@@ -784,6 +906,7 @@ int main(int argc, char** argv) {
     }
     test_concat(world, K, f, g);
     test_transform_edge(world, K, f);
+    test_batched_function_vector(world, K);
 
     if (ttg::default_execution_context().rank() == 0) {
       std::cout << (failures == 0 ? "All tests passed" : std::to_string(failures) + " test(s) failed") << std::endl;
