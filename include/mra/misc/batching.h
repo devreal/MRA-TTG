@@ -495,6 +495,7 @@ namespace mra {
   class BatchGroups {
     Batch m_num_batches;
     int m_num_pes;
+    std::vector<std::pair<int, int>> m_ranges;   // explicit groups, if not empty
 
   public:
     explicit BatchGroups(Batch num_batches = 1, int num_pes = ttg::default_execution_context().size())
@@ -504,6 +505,19 @@ namespace mra {
       if (num_batches < 1 || num_pes < 1) throw std::invalid_argument("BatchGroups: need a batch and a process");
     }
 
+    /// batches on explicit groups: batch b on the processes ranges[b] = [first, last), e.g., the
+    /// pairs of batches of two sets, each on the group of one of its batches
+    BatchGroups(std::vector<std::pair<int, int>> ranges, int num_pes)
+    : m_num_batches(Batch(ranges.size()))
+    , m_num_pes(num_pes)
+    , m_ranges(std::move(ranges))
+    {
+      if (m_ranges.empty() || num_pes < 1) throw std::invalid_argument("BatchGroups: need a batch and a process");
+      for (const auto& [first, last] : m_ranges) {
+        if (first < 0 || first >= last || last > num_pes) throw std::invalid_argument("BatchGroups: invalid group");
+      }
+    }
+
     Batch num_batches() const { return m_num_batches; }
 
     int num_pes() const { return m_num_pes; }
@@ -511,6 +525,7 @@ namespace mra {
     /// the processes [first, last) of batch b
     std::pair<int, int> batch_pes(Batch b) const {
       assert(b >= 0 && b < m_num_batches);
+      if (!m_ranges.empty()) return m_ranges[b];
       if (m_num_batches <= m_num_pes) {
         const int base = m_num_pes / m_num_batches, extra = m_num_pes % m_num_batches;
         const int first = b*base + std::min<int>(b, extra);
