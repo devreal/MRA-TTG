@@ -100,6 +100,20 @@ namespace mra {
     }
 
     /**
+     * Returns the index, in the whole set, of the first function of the key's batch, e.g., to
+     * pick the per-function data (operators) of the functions of a node.
+     */
+    template<Dimension NDIM>
+    size_type global_offset(const Key<NDIM>& key) const {
+      if constexpr (requires { m_batchman->offset(key.batch()); }) {
+        return m_batchman->offset(key.batch());
+      }
+      size_type offset = 0;
+      for (Batch b = 0; b < key.batch(); ++b) offset += m_batchman->batch_size(b);
+      return offset;
+    }
+
+    /**
      * Returns the view for the given key.
      */
     template<Dimension NDIM>

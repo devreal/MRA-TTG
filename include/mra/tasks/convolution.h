@@ -33,6 +33,20 @@ namespace mra {
 
 
   namespace detail {
+
+    /**
+     * The operator norms of the functions of a batch starting at function `offset` of the set:
+     * with one operator per function, the view from the batch's first operator on, since the
+     * kernels index the operators by the function's position in the node (one operator for all
+     * functions: unchanged).
+     */
+    template <typename View>
+    View batch_opnorms(const View& opnorms, size_type offset) {
+      if (offset == 0 || opnorms.dim(0) == 1) return opnorms;
+      if (offset >= opnorms.dim(0)) throw std::runtime_error("convolution: fewer operators than functions");
+      const size_type stride = opnorms.dim(1) * opnorms.dim(2) * opnorms.dim(3);
+      return View(opnorms.data() + offset * stride, opnorms.dim(0) - offset, opnorms.dim(1), opnorms.dim(2), opnorms.dim(3));
+    }
     template<Dimension NDIM>
     struct KeyPair {
       Key<NDIM> source;
@@ -610,9 +624,11 @@ namespace mra {
           // rather than once per function.
           std::vector<typename mra::GaussianConvolutionOperator<T, NDIM>::opnorms_pointer_type> disp_opnorms;
 #endif // MRA_ENABLE_HOST
+          const size_type fn_offset = fns->global_offset(key);
           for (int i = 0; i < N; ++i) {
             // we may have either one operator for all functions or one operator per function
-            int opnorm_index = (op.count() == 1) ? 0 : i;
+            // (by the function's index in the whole set: the key's batch starts at fn_offset)
+            int opnorm_index = (op.count() == 1) ? 0 : fn_offset + i;
             // safe because get_disp returns a reference that remains valid
             const auto& mad_disps = op.get_mad_displacements(opnorm_index, key.level());
             const auto& mad_op = op.get_mad_op(opnorm_index);
@@ -863,11 +879,11 @@ namespace mra {
         auto out_view = out.coeffs().current_view();
 
 #ifdef MRA_ENABLE_HOST
-        auto opnorms_view = op_data->norms.current_view();
+        auto opnorms_view = detail::batch_opnorms(op_data->norms.current_view(), fns->global_offset(key));
         std::array<DenseTensorView<const T, 3>, NDIM> transr = op_data->transr();
         std::array<DenseTensorView<const T, 3>, NDIM> transs = op_data->transs();
 #else
-        auto opnorms_view = res.norms->current_view();
+        auto opnorms_view = detail::batch_opnorms(res.norms->current_view(), fns->global_offset(key));
         std::array<DenseTensorView<const T, 3>, NDIM> transr = {res.dims[0]->R.current_view(), res.dims[1]->R.current_view(), res.dims[2]->R.current_view()};
         std::array<DenseTensorView<const T, 3>, NDIM> transs = {res.dims[0]->S.current_view(), res.dims[1]->S.current_view(), res.dims[2]->S.current_view()};
 #endif // MRA_ENABLE_HOST
@@ -1227,11 +1243,11 @@ namespace mra {
 #ifdef MRA_ENABLE_HOST
       std::array<DenseTensorView<const T, 3>, NDIM> transr = op_data->transr();
       std::array<DenseTensorView<const T, 3>, NDIM> transs = op_data->transs();
-      auto opnorms_view = op_data->norms.current_view();
+      auto opnorms_view = detail::batch_opnorms(op_data->norms.current_view(), fns->global_offset(key));
 #else
       std::array<DenseTensorView<const T, 3>, NDIM> transr = {res.dims[0]->R.current_view(), res.dims[1]->R.current_view(), res.dims[2]->R.current_view()};
       std::array<DenseTensorView<const T, 3>, NDIM> transs = {res.dims[0]->S.current_view(), res.dims[1]->S.current_view(), res.dims[2]->S.current_view()};
-      auto opnorms_view = res.norms->current_view();
+      auto opnorms_view = detail::batch_opnorms(res.norms->current_view(), fns->global_offset(key));
 #endif // MRA_ENABLE_HOST
       auto out_view = out.coeffs().current_view();
       auto contribution_view = contribution.coeffs().current_view();
