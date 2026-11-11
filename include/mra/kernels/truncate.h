@@ -98,11 +98,15 @@ namespace mra {
     size_type N,
     T tol,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     CALL_KERNEL(detail::truncate_kernel, N, MAX_THREADS_PER_BLOCK, 0, stream,
         (key, node, kept, child_kept, N, tol));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -186,6 +190,7 @@ namespace mra {
     typename detail::GroupedBatchPool<detail::TruncateBatchArg<T, NDIM>>::slot_t& slot,
     size_type total_blocks,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     using arg_t = detail::TruncateBatchArg<T, NDIM>;
     const size_type num_members = static_cast<size_type>(slot.args.size());
@@ -202,6 +207,9 @@ namespace mra {
 
     pool.mark_submitted(slot, stream);
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
 

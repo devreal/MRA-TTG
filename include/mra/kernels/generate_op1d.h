@@ -980,7 +980,9 @@ namespace mra {
       const ViewC& c, const ViewHgT& hgT,
       const ViewHgT2k& hgT2k, const T* quad_x, const T* quad_w, size_type npt,
       Translation l_offset, const ViewR& R, const ViewS& S, const ViewNorms& norms,
-      ttg::device::Stream stream) {
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+  {
     if (n_items == 0 || max_range_len == 0) return;
     Dim3 thread_dims = max_thread_dims(2 * K);
     Dim3 grid_dims((unsigned)n_items, (unsigned)max_range_len, 1);
@@ -1006,6 +1008,9 @@ namespace mra {
     }
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
 
@@ -1156,7 +1161,9 @@ namespace mra {
   void submit_assemble_op1d_norms_kernel(
       size_type count, size_type rank, Level n, std::array<Translation, NDIM> lx, Translation l_offset,
       const ViewNorms1d& norms1d, const ViewFac& fac, const ViewNorms& norms, const ViewRank& rank_tensor,
-      const ViewTerm& term, ttg::device::Stream stream) {
+      const ViewTerm& term, ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+  {
     if (count == 0 || rank == 0) return;
     Dim3 thread_dims{1, 1, 1};
     CALL_KERNEL((detail::assemble_op1d_norms_kernel<T, NDIM, ViewNorms1d, ViewFac, ViewNorms, ViewRank, ViewTerm>),
@@ -1164,6 +1171,9 @@ namespace mra {
                 (count, rank, n, lx, l_offset, norms1d, fac, norms, rank_tensor, term));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   /**
    * Host-side launcher for detail::assemble_op1d_opnorm_kernel -- see its
@@ -1172,7 +1182,9 @@ namespace mra {
    */
   template <typename T, concepts::TensorView<4> ViewNorms, concepts::TensorView<1> ViewRank>
   void submit_assemble_op1d_opnorm_kernel(size_type count, size_type rank, const ViewNorms& norms,
-                                           const ViewRank& rank_tensor, ttg::device::Stream stream) {
+                                           const ViewRank& rank_tensor, ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+  {
     // `rank` here only sizes the block (must cover the largest real rank
     // among this launch's count-indices, i.e. the operator-wide m_max_rank)
     // -- the kernel itself bounds its own work per count-index via
@@ -1183,6 +1195,9 @@ namespace mra {
                 (count, norms, rank_tensor));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   /**
    * Packs a host-side list of work items into a fresh ttg::Buffer, ready to

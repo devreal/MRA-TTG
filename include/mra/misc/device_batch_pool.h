@@ -621,28 +621,13 @@ namespace mra::detail {
     std::uint32_t size;
   };
 
-#if defined(__CUDACC__) || defined(__HIP__)
-  /* One warp per descriptor, grid-stride over descriptors. A template only
-   * so that every translation unit including this header may define it. */
-  template <typename DescT>
-  __global__ void grouped_copy_scatter_kernel(const DescT* __restrict__ descs, std::uint32_t num_descs,
-                                              const unsigned char* __restrict__ src)
-  {
-    const unsigned lane = threadIdx.x % warpSize;
-    const unsigned warps_per_block = blockDim.x / warpSize;
-    const unsigned num_warps = gridDim.x * warps_per_block;
-    for (unsigned d = blockIdx.x * warps_per_block + threadIdx.x / warpSize; d < num_descs; d += num_warps) {
-      const DescT desc = descs[d];
-      unsigned char* dst = static_cast<unsigned char*>(desc.dst);
-      if (desc.src_offset == DescT::zero_fill) {
-        for (std::uint32_t i = lane; i < desc.size; i += warpSize) dst[i] = 0;
-      } else {
-        const unsigned char* s = src + desc.src_offset;
-        for (std::uint32_t i = lane; i < desc.size; i += warpSize) dst[i] = s[i];
-      }
-    }
-  }
-#endif // __CUDACC__ || __HIP__
+  /**
+   * Performs the num_descs copies described by descs (in device memory), reading
+   * from the device buffer src, on stream. Defined in src/kernels/batch_pool.cc so
+   * that translation units not compiled by nvcc/hipcc can use submit_grouped_copy.
+   */
+  void launch_grouped_copy_scatter(const GroupedCopyDesc* descs, std::uint32_t num_descs,
+                                   const unsigned char* src, ttg::device::Stream stream);
 
   /**
    * Issues the host->device transfer for a GroupedBatchPool slot's args and
@@ -678,7 +663,6 @@ namespace mra::detail {
                             std::size_t num_args, std::size_t num_offsets,
                             int device_id, ttg::device::Stream stream)
   {
-#if defined(__CUDACC__) || defined(__HIP__)
     auto align_up = [](std::size_t n) { return (n + 15) & ~std::size_t(15); };
     const std::size_t num_extra = slot.extra_dsts.size();
     const unsigned char* sparsity_begin = slot.sparsity.data();
@@ -743,17 +727,9 @@ namespace mra::detail {
     check_hip_rt(hipMemcpyAsync(dev, h, total, hipMemcpyHostToDevice, stream), "hipMemcpyAsync");
 #endif
     if (num_descs > 0) {
-      // The kernel uses the device's actual warpSize; 32 only sizes the grid.
-      constexpr unsigned threads = 128;
-      constexpr unsigned warps_per_block = threads / 32;
-      const unsigned blocks = static_cast<unsigned>(std::min<std::size_t>((num_descs + warps_per_block - 1) / warps_per_block, 256));
-      CALL_KERNEL(grouped_copy_scatter_kernel<GroupedCopyDesc>, blocks, threads, 0, stream,
-                  (reinterpret_cast<const GroupedCopyDesc*>(dev + descs_off),
-                   static_cast<std::uint32_t>(num_descs), dev + src_off));
+      launch_grouped_copy_scatter(reinterpret_cast<const GroupedCopyDesc*>(dev + descs_off),
+                                  static_cast<std::uint32_t>(num_descs), dev + src_off, stream);
     }
-#else
-    static_assert(sizeof(Arg) == 0, "submit_grouped_copy must be instantiated in a CUDA/HIP translation unit");
-#endif // __CUDACC__ || __HIP__
   }
 
   /**

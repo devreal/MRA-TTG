@@ -636,6 +636,7 @@ namespace mra {
     const int bc_left,
     const int bc_right,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     const size_type smem_size = detail::derivative_smem_size<T, NDIM>(K);
     //CONFIGURE_KERNEL((detail::derivative_kernel<T, NDIM>), smem_size);
@@ -644,6 +645,9 @@ namespace mra {
         deriv, phi, phibar, quad_x, tmp, N, n_nonzero, K, g1, g2, axis, bc_left, bc_right));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -724,6 +728,53 @@ namespace mra {
     }
 
     /**
+     * Launches derivative_kernel_batched on the batch marshalled into slot (see
+     * submit_derivative_batch_leader), with its scratch from the slot.
+     */
+    template <typename T, Dimension NDIM>
+    void launch_derivative_kernel_batched(
+      GroupedBatchPool<DerivativeBatchArg<T, NDIM>>& pool,
+      typename GroupedBatchPool<DerivativeBatchArg<T, NDIM>>::slot_t& slot,
+      size_type num_members,
+      size_type total_nonzero,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<3> auto& operators,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
+      size_type K,
+      const T g1,
+      const T g2,
+      size_type axis,
+      const int bc_left,
+      const int bc_right,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      const size_type smem_size = derivative_smem_size<T, NDIM>(K);
+      const Dim3 thread_dims = derivative_thread_dims(K);
+      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+      /* cap the grid at occupancy (the kernel's grid-stride loop covers the rest) so the
+       * scratch is one region per slot, sized from the cap and not from this launch --
+       * see submit_compress_kernel_batched */
+      auto kernel = derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>, std::decay_t<decltype(phi)>,
+                                              std::decay_t<decltype(phibar)>, std::decay_t<decltype(quad_x)>>;
+      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
+      const size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
+      // an empty grid (no nonzero function in the batch) is an invalid launch
+      if (grid_x > 0) {
+        CALL_KERNEL((derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, D,
+                     operators, phi, phibar, quad_x, K, g1, g2, axis, bc_left, bc_right));
+      }
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
+    /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(key, src_keys, left, inh_left, center,
      * inh_center, right, inh_right, deriv_view, N, deriv, n_nonzero)`; the leader marshals every member and
@@ -788,24 +839,9 @@ namespace mra {
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
-      const size_type smem_size = derivative_smem_size<T, NDIM>(K);
-      const Dim3 thread_dims = derivative_thread_dims(K);
-      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
-      /* cap the grid at occupancy (the kernel's grid-stride loop covers the rest) so the
-       * scratch is one region per slot, sized from the cap and not from this launch --
-       * see submit_compress_kernel_batched */
-      auto kernel = derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>, std::decay_t<decltype(phi)>,
-                                              std::decay_t<decltype(phibar)>, std::decay_t<decltype(quad_x)>>;
-      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
-      const size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
-      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
-      // an empty grid (no nonzero function in the batch) is an invalid launch
-      if (grid_x > 0) {
-        CALL_KERNEL((derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, shared_tmp, D,
-                     operators, phi, phibar, quad_x, K, g1, g2, axis, bc_left, bc_right));
-      }
-      checkSubmit();
+      launch_derivative_kernel_batched<T, NDIM>(pool, slot, static_cast<size_type>(nb), total_nonzero, D,
+                                                operators, phi, phibar, quad_x, K, g1, g2, axis,
+                                                bc_left, bc_right, stream);
       pool.mark_submitted(slot, stream);
     }
 

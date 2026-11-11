@@ -75,11 +75,15 @@ namespace mra {
     size_type n_nonzero,
     size_type K,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(K);
     CALL_KERNEL(detail::merge_kernel, n_nonzero, thread_dims, 0, stream, (key, a, b, out, N, n_nonzero));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -117,6 +121,26 @@ namespace mra {
         merge_process_one<NDIM>(std::get<0>(arg), std::get<1>(arg), std::get<2>(arg), std::get<3>(arg), local_pos);
       }
     }
+
+    /// launches merge_kernel_batched on the marshalled batch (see submit_merge_batch)
+    template <typename T, Dimension NDIM>
+    void launch_merge_kernel_batched(
+      MergeBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(K);
+      CALL_KERNEL((merge_kernel_batched<T, NDIM>), total_nonzero, thread_dims, 0, stream,
+                  (args, member_offsets, num_members, total_nonzero));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
     /**
      * Merges for nb tasks in one launch. member(m) returns the m-th task's
@@ -171,10 +195,7 @@ namespace mra {
       const size_type num_members = static_cast<size_type>(slot.args.size());
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
-      Dim3 thread_dims = max_thread_dims(K);
-      CALL_KERNEL((merge_kernel_batched<T, NDIM>), total_nonzero, thread_dims, 0, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero));
-      checkSubmit();
+      launch_merge_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, num_members, total_nonzero, K, stream);
       pool.mark_submitted(slot, stream);
     }
 

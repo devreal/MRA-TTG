@@ -151,6 +151,7 @@ namespace mra {
     size_type K,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     const size_type smem_size = detail::multiply_broadcast_smem_size<T, NDIM>(K);
@@ -158,6 +159,9 @@ namespace mra {
       (D, key, a_leaf, a_inh, b_leaf, b_inh, inh_keys, out, phibar, phi, quad_x, N, n_nonzero, K, tmp));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -227,6 +231,47 @@ namespace mra {
     }
 
     /**
+     * Launches multiply_broadcast_kernel_batched on the batch marshalled into slot
+     * (see submit_multiply_broadcast_batch_leader), with its scratch from the slot.
+     */
+    template <typename T, Dimension NDIM>
+    void launch_multiply_broadcast_kernel_batched(
+      GroupedBatchPool<MultiplyBroadcastBatchArg<T, NDIM>>& pool,
+      typename GroupedBatchPool<MultiplyBroadcastBatchArg<T, NDIM>>::slot_t& slot,
+      size_type num_members,
+      size_type total_nonzero,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<1> auto& quad_x,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      const size_type smem_size = multiply_broadcast_smem_size<T, NDIM>(K);
+      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+      /* cap the grid at occupancy (the kernel's grid-stride loop covers the rest) so the
+       * scratch is one region per slot, sized from the cap and not from this launch --
+       * see submit_compress_kernel_batched */
+      auto kernel = multiply_broadcast_kernel_batched<T, NDIM, std::decay_t<decltype(phibar)>,
+                                                      std::decay_t<decltype(phi)>, std::decay_t<decltype(quad_x)>>;
+      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
+      const size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * multiply_broadcast_tmp_size<NDIM>(K));
+      // an empty grid (no nonzero function in the batch) is an invalid launch
+      if (grid_x > 0) {
+        CALL_KERNEL((multiply_broadcast_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, D,
+                     phibar, phi, quad_x, K));
+      }
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
+    /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(key, a_leaf, a_inh, b_leaf, b_inh,
      * inh_keys, out_view, N, out, n_nonzero, ...)`; the leader marshals every member
@@ -292,24 +337,8 @@ namespace mra {
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
-      Dim3 thread_dims = max_thread_dims(2*K);
-      const size_type smem_size = multiply_broadcast_smem_size<T, NDIM>(K);
-      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
-      /* cap the grid at occupancy (the kernel's grid-stride loop covers the rest) so the
-       * scratch is one region per slot, sized from the cap and not from this launch --
-       * see submit_compress_kernel_batched */
-      auto kernel = multiply_broadcast_kernel_batched<T, NDIM, std::decay_t<decltype(phibar)>,
-                                                      std::decay_t<decltype(phi)>, std::decay_t<decltype(quad_x)>>;
-      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
-      const size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
-      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * multiply_broadcast_tmp_size<NDIM>(K));
-      // an empty grid (no nonzero function in the batch) is an invalid launch
-      if (grid_x > 0) {
-        CALL_KERNEL((multiply_broadcast_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, shared_tmp, D,
-                     phibar, phi, quad_x, K));
-      }
-      checkSubmit();
+      launch_multiply_broadcast_kernel_batched<T, NDIM>(pool, slot, static_cast<size_type>(nb), total_nonzero, D,
+                                                        phibar, phi, quad_x, K, stream);
       pool.mark_submitted(slot, stream);
     }
 

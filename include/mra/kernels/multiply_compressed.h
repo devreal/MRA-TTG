@@ -358,6 +358,7 @@ namespace mra {
     size_type K,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     /* W of the tensor-core transform in shared memory even above 48KB (K=10) */
@@ -372,6 +373,9 @@ namespace mra {
       (D, key, a_node, b_node, s_in, result, out_arr, hg, phibar, phi, quad_x, work, NA, square, n_items, K, tmp));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -437,6 +441,42 @@ namespace mra {
                                                  local_pos);
       }
     }
+
+    /**
+     * Launches multiply_compressed_kernel_batched on the marshalled batch (see
+     * submit_multiply_compressed_batch_leader); staged is the slot's staged bytes on
+     * the device, holding the work items.
+     */
+    template <typename T, Dimension NDIM>
+    void launch_multiply_compressed_kernel_batched(
+      MulCompressedBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_items,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<2> auto& hg,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<1> auto& quad_x,
+      bool square,
+      size_type K,
+      const unsigned char* staged,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      const size_type smem_size = multiply_compressed_smem_size<T, NDIM>(K, thread_dims);
+      configure_kernel_smem(multiply_compressed_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>,
+                                                              std::decay_t<decltype(phibar)>, std::decay_t<decltype(phi)>,
+                                                              std::decay_t<decltype(quad_x)>>, smem_size);
+      CALL_KERNEL((multiply_compressed_kernel_batched<T, NDIM>), total_items, thread_dims, smem_size, stream,
+                  (args, member_offsets, num_members, total_items, D,
+                   hg, phibar, phi, quad_x, square, K, staged));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
     /**
      * Called by every member of a batch with the batch_view returned by its
@@ -521,15 +561,9 @@ namespace mra {
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
-      Dim3 thread_dims = max_thread_dims(2*K);
-      const size_type smem_size = multiply_compressed_smem_size<T, NDIM>(K, thread_dims);
-      configure_kernel_smem(multiply_compressed_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>,
-                                                              std::decay_t<decltype(phibar)>, std::decay_t<decltype(phi)>,
-                                                              std::decay_t<decltype(quad_x)>>, smem_size);
-      CALL_KERNEL((multiply_compressed_kernel_batched<T, NDIM>), total_items, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_items, D,
-                   hg, phibar, phi, quad_x, square, K, slot.dev_src));
-      checkSubmit();
+      launch_multiply_compressed_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                                         total_items, D, hg, phibar, phi, quad_x, square, K,
+                                                         slot.dev_src, stream);
       pool.mark_submitted(slot, stream);
     }
 

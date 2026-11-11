@@ -228,6 +228,13 @@ namespace mra {
       DenseTensorView<LeafStatus, 1>& result_leaf_info_view,
       size_type n_nonzero,
       ttg::device::Stream stream)
+#if !defined(MRA_HAVE_KERNEL_DEFINITIONS)
+  {
+    // the kernel evaluates the user's functor, so the library cannot provide it
+    static_assert(sizeof(Fn) == 0,
+                  "MRA-TTG: projecting a functor (submit_fcoeffs_kernel) must be compiled by nvcc/hipcc");
+  }
+#else
   {
     /**
      * Launch the kernel with KxKxK threads in each of the n_nonzero blocks.
@@ -249,6 +256,7 @@ namespace mra {
       (coeffs_view, result_leaf_info_view, fns.dim(0)));
     checkSubmit();
   }
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 } // namespace mra
 

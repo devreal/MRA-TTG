@@ -64,12 +64,16 @@ namespace mra {
     const concepts::TensorView<NDIM+1> auto&& in,
     size_type N,
     concepts::TensorView<1> auto&& result_norms)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     /* simple norm calculation can use as many threads as are available */
     CALL_KERNEL(detail::simple_norm_kernel, N, MAX_THREADS_PER_BLOCK, 0, ttg::device::current_stream(),
         (key, in, result_norms, N));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -146,6 +150,7 @@ namespace mra {
     typename detail::GroupedBatchPool<detail::SimpleNormBatchArg<T, NDIM>>::slot_t& slot,
     size_type total_blocks,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     using arg_t = detail::SimpleNormBatchArg<T, NDIM>;
     const size_type num_members = static_cast<size_type>(slot.args.size());
@@ -162,6 +167,9 @@ namespace mra {
 
     pool.mark_submitted(slot, stream);
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
 

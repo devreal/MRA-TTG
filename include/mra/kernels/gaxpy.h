@@ -98,6 +98,7 @@ namespace mra {
     size_type n_nonzero,
     size_type K,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
@@ -105,6 +106,9 @@ namespace mra {
       (key, funcA, funcB, funcR, scalarA, scalarB, N, n_nonzero));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -146,6 +150,28 @@ namespace mra {
                                    scalarA, scalarB, std::get<3>(arg), local_pos);
       }
     }
+
+    /// launches gaxpy_kernel_batched on the marshalled batch (see submit_gaxpy_batch_leader)
+    template <typename T, Dimension NDIM>
+    void launch_gaxpy_kernel_batched(
+      GaxpyBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      const T scalarA,
+      const T scalarB,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      CALL_KERNEL((gaxpy_kernel_batched<T, NDIM>), total_nonzero, thread_dims, 0, stream,
+                  (args, member_offsets, num_members, total_nonzero, scalarA, scalarB));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
     /**
      * Called by every member of a batch with the batch_view returned by its
@@ -201,10 +227,8 @@ namespace mra {
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
       if (total_nonzero > 0) {
-        Dim3 thread_dims = max_thread_dims(2*K);
-        CALL_KERNEL((gaxpy_kernel_batched<T, NDIM>), total_nonzero, thread_dims, 0, stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, scalarA, scalarB));
-        checkSubmit();
+        launch_gaxpy_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                             total_nonzero, scalarA, scalarB, K, stream);
       }
       pool.mark_submitted(slot, stream);
     }

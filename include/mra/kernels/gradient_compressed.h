@@ -117,6 +117,7 @@ namespace mra {
     const std::uint8_t* inner,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     /* W of the tensor-core transform in shared memory even above 48KB (K=10) */
@@ -128,6 +129,9 @@ namespace mra {
       (key, N, K, node_view, s_view, hg, children, inner, tmp));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
     /**
@@ -197,6 +201,7 @@ namespace mra {
     const int bc_left,
     const int bc_right,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     std::array<size_type, NDIM+1> axis_offsets{};
     for (Dimension a = 0; a < NDIM; ++a) axis_offsets[a+1] = axis_offsets[a] + n_nonzero[a];
@@ -208,6 +213,9 @@ namespace mra {
        bc_left, bc_right));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -302,6 +310,81 @@ namespace mra {
         SYNCTHREADS(); // member and j are rewritten by the next iteration
       }
     }
+
+    /**
+     * Launches gradient_derivative_kernel_batched on the entries marshalled into slot
+     * (see submit_gradient_compute_batch_leader), with its scratch from the slot.
+     */
+    template <typename T, Dimension NDIM>
+    void launch_gradient_derivative_kernel_batched(
+      GroupedBatchPool<GradientDerivativeBatchArg<T, NDIM>>& pool,
+      typename GroupedBatchPool<GradientDerivativeBatchArg<T, NDIM>>::slot_t& slot,
+      size_type num_entries,
+      size_type total,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<3> auto& operators,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<1> auto& quad_x,
+      size_type K,
+      int bc_left,
+      int bc_right,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      /* the scratch is the slot's, one region per block of the occupancy-capped grid,
+       * see submit_derivative_batch_leader */
+      const Dim3 thread_dims = derivative_thread_dims(K);
+      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+      const size_type smem_size = derivative_smem_size<T, NDIM>(K);
+      auto kernel = gradient_derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>,
+                                                       std::decay_t<decltype(phi)>, std::decay_t<decltype(phibar)>,
+                                                       std::decay_t<decltype(quad_x)>>;
+      const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
+      const size_type grid_x = std::min<size_type>(total, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
+      CALL_KERNEL((gradient_derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                  (slot.dev_args, slot.dev_offsets, num_entries, total, shared_tmp, D,
+                   operators, phi, phibar, quad_x, K, bc_left, bc_right, slot.dev_src));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
+    /**
+     * Launches gradient_spawn_kernel_batched on the members marshalled into slot
+     * (see submit_gradient_compute_batch_leader), with its scratch from the slot.
+     */
+    template <typename T, Dimension NDIM>
+    void launch_gradient_spawn_kernel_batched(
+      GroupedBatchPool<GradientSpawnBatchArg<T, NDIM>>& pool,
+      typename GroupedBatchPool<GradientSpawnBatchArg<T, NDIM>>::slot_t& slot,
+      size_type num_members,
+      size_type total,
+      size_type K,
+      const concepts::TensorView<2> auto& hg,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      /* as for the derivatives: the grid capped at occupancy, the scratch the slot's */
+      const Dim3 spawn_threads = max_thread_dims(2*K);
+      const size_type spawn_smem = transform_shmem_size<T, NDIM>(2*K, std::numeric_limits<size_type>::max());
+      auto spawn_kernel = gradient_spawn_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>>;
+      configure_kernel_smem(spawn_kernel, spawn_smem);
+      const size_type spawn_cap = kernel_grid_cap(spawn_kernel,
+                                                  static_cast<int>(spawn_threads.x * spawn_threads.y * spawn_threads.z),
+                                                  spawn_smem);
+      const size_type spawn_grid = std::min<size_type>(total, spawn_cap);
+      T* spawn_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(spawn_cap) * reconstruct_tmp_size<NDIM>(K));
+      CALL_KERNEL((gradient_spawn_kernel_batched<T, NDIM>), spawn_grid, spawn_threads, spawn_smem,
+                  stream, (slot.dev_args, slot.dev_offsets, num_members, total, spawn_tmp, K, hg,
+                           slot.dev_src));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
     /**
      * Called by every member of a batch with the batch_view returned by its
@@ -406,21 +489,9 @@ namespace mra {
         const size_type total = slot.offsets.back();
         submit_grouped_copy<GradientDerivativeBatchArg<T, NDIM>>(slot, entries, slot.offsets.size(),
                                                                  deriv_pool.device_id, stream);
-        /* the scratch is the slot's, one region per block of the occupancy-capped grid,
-         * see submit_derivative_batch_leader */
-        const Dim3 thread_dims = derivative_thread_dims(K);
-        const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
-        const size_type smem_size = derivative_smem_size<T, NDIM>(K);
-        auto kernel = gradient_derivative_kernel_batched<T, NDIM, std::decay_t<decltype(operators)>,
-                                                         std::decay_t<decltype(phi)>, std::decay_t<decltype(phibar)>,
-                                                         std::decay_t<decltype(quad_x)>>;
-        const size_type grid_cap = kernel_grid_cap(kernel, threads, smem_size);
-        const size_type grid_x = std::min<size_type>(total, grid_cap);
-        T* shared_tmp = deriv_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * derivative_tmp_size<NDIM>(K));
-        CALL_KERNEL((gradient_derivative_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(entries), total, shared_tmp, D,
-                     operators, phi, phibar, quad_x, K, bc_left, bc_right, slot.dev_src));
-        checkSubmit();
+        launch_gradient_derivative_kernel_batched<T, NDIM>(deriv_pool, slot, static_cast<size_type>(entries), total,
+                                                           D, operators, phi, phibar, quad_x, K, bc_left, bc_right,
+                                                           stream);
         deriv_pool.mark_submitted(slot, stream);
       }
 
@@ -452,20 +523,7 @@ namespace mra {
       }
       const size_type total = slot.offsets.back();
       submit_grouped_copy<GradientSpawnBatchArg<T, NDIM>>(slot, members, slot.offsets.size(), spawn_pool.device_id, stream);
-      /* as for the derivatives: the grid capped at occupancy, the scratch the slot's */
-      const Dim3 spawn_threads = max_thread_dims(2*K);
-      const size_type spawn_smem = transform_shmem_size<T, NDIM>(2*K, std::numeric_limits<size_type>::max());
-      auto spawn_kernel = gradient_spawn_kernel_batched<T, NDIM, std::decay_t<decltype(hg)>>;
-      configure_kernel_smem(spawn_kernel, spawn_smem);
-      const size_type spawn_cap = kernel_grid_cap(spawn_kernel,
-                                                  static_cast<int>(spawn_threads.x * spawn_threads.y * spawn_threads.z),
-                                                  spawn_smem);
-      const size_type spawn_grid = std::min<size_type>(total, spawn_cap);
-      T* spawn_tmp = spawn_pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(spawn_cap) * reconstruct_tmp_size<NDIM>(K));
-      CALL_KERNEL((gradient_spawn_kernel_batched<T, NDIM>), spawn_grid, spawn_threads, spawn_smem,
-                  stream, (slot.dev_args, slot.dev_offsets, static_cast<size_type>(members), total, spawn_tmp, K, hg,
-                           slot.dev_src));
-      checkSubmit();
+      launch_gradient_spawn_kernel_batched<T, NDIM>(spawn_pool, slot, static_cast<size_type>(members), total, K, hg, stream);
       spawn_pool.mark_submitted(slot, stream);
     }
 

@@ -121,7 +121,7 @@ namespace mra::detail {
 #define CONFIGURE_KERNEL(name, shared) \
   do { } while (0)
 
-#else  // __CUDACC__
+#elif defined(MRA_ENABLE_HOST)
 #define checkSubmit() do {} while(0)
 #define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
   do {                                                          \
@@ -129,7 +129,36 @@ namespace mra::detail {
     name args;                                                  \
   } while (0)
 #define CONFIGURE_KERNEL(name, shared) do {} while(0)
+#else  // a CUDA/HIP build compiled by the plain C++ compiler
+/* Kernels cannot be launched from here (see MRA_HAVE_KERNEL_DEFINITIONS below): a
+ * launch site that lacks that guard names an undeclared identifier, which is an error
+ * wherever it appears, also in a template that is never instantiated (unlike a
+ * static_assert, which compilers defer there). */
+#define checkSubmit() do {} while(0)
+#define CALL_KERNEL(name, blocks, thread, shared, stream, args) \
+  MRA_kernel_launch_outside_a_CUDA_or_HIP_translation_unit__guard_it_with_MRA_HAVE_KERNEL_DEFINITIONS
+#define CONFIGURE_KERNEL(name, shared) \
+  MRA_kernel_configuration_outside_a_CUDA_or_HIP_translation_unit__guard_it_with_MRA_HAVE_KERNEL_DEFINITIONS
 #endif // __CUDACC__
+
+/**
+ * Defined where kernels can be compiled and launched: CUDA/HIP translation units and
+ * the host backend. A CUDA/HIP build may also compile code using MRA-TTG with the plain
+ * C++ compiler. There, functions launching kernels are only declared, as in
+ *
+ *   template <typename T, Dimension NDIM>
+ *   void submit_foo_kernel(...)
+ *   #if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+ *   { ... }
+ *   #else
+ *   ;
+ *   #endif
+ *
+ * and their explicit instantiations (src/kernels/) are linked from the library.
+ */
+#if defined(__CUDACC__) || defined(__HIP__) || defined(MRA_ENABLE_HOST)
+#define MRA_HAVE_KERNEL_DEFINITIONS 1
+#endif
 
 namespace mra::detail {
   /**
@@ -145,7 +174,9 @@ namespace mra::detail {
    * ready block to switch to when another stalls, at the cost of that many
    * more scratch-buffer slots.
    */
-#if defined(MRA_ENABLE_CUDA)
+#if !defined(MRA_HAVE_KERNEL_DEFINITIONS)
+  // nothing to cap or configure: there are no kernels outside CUDA/HIP translation units
+#elif defined(MRA_ENABLE_CUDA)
   template <typename KernelT>
   inline std::uint32_t kernel_grid_cap(KernelT kernel, int threads, std::size_t smem_bytes,
                                         std::uint32_t overcommit = 2) {

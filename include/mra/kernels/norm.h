@@ -69,6 +69,7 @@ namespace mra {
     const concepts::TensorView<NDIM+1> auto& in,
     concepts::TensorView<1> auto& result_norms,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
 
@@ -76,6 +77,9 @@ namespace mra {
         (in, result_norms.data(), N, K));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -114,6 +118,26 @@ namespace mra {
       }
     }
 
+    /// launches norm_kernel_batched on the marshalled batch (see submit_norm_batch_leader)
+    template <typename T, Dimension NDIM>
+    void launch_norm_kernel_batched(
+      NormBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_blocks,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      CALL_KERNEL((norm_kernel_batched<T, NDIM>), total_blocks, thread_dims, 0, stream,
+                  (args, member_offsets, num_members, total_blocks, K));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
     /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(node_view, result, N)`;
@@ -151,10 +175,8 @@ namespace mra {
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
-      Dim3 thread_dims = max_thread_dims(2*K);
-      CALL_KERNEL((norm_kernel_batched<T, NDIM>), total_blocks, thread_dims, 0, stream,
-                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_blocks, K));
-      checkSubmit();
+      launch_norm_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                          total_blocks, K, stream);
       pool.mark_submitted(slot, stream);
     }
 

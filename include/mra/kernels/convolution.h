@@ -688,6 +688,7 @@ namespace mra{
     const std::array<bool, 2>& at,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
 #if defined(MRA_CHECK_NORMS)
     // Separate, prior kernel on the same stream -- see
@@ -718,6 +719,9 @@ namespace mra{
     });
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -922,6 +926,7 @@ namespace mra{
     size_type K,
     const T fac,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     using idx = detail::ConvolutionBatchArgIdx;
     using arg_t = detail::ConvolutionBatchArg<T, NDIM>;
@@ -975,6 +980,9 @@ namespace mra{
 
     pool.mark_submitted(slot, stream);
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
 

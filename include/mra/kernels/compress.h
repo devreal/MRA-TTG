@@ -505,6 +505,7 @@ namespace mra {
     const unsigned char* child_kept,
     T trunc_tol,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
 #if defined(MRA_CHECK_NORMS)
     // Separate, prior kernel on the same stream -- see
@@ -527,6 +528,9 @@ namespace mra {
     });
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -676,6 +680,7 @@ namespace mra {
     bool is_ns,
     const HgtT& hgT,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     using idx = detail::CompressBatchArgIdx;
     using arg_t = detail::CompressBatchArg<T, NDIM>;
@@ -718,6 +723,9 @@ namespace mra {
 
     pool.mark_submitted(slot, stream);
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
 

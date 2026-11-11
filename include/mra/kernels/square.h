@@ -108,6 +108,7 @@ namespace mra {
     size_type K,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = transform_shmem_size<T, NDIM>(K);
@@ -115,6 +116,9 @@ namespace mra {
       (D, key, in, out, phibar, phi, quad_x, N, n_nonzero, K, tmp));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -160,6 +164,31 @@ namespace mra {
                                     phibar, phi, quad_x, std::get<3>(arg), K, std::get<4>(arg), local_pos);
       }
     }
+
+    /// launches square_kernel_batched on the marshalled batch (see submit_square_batch_leader)
+    template <typename T, Dimension NDIM>
+    void launch_square_kernel_batched(
+      SquareBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<1> auto& quad_x,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      auto smem_size = transform_shmem_size<T, NDIM>(K);
+      CALL_KERNEL((square_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
+                  (args, member_offsets, num_members, total_nonzero, D, phibar, phi, quad_x, K));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
     /**
      * Called by every member of a batch with the batch_view returned by its
@@ -215,11 +244,8 @@ namespace mra {
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
-      Dim3 thread_dims = max_thread_dims(2*K);
-      auto smem_size = transform_shmem_size<T, NDIM>(K);
-      CALL_KERNEL((square_kernel_batched<T, NDIM>), total_nonzero, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero, D, phibar, phi, quad_x, K));
-      checkSubmit();
+      launch_square_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                            total_nonzero, D, phibar, phi, quad_x, K, stream);
       pool.mark_submitted(slot, stream);
     }
 

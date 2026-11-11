@@ -164,12 +164,16 @@ namespace mra {
     size_type N,
     size_type K,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     CALL_KERNEL(detail::inner_kernel, N, thread_dims, 0, stream,
                 (key, a, b, result, child_results, N));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   template <typename T, Dimension NDIM>
   void submit_matrix_inner_kernel(
@@ -182,12 +186,16 @@ namespace mra {
     size_type M,
     size_type K,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     CALL_KERNEL(detail::matrix_inner_kernel, N, thread_dims, 0, stream,
                 (key, a, b, result, child_results, N, M));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -235,6 +243,26 @@ namespace mra {
       }
     }
 
+    /// launches inner_kernel_batched on the marshalled batch (see submit_inner_batch_leader)
+    template <typename T, Dimension NDIM, bool Matrix>
+    void launch_inner_kernel_batched(
+      InnerBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_blocks,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      CALL_KERNEL((inner_kernel_batched<T, NDIM, Matrix>), total_blocks, thread_dims, 0, stream,
+                  (args, member_offsets, num_members, total_blocks));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
     /**
      * Called by every member of a batch with the batch_view returned by its
      * `co_await ttg::device::coop<Key<NDIM>>(a_view, b_view, result, child_results,
@@ -273,10 +301,8 @@ namespace mra {
 
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
-      Dim3 thread_dims = max_thread_dims(2*K);
-      CALL_KERNEL((inner_kernel_batched<T, NDIM, Matrix>), total_blocks, thread_dims, 0, stream,
-                  (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_blocks));
-      checkSubmit();
+      launch_inner_kernel_batched<T, NDIM, Matrix>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                                   total_blocks, K, stream);
       pool.mark_submitted(slot, stream);
     }
 

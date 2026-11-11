@@ -347,6 +347,7 @@ namespace mra {
     concepts::TensorView<NDIM+1> auto& ns,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
 #if defined(MRA_CHECK_NORMS)
     // Separate, prior kernel on the same stream -- see
@@ -366,6 +367,9 @@ namespace mra {
       (key, N, n_nonzero, K, accumulate_NS, node, tmp, hg, from_parent, r_arr, result, ns));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -556,6 +560,7 @@ namespace mra {
     bool accumulate_NS,
     const concepts::TensorView<2> auto& hg,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     using idx = detail::ReconstructBatchArgIdx;
     using arg_t = detail::ReconstructBatchArg<T, NDIM>;
@@ -610,6 +615,9 @@ namespace mra {
 
     pool.mark_submitted(slot, stream);
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
   namespace detail {
 

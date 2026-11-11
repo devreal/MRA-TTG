@@ -25,9 +25,15 @@ include(MRAGPUWrappers)
 set(MRA_SOURCES gl.cc init.cc twoscale.cc)
 set(MRA_KERNEL_SOURCES "")
 if (MRA_ENABLE_EXPLICIT_INSTANTIATION)
+  # Also what code compiled without nvcc/hipcc links against (see
+  # MRA_HAVE_KERNEL_DEFINITIONS in mra/misc/platform.h).
   set(MRA_KERNEL_SOURCES
     kernels/compress.cc kernels/reconstruct.cc kernels/multiply.cc
-    kernels/derivative.cc kernels/convolution.cc)
+    kernels/derivative.cc kernels/convolution.cc
+    kernels/concat.cc kernels/gaxpy.cc kernels/generate_op1d.cc kernels/gradient_compressed.cc
+    kernels/inner_product.cc
+    kernels/multiply_compressed.cc kernels/norm.cc kernels/simple_norm.cc
+    kernels/transform_functions.cc kernels/truncate.cc)
 endif()
 
 add_library(mra-host STATIC ${MRA_SOURCES} ${MRA_KERNEL_SOURCES})
@@ -97,12 +103,11 @@ if (HAVE_CUDA)
     target_link_libraries(mra-cuda-base INTERFACE mra::jit-headers mra::jit-runtime)
   endif (MRA_ENABLE_JIT)
 
-  if (MRA_KERNEL_SOURCES)
-    mra_generate_gpu_wrappers(
-      SOURCES ${MRA_KERNEL_SOURCES}
-      CUDA_OUTPUT_VAR MRA_CUDA_KERNEL_SOURCES
-    )
-  endif()
+  # the device side of the batching support, needed wherever it is used
+  mra_generate_gpu_wrappers(
+    SOURCES ${MRA_KERNEL_SOURCES} kernels/batch_pool.cc
+    CUDA_OUTPUT_VAR MRA_CUDA_KERNEL_SOURCES
+  )
 
   add_library(mra-cuda STATIC ${MRA_SOURCES} ${MRA_CUDA_KERNEL_SOURCES})
   add_library(mra::cuda ALIAS mra-cuda)
@@ -115,12 +120,10 @@ endif (HAVE_CUDA)
 # ── HIP implementation ────────────────────────────────────────────────────────
 if (HAVE_HIP)
 
-  if (MRA_KERNEL_SOURCES)
-    mra_generate_gpu_wrappers(
-      SOURCES ${MRA_KERNEL_SOURCES}
-      HIP_OUTPUT_VAR MRA_HIP_KERNEL_SOURCES
-    )
-  endif()
+  mra_generate_gpu_wrappers(
+    SOURCES ${MRA_KERNEL_SOURCES} kernels/batch_pool.cc
+    HIP_OUTPUT_VAR MRA_HIP_KERNEL_SOURCES
+  )
 
   add_library(mra-hip STATIC ${MRA_SOURCES} ${MRA_HIP_KERNEL_SOURCES})
   add_library(mra::hip ALIAS mra-hip)

@@ -78,11 +78,15 @@ namespace mra {
     size_type n_nonzero,
     size_type K,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     CALL_KERNEL(detail::concat_kernel, n_nonzero, thread_dims, 0, stream, (key, a, b, out, NA, N, n_nonzero));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #ifndef MRA_ENABLE_HOST
   /**
@@ -123,6 +127,26 @@ namespace mra {
                                  std::get<3>(arg), std::get<4>(arg), local_pos);
       }
     }
+
+    /// launches concat_kernel_batched on the marshalled batch (see submit_concat_batch_leader)
+    template <typename T, Dimension NDIM>
+    void launch_concat_kernel_batched(
+      ConcatBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      size_type K,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      CALL_KERNEL((concat_kernel_batched<T, NDIM>), total_nonzero, thread_dims, 0, stream,
+                  (args, member_offsets, num_members, total_nonzero));
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
     /**
      * Called by every member of a batch with the batch_view returned by its
@@ -176,10 +200,8 @@ namespace mra {
       auto stream = ttg::device::current_stream();
       submit_grouped_copy<arg_t>(slot, nb, slot.offsets.size(), pool.device_id, stream);
       if (total_nonzero > 0) {
-        Dim3 thread_dims = max_thread_dims(2*K);
-        CALL_KERNEL((concat_kernel_batched<T, NDIM>), total_nonzero, thread_dims, 0, stream,
-                    (slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb), total_nonzero));
-        checkSubmit();
+        launch_concat_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                              total_nonzero, K, stream);
       }
       pool.mark_submitted(slot, stream);
     }

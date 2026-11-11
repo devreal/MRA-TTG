@@ -181,6 +181,7 @@ namespace mra {
     size_type K,
     T* tmp,
     ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     Dim3 thread_dims = max_thread_dims(2*K);
     auto smem_size = transform_shmem_size<T, NDIM>(2*K);
@@ -190,6 +191,9 @@ namespace mra {
         quad_x, N, n_nonzero, K));
     checkSubmit();
   }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
 
 #if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
   /* explicit instanatiation */

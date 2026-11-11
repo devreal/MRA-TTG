@@ -21,4 +21,44 @@ namespace mra {
     ttg::device::Stream stream);
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 
+#if defined(MRA_ENABLE_EXPLICIT_INSTANTIATION)
+  /* The instantiations the tasks (mra/tasks/) use, which translation units compiled
+   * without nvcc/hipcc link against: see MRA_HAVE_KERNEL_DEFINITIONS in mra/misc/platform.h. */
+  template void submit_reconstruct_kernel<
+      double,
+      3,
+      SparseTensorView<double, 4>,
+      DenseTensorView<double, 2>,
+      SparseTensorView<double, 4>,
+      std::array<SparseTensorView<double, 4>, 8>,
+      SparseTensorView<double, 4>,
+      SparseTensorView<double, 4>>(
+    Key<3> const&,
+    size_type,
+    size_type,
+    size_type,
+    bool,
+    SparseTensorView<double, 4> const&,
+    DenseTensorView<double, 2> const&,
+    SparseTensorView<double, 4> const&,
+    std::array<SparseTensorView<double, 4>, 8> const&,
+    SparseTensorView<double, 4>&,
+    SparseTensorView<double, 4>&,
+    double*,
+    ttg::device::Stream);
+#ifndef MRA_ENABLE_HOST
+  template void submit_reconstruct_kernel_batched<
+      double,
+      3,
+      DenseTensorView<double, 2>>(
+    detail::GroupedBatchPool<detail::ReconstructBatchArg<double, 3>>&,
+    detail::GroupedBatchPool<detail::ReconstructBatchArg<double, 3>>::slot_t&,
+    size_type,
+    size_type,
+    bool,
+    DenseTensorView<double, 2> const&,
+    ttg::device::Stream);
+#endif // !MRA_ENABLE_HOST
+#endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
+
 } // namespace mra
