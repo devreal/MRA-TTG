@@ -518,6 +518,9 @@ namespace mra {
     checkSubmit();
 #endif // MRA_CHECK_NORMS
 
+    /* nothing to compute (no function with coefficients here): a launch of no blocks is invalid */
+    if (n_nonzero == 0) return;
+
     Dim3 thread_dims = max_thread_dims(2*K);
 
     auto smem_size = transform_shmem_size<T, NDIM>(2*K);

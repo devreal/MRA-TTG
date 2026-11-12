@@ -298,7 +298,9 @@ namespace mra::detail {
 #endif
 
     void ensure_capacity(slot_t& s, std::size_t num_members) {
-      s.dev_args.ensure(device_id, num_members);
+      /* acquire() only hands out a slot whose previous submission has completed,
+       * so its device region may be regrown here (see FixedDeviceRegion::grow) */
+      s.dev_args.grow(device_id, num_members);
       s.host_args.reserve(num_members);
     }
 
