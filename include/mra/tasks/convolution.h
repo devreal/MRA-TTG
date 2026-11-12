@@ -1656,6 +1656,10 @@ namespace mra {
       //dispatch_adjust_parent_tt->set_keymap(procmap);
       //adjust_parent_tt->set_keymap(procmap);
     }
+    /* adjust-leaf modifies the node it receives, which AccumulateDispatch may forward while
+     * other tasks (or outgoing transfers) still read it: the node is not copyable, so the writer
+     * must wait for the readers */
+    adjust_leaf_info_tt->set_defer_writer(true);
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       up_contributions_tt->set_devicemap(devicemap);
       down_contributions_tt->set_devicemap(devicemap);
