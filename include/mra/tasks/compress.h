@@ -271,9 +271,14 @@ namespace detail {
           /**
            * We only produce a result if at least one of the children is non-zero.
            */
-          sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
-          // the node's own non-standard block contributes to the result as well
-          if constexpr (FromNS) sparsity.nonzero_if_any(in);
+          // from non-standard form, the node's own [s|d] block contributes to the result as
+          // well. One call: nonzero_if_any assigns each function (it does not accumulate), so a
+          // second call would drop the functions only the children have.
+          if constexpr (FromNS) {
+            sparsity.nonzero_if_any(in, in0, in1, in2, in3, in4, in5, in6, in7);
+          } else {
+            sparsity.nonzero_if_any(in0, in1, in2, in3, in4, in5, in6, in7);
+          }
           //std::cout << name << " " << key << " sparsity: " << sparsity << std::endl;
 
           // allocate the result
