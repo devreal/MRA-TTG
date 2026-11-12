@@ -179,9 +179,13 @@ namespace mra {
      * below) where only functions that no output depends on do. Only host metadata is
      * read, so this runs ahead of the kernels.
      */
+    /* The propagate task is a host task (also in device builds): it is the only task that
+     * receives U from another process, and a device task receives remote buffers into device
+     * memory only, while the transform task reads U on the host (transform_structure). As a
+     * host task it receives U into host memory and passes it on locally. */
     auto propagate_fn = [fns_in, fns_out, name](const mra::Key<NDIM>& key,
                                                 const node_type& in_node,
-                                                const matrix_type& U) -> TASKTYPE {
+                                                const matrix_type& U) {
       if (in_node.is_ns()) {
         throw std::runtime_error(name + ": input must be compressed, not non-standard");
       }
@@ -190,11 +194,7 @@ namespace mra {
         throw std::runtime_error(name + ": U must be (number of input functions) x (number of output functions)");
       }
 
-#ifndef MRA_ENABLE_HOST
-      auto sends = ttg::device::forward(ttg::device::send<0>(key, U));
-#else  // MRA_ENABLE_HOST
       ttg::send<0>(key, U);
-#endif // MRA_ENABLE_HOST
 
       /* the output functions that continue below each child */
       std::array<bool, num_children> live{};
@@ -213,26 +213,15 @@ namespace mra {
         ++c;
       }
       if (!U_children.empty()) {
-#ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::broadcast<1>(std::move(U_children), U));
-#else  // MRA_ENABLE_HOST
         ttg::broadcast<1>(std::move(U_children), U);
-#endif // MRA_ENABLE_HOST
       }
       if (!skip_children.empty()) {
         matrix_type none(std::array<size_type, 2>{0, 0});
-#ifndef MRA_ENABLE_HOST
-        sends.push_back(ttg::device::broadcast<1>(std::move(skip_children), std::move(none)));
-#else  // MRA_ENABLE_HOST
         ttg::broadcast<1>(std::move(skip_children), std::move(none));
-#endif // MRA_ENABLE_HOST
       }
-#ifndef MRA_ENABLE_HOST
-      co_await std::move(sends);
-#endif // MRA_ENABLE_HOST
     };
 
-    auto propagate_tt = ttg::make_tt<Space>(std::move(propagate_fn),
+    auto propagate_tt = ttg::make_tt<ttg::ExecutionSpace::Host>(std::move(propagate_fn),
                                             ttg::edges(node_p, U_fixed ? U_p : ttg::fuse(U_in, U_p)),
                                             ttg::edges(U_t, U_p),
                                             name + "-propagate", {"node", "U"}, {"U", "child U"});
@@ -306,7 +295,7 @@ namespace mra {
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       dispatch_tt->set_devicemap(devicemap);
-      propagate_tt->set_devicemap(devicemap);
+      /* no device map for the (host) propagate task: with one, a remote U is received on a device */
       transform_tt->set_devicemap(devicemap);
     }
 #ifndef MRA_ENABLE_HOST
