@@ -33,6 +33,10 @@ namespace mra {
 #endif
     using mma::apply_conv_s_warp;
     using mma::apply_conv_s_warps;
+    /* load balancing (see detail::convolution_kernel_batched_lb) */
+    using mma::apply_conv_has_path;
+    using mma::apply_term;
+    using mma::lb_count_r;
 
   } // namespace accel
 } // namespace mra

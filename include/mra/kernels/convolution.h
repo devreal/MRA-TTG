@@ -7,6 +7,7 @@
 #include <iostream>
 #include <tuple>
 #include <vector>
+#include <cstdlib>
 #include "mra/misc/device_batch_pool.h"
 #include "mra/tensor/sparsitymanager.h"
 #include "mra/ops/mxm.h"
@@ -929,6 +930,622 @@ namespace mra{
       }
     }
 
+    /**
+     * Load balancing (MRA_CONV_LB, see submit_convolution_lb). A launch's
+     * work is a list of units: per position, c0 units for its fixed cost
+     * (MRA_CONV_LB_C0), then one per applied k = 2K term. The list is split
+     * into equal shares per SM, each share into R parts: one part per block
+     * (mode 1) or per SM (mode 2, R = 1). A position whose terms span
+     * several parts is summed up by the last of its pieces to finish, which
+     * also does its epilogue.
+     */
+
+    /** What the pre-pass found for one position. */
+    template <typename T>
+    struct lb_rec {
+      unsigned member, local_pos, fnid, in_before, f_before, nr;  // nr: applied k = 2K terms, 0 if none
+      T cnorm;                                                    // ||f||
+    };
+
+    /** The buffers of one load-balanced launch, shared by its kernels. */
+    template <typename T>
+    struct lb_bufs {
+      lb_rec<T>* recs;     // per position
+      unsigned* units;     // per position: c0 + nr
+      unsigned* prefix;    // exclusive prefix sum of units, then the total
+      unsigned* arrive;    // per position: pieces that have finished
+      unsigned* pos_lo;    // per part: its positions [pos_lo, pos_hi)
+      unsigned* pos_hi;
+      unsigned* counters;  // mode 1: a slot counter per SM, then a taken flag per part; mode 2: a cursor per SM
+      T* partials;         // per part: 2 partial results of (2K)^3 (lb_slot)
+      uint4* tterms;       // per member, tcap entries: the matrix indices {d0, d1, d2} of (opid, term)
+      unsigned tcap;
+      unsigned num_sms;
+      unsigned c0;
+    };
+
+    /**
+     * lb_part_lo: the first item of part p of n items in np parts (the first
+     * n % np parts one larger); lb_part_of: the part of item x. lb_sub and
+     * lb_sub_of: the same for part g = s * R + j (the j-th of SM s's R parts)
+     * of W units.
+     */
+    SCOPE unsigned lb_part_lo(unsigned n, unsigned np, unsigned p) {
+      const unsigned q = n / np, r = n % np;
+      return p * q + (p < r ? p : r);
+    }
+    SCOPE unsigned lb_part_of(unsigned n, unsigned np, unsigned x) {
+      const unsigned q = n / np, r = n % np;
+      return x < r * (q + 1) ? x / (q + 1) : r + (x - r * (q + 1)) / q;  // q > 0 in the second case
+    }
+    struct lb_parts { unsigned W, S, R; };  // W units, S SMs, R parts per SM
+    struct lb_range { unsigned lo, hi; };
+    SCOPE lb_range lb_sub(const lb_parts& q, unsigned g) {
+      const unsigned s = g / q.R, j = g % q.R;
+      const unsigned slo = lb_part_lo(q.W, q.S, s), n = lb_part_lo(q.W, q.S, s + 1) - slo;
+      return {slo + lb_part_lo(n, q.R, j), slo + lb_part_lo(n, q.R, j + 1)};
+    }
+    SCOPE unsigned lb_sub_of(const lb_parts& q, unsigned x) {
+      const unsigned s = lb_part_of(q.W, q.S, x);
+      const unsigned slo = lb_part_lo(q.W, q.S, s), n = lb_part_lo(q.W, q.S, s + 1) - slo;
+      return s * q.R + lb_part_of(n, q.R, x - slo);
+    }
+
+    /** The last pos with prefix[pos] <= x; prefix is non-decreasing from prefix[0] = 0. */
+    SCOPE unsigned lb_pos_of(const unsigned* prefix, unsigned n, unsigned x) {
+      unsigned a = 0, b = n;
+      while (b - a > 1) {
+        const unsigned c = (a + b) / 2;
+        if (prefix[c] <= x) a = c; else b = c;
+      }
+      return a;
+    }
+
+    /**
+     * The piece of a position (units [u0, u1), nr terms) in a part (units
+     * rg): whether there is one, whether it is the whole position, its terms
+     * b_begin .. b_begin + b_count - 1, and for a split position the parts
+     * g0 .. g1 its terms fall in.
+     */
+    struct lb_piece_t { bool work, whole; unsigned b_begin, b_count, g0, g1; };
+    SCOPE lb_piece_t lb_piece_of(unsigned u0, unsigned u1, unsigned nr, unsigned c0, lb_range rg, const lb_parts& q) {
+      lb_piece_t p{false, true, 0, 0, 0, 0};
+      if (nr == 0) {
+        p.work = (u0 >= rg.lo);  // no terms: the part with the first unit does it all
+        return p;
+      }
+      const unsigned ub = u0 + c0;  // the first term's unit
+      const unsigned bl = ub > rg.lo ? ub : rg.lo, bh = u1 < rg.hi ? u1 : rg.hi;
+      if (bh <= bl) return p;  // only c0 units in this part
+      p.work = true;
+      p.b_begin = bl - ub;
+      p.b_count = bh - bl;
+      p.whole = (p.b_count == nr);
+      if (!p.whole) {
+        p.g0 = lb_sub_of(q, ub);
+        p.g1 = lb_sub_of(q, u1 - 1);
+      }
+      return p;
+    }
+
+    /**
+     * Part g's slot for the partial result of a position whose terms start in
+     * part g0. 2 per part: a part can hold the end of one split position and
+     * the start of another.
+     */
+    SCOPE size_type lb_slot(unsigned g, unsigned g0) { return 2 * size_type(g) + (g == g0 ? 1 : 0); }
+
+    DEVSCOPE unsigned lb_smid() {
+#if defined(__CUDA_ARCH__)
+      unsigned s;
+      asm volatile("mov.u32 %0, %%smid;" : "=r"(s));
+      return s;
+#else
+      return 0;
+#endif
+    }
+
+    /** Called by a whole warp: the first t < n with open(t), n if none. */
+    template <typename Pred>
+    DEVSCOPE unsigned lb_warp_first(unsigned n, Pred&& open) {
+#if defined(__CUDA_ARCH__)
+      const unsigned lane = thread_id() % 32;
+      for (unsigned base = 0; base < n; base += 32) {
+        const unsigned bits = __ballot_sync(0xffffffffu, base + lane < n && open(base + lane));
+        if (bits) return base + __ffs(bits) - 1;
+      }
+#endif
+      return n;
+    }
+
+    /**
+     * Load-balancing pre-pass: the term table (b.tterms), then one warp per
+     * position for its record (see mra::accel::lb_count_r), units and
+     * arrive and, with apply_conv_splits_s, its S term.
+     */
+    template <typename T, Dimension NDIM, typename KT>
+    LAUNCH_BOUNDS(mra::accel::apply_conv_s_warps * 32)
+    GLOBALSCOPE void convolution_lb_prepass_batched(
+      ConvolutionBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      lb_bufs<T> b,
+      T* s_result,         // with apply_conv_splits_s: total_nonzero x K^3
+      KT K,
+      const T fac)
+    {
+      using idx = ConvolutionBatchArgIdx;
+      const size_type ntab = size_type(num_members) * b.tcap;
+      for (size_type e = size_type(blockIdx.x) * blockDim.x + thread_id(); e < ntab; e += size_type(gridDim.x) * blockDim.x) {
+        const auto& opn = std::get<idx::opnorms>(args[e / b.tcap]);
+        const size_type i = e % b.tcap, nrank = opn.dim(1);
+        if (i < opn.dim(0) * nrank) {
+          const size_type c = i / nrank, mu = i % nrank;
+          b.tterms[e] = make_uint4((unsigned)opn(c, mu, 0, (size_type)NormId::Term), (unsigned)opn(c, mu, 1, (size_type)NormId::Term),
+                                   (unsigned)opn(c, mu, 2, (size_type)NormId::Term), 0u);
+        }
+      }
+
+      constexpr int NW = mra::accel::apply_conv_s_warps;
+      const int warp = thread_id() / 32;
+      const size_type nwarps = size_type(gridDim.x) * NW;
+      for (size_type pos = size_type(blockIdx.x) * NW + warp; pos < total_nonzero; pos += nwarps) {
+        size_type local_pos;
+        const size_type member = find_member_for_pos_warp(member_offsets, num_members, pos, &local_pos);
+        auto& arg = args[member];
+        const auto& in_view = std::get<idx::in_view>(arg);
+        const auto& f_view = std::get<idx::f_view>(arg);
+        const auto& opnorms = std::get<idx::opnorms>(arg);
+        size_type in_before, f_before;
+        const size_type i = find_nth_allocated_warp(std::get<idx::n>(arg), local_pos, std::get<idx::result_view>(arg),
+                                                    in_view, in_before, f_view, f_before);
+        const bool fzero = f_view.is_zero(i);
+        const int opid = opnorms.dim(0) > 1 ? static_cast<int>(i) : 0;
+        lb_rec<T> r{};
+        r.member = member;
+        r.local_pos = local_pos;
+        r.fnid = i;
+        r.in_before = in_before;
+        r.f_before = f_before;
+        if (!fzero) {
+          const int n = mra::accel::lb_count_r<T, NDIM, conv_launch_threads<KT>()>(opid, K, fac, std::get<idx::tol>(arg), opnorms,
+                                                                                    row_data(f_view, i, f_before), r.cnorm);
+          r.nr = std::get<idx::at>(arg)[0] ? n : 0;
+        }
+        if (thread_id() % 32 == 0) {
+          b.recs[pos] = r;
+          b.units[pos] = b.c0 + r.nr;
+          b.arrive[pos] = 0;
+        }
+        if constexpr (mra::accel::apply_conv_splits_s<KT>()) {
+          if (!fzero && std::get<idx::at>(arg)[1]) {
+            mra::accel::apply_conv_s_warp<T, NDIM>(opid, K, fac, std::get<idx::tol>(arg), std::get<idx::transs>(arg),
+                                                   opnorms, row_data(f_view, i, f_before),
+                                                   &s_result[pos * mra::pow(K, Int<NDIM>{})], r.cnorm);
+          }
+        }
+      }
+    }
+
+    /**
+     * One block: the exclusive prefix sum of units into prefix (prefix[n] is
+     * the total), each part's positions [pos_lo, pos_hi), and zeroed
+     * counters. Each thread scans 4 consecutive units per tile.
+     */
+    template <unsigned NT>
+    GLOBALSCOPE void convolution_lb_scan(
+      const unsigned* units,
+      unsigned* prefix,     // n + 1
+      unsigned n,
+      unsigned S,
+      unsigned R,
+      unsigned* pos_lo,     // S * R
+      unsigned* pos_hi,     // S * R
+      unsigned* counters,
+      unsigned ncounters)
+    {
+#if defined(__CUDA_ARCH__)
+      constexpr unsigned IPT = 4, NWS = NT / 32;
+      static_assert(NWS <= 32, "convolution_lb_scan: one warp scans the warp sums");
+      __shared__ unsigned wsum[NWS];
+      const unsigned tid = thread_id(), lane = tid % 32, warp = tid / 32;
+      for (unsigned c = tid; c < ncounters; c += NT) counters[c] = 0;
+      unsigned carry = 0;  // the units of the tiles before
+      for (unsigned base = 0; base < n; base += NT * IPT) {
+        unsigned v[IPT], s = 0;
+        for (unsigned k = 0; k < IPT; ++k) {
+          const unsigned x = base + tid * IPT + k;
+          v[k] = x < n ? units[x] : 0u;
+          s += v[k];
+        }
+        unsigned incl = s;  // inclusive sum over the warp's threads
+        for (unsigned d = 1; d < 32; d <<= 1) {
+          const unsigned y = __shfl_up_sync(0xffffffffu, incl, d);
+          if (lane >= d) incl += y;
+        }
+        if (lane == 31) wsum[warp] = incl;
+        SYNCTHREADS();
+        if (warp == 0) {
+          unsigned w = lane < NWS ? wsum[lane] : 0u;
+          for (unsigned d = 1; d < 32; d <<= 1) {
+            const unsigned y = __shfl_up_sync(0xffffffffu, w, d);
+            if (lane >= d) w += y;
+          }
+          if (lane < NWS) wsum[lane] = w;
+        }
+        SYNCTHREADS();
+        unsigned run = carry + (warp > 0 ? wsum[warp - 1] : 0u) + incl - s;
+        for (unsigned k = 0; k < IPT; ++k) {
+          const unsigned x = base + tid * IPT + k;
+          if (x < n) prefix[x] = run;
+          run += v[k];
+        }
+        carry += wsum[NWS - 1];
+        SYNCTHREADS();  // wsum is reused by the next tile
+      }
+      if (tid == 0) prefix[n] = carry;
+      SYNCTHREADS();
+      const lb_parts q{carry, S, R};
+      for (unsigned g = tid; g < S * R; g += NT) {
+        const lb_range r = lb_sub(q, g);
+        const bool any = r.lo < r.hi;
+        pos_lo[g] = any ? lb_pos_of(prefix, n, r.lo) : 0;
+        pos_hi[g] = any ? lb_pos_of(prefix, n, r.hi - 1) + 1 : 0;
+      }
+#endif // __CUDA_ARCH__
+    }
+
+    /**
+     * Piece p of position pos in part g, using the pre-pass's record. A whole
+     * position goes as in convolution_process_one. A split position's piece
+     * stores its partial result in its slot (lb_slot); the last piece to
+     * finish adds the slots up in part order and does the epilogue.
+     */
+    template <typename T, Dimension NDIM, bool SDone, typename ArgT>
+    DEVSCOPE void convolution_lb_piece(
+      ArgT& arg,
+      const lb_rec<T>& rec,
+      size_type pos,
+      auto K,
+      const T fac,
+      T* tmp,
+      T* s_result,
+      const lb_piece_t& p,
+      unsigned g,
+      const lb_parts& q,
+      const lb_bufs<T>& b)
+    {
+#if defined(__CUDA_ARCH__)
+      using idx = ConvolutionBatchArgIdx;
+      auto TWOK = Int<2>{}*K;
+      using dims_k_type = decltype(make_dims<NDIM>(K));
+      using dims_2k_type = decltype(make_dims<NDIM>(TWOK));
+      using tensor_view_k_type = DenseTensorView<T, NDIM, dims_k_type>;
+      using tensor_view_2k_type = DenseTensorView<T, NDIM, dims_2k_type>;
+      using const_tensor_view_2k_type = DenseTensorView<const T, NDIM, dims_2k_type>;
+      SHARED tensor_view_k_type f0, resultc;
+      SHARED tensor_view_2k_type work1, work2, result, staged_in;
+      SHARED const_tensor_view_2k_type f, in;
+      SHARED size_type i;
+      SHARED int last;
+      const size_type k3 = mra::pow(TWOK, Int<NDIM>{});
+
+      const size_type N = std::get<idx::n>(arg);
+      const auto& in_view = std::get<idx::in_view>(arg);
+      const auto& f_view = std::get<idx::f_view>(arg);
+      auto& result_view = std::get<idx::result_view>(arg);
+      auto& resnorms = std::get<idx::resnorms_view>(arg);
+      const auto& opnorms = std::get<idx::opnorms>(arg);
+      const T tol = std::get<idx::tol>(arg);
+      const std::array<bool, 2>& at = std::get<idx::at>(arg);
+
+      if (is_team_lead()) {
+        const size_type fnid = rec.fnid;
+        convolution_process_one_leader<T, NDIM>(row_data(in_view, fnid, rec.in_before), row_data(f_view, fnid, rec.f_before),
+                                                row_data(result_view, fnid, rec.local_pos), tmp, K, TWOK, N,
+                                                rec.local_pos, blockIdx.x, f0, resultc, work1, work2, staged_in, f, in,
+                                                result, fnid, i,
+                                                SDone ? &s_result[pos * mra::pow(K, Int<NDIM>{})] : nullptr);
+      }
+      SYNCTHREADS();
+
+      if (f_view.is_zero(i)) {  // no terms: whole
+        result = in;
+        if (!resnorms.empty()) {
+          auto resnorm = normf(result);
+          if (is_team_lead()) resnorms[i] = resnorm;
+        }
+      } else {
+        const T cnorm = rec.cnorm;
+        const int opid = opnorms.dim(0) > 1 ? static_cast<int>(i) : 0;
+        const T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
+        const bool gate = (cnorm * opnorm) > (tol / fac);
+        const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank);
+        const T optol = 0.01*(tol / fac / cnorm)/rank;
+        if (p.whole) staged_in = in;  // result may be in's storage, see convolution_process_one
+        if (rec.nr > 0) {  // nr > 0 implies at[0] and the gate
+          /* the slot of a split position's piece (not used if whole) */
+          tensor_view_2k_type part(b.partials + lb_slot(g, p.g0) * k3,
+                                   broadcast_dims<typename tensor_view_2k_type::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+          const uint4* tt = b.tterms + size_type(rec.member) * b.tcap + size_type(opid) * opnorms.dim(1);
+          mra::accel::apply_term<T, NDIM, NormId::Rnorm, true>(opid, TWOK, rank, optol, std::get<idx::transr>(arg),
+                                                              opnorms, f, p.whole ? result : part, p.b_begin, p.b_count, tt);
+        } else {
+          result = 0.0;  // whole: no k = 2K term applied
+        }
+        if (!p.whole) {
+          /* publish this piece; the last one adds up the pieces (the non-empty parts g0 .. g1) */
+          __threadfence();
+          SYNCTHREADS();
+          if (is_team_lead()) {
+            unsigned pieces = 0;
+            for (unsigned h = p.g0; h <= p.g1; ++h) {
+              const lb_range r = lb_sub(q, h);
+              pieces += (r.lo < r.hi) ? 1u : 0u;
+            }
+            last = (atomicAdd(&b.arrive[pos], 1u) + 1 == pieces);
+          }
+          SYNCTHREADS();
+          if (!last) return;
+          __threadfence();
+          staged_in = in;
+          T* rptr = result.data();
+          bool first = true;
+          for (unsigned h = p.g0; h <= p.g1; ++h) {
+            const lb_range r = lb_sub(q, h);
+            if (r.lo == r.hi) continue;
+            const T* src = b.partials + lb_slot(h, p.g0) * k3;
+            for (size_type e = thread_id(); e < k3; e += block_size()) rptr[e] = first ? src[e] : rptr[e] + src[e];
+            first = false;
+          }
+          SYNCTHREADS();
+        }
+        if (gate) {
+          std::array<Slice, NDIM> s0 = std::array<Slice, NDIM>{Slice(0, K), Slice(0, K), Slice(0, K)};
+          if (!at[1]) {
+            resultc = 0.0;
+          } else if constexpr (!SDone) {
+            f0 = f(s0);
+            mra::accel::apply_term<T, NDIM, NormId::Snorm>(opid, K, rank, optol, std::get<idx::transs>(arg),
+                                                          opnorms, f0, resultc);
+          }
+          result(s0) += resultc;
+        }
+        convolution_finalize<T, NDIM>(fac, tol, staged_in, result, resnorms.empty() ? nullptr : &resnorms[i]);
+      }
+      if (!resnorms.empty() && is_team_lead() && resnorms[i] == 0.0) {
+        result_view.set_state(i, SparsityState::ALLOCATED);
+      }
+#endif // __CUDA_ARCH__
+    }
+
+    /** Runs part g's piece of position pos, if it has one (both modes). */
+    template <typename T, Dimension NDIM, typename KT>
+    DEVSCOPE void lb_run_pos(
+      ConvolutionBatchArg<T, NDIM>* args,
+      unsigned pos,
+      unsigned g,
+      lb_range rg,
+      const lb_parts& q,
+      const lb_bufs<T>& b,
+      T* shared_tmp,
+      T* s_result,
+      KT K,
+      const T fac)
+    {
+      const lb_rec<T> rec = b.recs[pos];
+      const lb_piece_t p = lb_piece_of(b.prefix[pos], b.prefix[pos + 1], rec.nr, b.c0, rg, q);
+      if (p.work) {
+        convolution_lb_piece<T, NDIM, mra::accel::apply_conv_splits_s<KT>()>(args[rec.member], rec, pos, K, fac,
+                                                                            shared_tmp, s_result, p, g, q, b);
+      }
+    }
+
+    /**
+     * Load balancing, mode 1: one part per block. A block takes the next part
+     * of its SM (g = SM * R + slot) and runs its positions in order; a block
+     * that is done takes a part no block has taken (an SM can get fewer than
+     * R blocks).
+     */
+    template <typename T, Dimension NDIM, typename KT>
+    LAUNCH_BOUNDS(conv_launch_threads<KT>())
+    GLOBALSCOPE void convolution_kernel_batched_lb(
+      ConvolutionBatchArg<T, NDIM>* args,
+      size_type total_nonzero,
+      T* shared_tmp,
+      T* s_result,
+      lb_bufs<T> b,
+      KT K,
+      const T fac)
+    {
+#if defined(__CUDA_ARCH__)
+      const lb_parts q{b.prefix[total_nonzero], b.num_sms, gridDim.x / b.num_sms};
+      const unsigned G = q.S * q.R;
+      unsigned* claimed = b.counters + b.num_sms;
+      SHARED unsigned g_sh;
+
+      if (is_team_lead()) {  // home part: this SM's next slot
+        const unsigned s = lb_smid();
+        const unsigned j = s < b.num_sms ? atomicAdd(&b.counters[s], 1u) : q.R;
+        const unsigned g = s * q.R + j;
+        g_sh = (j < q.R && atomicCAS(&claimed[g], 0u, 1u) == 0u) ? g : G;
+      }
+      SYNCTHREADS();
+      /* takes a part no block has taken, or returns G */
+      auto steal = [&]() -> unsigned {
+        SYNCTHREADS();  // every thread has read g_sh
+        if (thread_id() < 32) {
+          unsigned c;
+          while (true) {
+            c = lb_warp_first(G, [&](unsigned x) { return *reinterpret_cast<volatile unsigned*>(&claimed[x]) == 0u; });
+            if (c == G) break;
+            unsigned won = 0;
+            if (thread_id() == 0) won = (atomicCAS(&claimed[c], 0u, 1u) == 0u);
+            if (__shfl_sync(0xffffffffu, won, 0)) break;
+          }
+          if (thread_id() == 0) g_sh = c;
+        }
+        SYNCTHREADS();
+        return g_sh;
+      };
+      unsigned g = g_sh;
+      if (g == G) g = steal();
+      while (g != G) {
+        const lb_range rg = lb_sub(q, g);
+        for (unsigned pos = b.pos_lo[g], end = b.pos_hi[g]; pos < end; ++pos) {
+          lb_run_pos<T, NDIM>(args, pos, g, rg, q, b, shared_tmp, s_result, K, fac);
+          SYNCTHREADS();
+        }
+        g = steal();
+      }
+#endif // __CUDA_ARCH__
+    }
+
+    /**
+     * Load balancing, mode 2: one part per SM. The blocks on an SM take its
+     * positions one at a time from a per-SM cursor (b.counters), so they
+     * finish together even if one is faster. A block whose SM is done helps
+     * another SM.
+     */
+    template <typename T, Dimension NDIM, typename KT>
+    LAUNCH_BOUNDS(conv_launch_threads<KT>())
+    GLOBALSCOPE void convolution_kernel_batched_lb_sm(
+      ConvolutionBatchArg<T, NDIM>* args,
+      size_type total_nonzero,
+      T* shared_tmp,
+      T* s_result,
+      lb_bufs<T> b,
+      KT K,
+      const T fac)
+    {
+#if defined(__CUDA_ARCH__)
+      const lb_parts q{b.prefix[total_nonzero], b.num_sms, 1};
+      SHARED unsigned s_sh, k_sh;
+      unsigned k_next = 0;  // team lead
+
+      if (is_team_lead()) {
+        const unsigned sm = lb_smid();
+        s_sh = sm < b.num_sms ? sm : 0;
+        k_sh = atomicAdd(&b.counters[s_sh], 1u);
+      }
+      SYNCTHREADS();
+      while (true) {
+        const unsigned s = s_sh, pos = b.pos_lo[s] + k_sh;
+        SYNCTHREADS();  // every thread has read s_sh and k_sh
+        if (pos < b.pos_hi[s]) {
+          if (is_team_lead()) k_next = atomicAdd(&b.counters[s], 1u);  // the next position, claimed ahead
+          lb_run_pos<T, NDIM>(args, pos, s, lb_sub(q, s), q, b, shared_tmp, s_result, K, fac);
+          if (is_team_lead()) k_sh = k_next;
+          SYNCTHREADS();
+          continue;
+        }
+        /* this SM's part is done: help one that is not */
+        if (thread_id() < 32) {
+          const unsigned t = lb_warp_first(b.num_sms, [&](unsigned x) {
+            return b.pos_lo[x] + *reinterpret_cast<volatile unsigned*>(&b.counters[x]) < b.pos_hi[x];
+          });
+          if (thread_id() == 0) {
+            s_sh = t;
+            if (t < b.num_sms) k_sh = atomicAdd(&b.counters[t], 1u);
+          }
+        }
+        SYNCTHREADS();
+        if (s_sh == b.num_sms) break;
+      }
+#endif // __CUDA_ARCH__
+    }
+
+#if defined(MRA_ENABLE_CUDA)
+    /** MRA_CONV_LB: 0 off (convolution_kernel_batched), 1 convolution_kernel_batched_lb, 2 ..._lb_sm. Read once. */
+    inline int lb_mode() {
+      static const int m = [] { const char* e = std::getenv("MRA_CONV_LB"); return e != nullptr ? std::atoi(e) : 0; }();
+      return m;
+    }
+
+    /**
+     * The load-balanced launch: pre-pass, scan, then the mode's kernel at the
+     * resident grid. Scratch: tmp | S terms | partial results | records |
+     * units, prefix, arrive, pos_lo, pos_hi, counters | term table.
+     */
+    template <typename T, Dimension NDIM, typename KT, typename SlotT>
+    void submit_convolution_lb(
+      SlotT& slot,
+      int device_id,
+      size_type num_members,
+      size_type total_nonzero,
+      KT K,
+      const T fac,
+      Dim3 thread_dims,
+      std::size_t smem_size,
+      ttg::device::Stream stream)
+    {
+      // an empty grid is an invalid launch (see submit_convolution_kernel_batched)
+      if (total_nonzero == 0) return;
+      /* a position's fixed cost in units; >= 1 so every position has a unit */
+      static const unsigned c0 = [] {
+        const char* e = std::getenv("MRA_CONV_LB_C0");
+        return static_cast<unsigned>(std::max(1, e != nullptr ? std::atoi(e) : 10));
+      }();
+      static const unsigned num_sms = [] {
+        int device = 0, n = 0;
+        cudaGetDevice(&device);
+        cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, device);
+        return static_cast<unsigned>(n);
+      }();
+      constexpr bool SDone = mra::accel::apply_conv_splits_s<KT>();
+      const bool per_sm = lb_mode() == 2;
+      auto kernel = per_sm ? &convolution_kernel_batched_lb_sm<T, NDIM, KT> : &convolution_kernel_batched_lb<T, NDIM, KT>;
+      const int threads = static_cast<int>(thread_dims.x * thread_dims.y * thread_dims.z);
+      const unsigned grid = kernel_grid_cap(kernel, threads, smem_size, 1);
+      const unsigned R = per_sm ? 1 : grid / num_sms;
+      const std::size_t n = total_nonzero, NP = std::size_t(num_sms) * R;
+      constexpr std::size_t kK = KT::value;
+      const std::size_t k3 = mra::pow(2 * kK, NDIM);
+      unsigned tcap = 0;  // term table entries per member: the largest operators x rank
+      for (const auto& a : slot.args) {
+        const auto& opn = std::get<ConvolutionBatchArgIdx::opnorms>(a);
+        tcap = std::max<unsigned>(tcap, static_cast<unsigned>(opn.dim(0) * opn.dim(1)));
+      }
+
+      const std::size_t b_tmp = align_to_type<T>(grid * convolution_tmp_size<NDIM>(K) * sizeof(T));
+      const std::size_t b_s = align_to_type<T>(SDone ? n * mra::pow(kK, NDIM) * sizeof(T) : 0);
+      const std::size_t b_part = align_to_type<T>(2 * NP * k3 * sizeof(T));
+      const std::size_t b_rec = align_to_type<T>(n * sizeof(lb_rec<T>));
+      const std::size_t ncounters = num_sms + NP;
+      const std::size_t b_u32 = align_to_type<T>((3 * n + 1 + 2 * NP + ncounters) * sizeof(unsigned));
+      const std::size_t b_terms = std::size_t(num_members) * tcap * sizeof(uint4);
+      slot.dev_scratch.grow(device_id, b_tmp + b_s + b_part + b_rec + b_u32 + b_terms);
+      char* ptr = reinterpret_cast<char*>(slot.dev_scratch.get());
+      T* shared_tmp = reinterpret_cast<T*>(ptr);
+      T* s_result = SDone ? reinterpret_cast<T*>(ptr + b_tmp) : nullptr;
+      lb_bufs<T> b;
+      b.partials = reinterpret_cast<T*>(ptr + b_tmp + b_s);
+      b.recs = reinterpret_cast<lb_rec<T>*>(ptr + b_tmp + b_s + b_part);
+      b.units = reinterpret_cast<unsigned*>(ptr + b_tmp + b_s + b_part + b_rec);
+      b.prefix = b.units + n;
+      b.arrive = b.prefix + n + 1;
+      b.pos_lo = b.arrive + n;
+      b.pos_hi = b.pos_lo + NP;
+      b.counters = b.pos_hi + NP;
+      b.tterms = reinterpret_cast<uint4*>(ptr + b_tmp + b_s + b_part + b_rec + b_u32);
+      b.tcap = tcap;
+      b.num_sms = num_sms;
+      b.c0 = c0;
+
+      constexpr int pw = mra::accel::apply_conv_s_warps;
+      const size_type grid_p = std::min<size_type>((total_nonzero + pw - 1) / pw,
+          kernel_grid_cap(convolution_lb_prepass_batched<T, NDIM, KT>, pw * 32, 0, 1));
+      CALL_KERNEL((convolution_lb_prepass_batched<T, NDIM, KT>), grid_p, pw * 32, 0, stream,
+                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, b, s_result, K, fac));
+      CALL_KERNEL((convolution_lb_scan<1024>), 1, 1024, 0, stream,
+                  (b.units, b.prefix, static_cast<unsigned>(total_nonzero), num_sms, R, b.pos_lo, b.pos_hi, b.counters,
+                   static_cast<unsigned>(ncounters)));
+      CALL_KERNEL(kernel, grid, thread_dims, smem_size, stream,
+                  (slot.dev_args, total_nonzero, shared_tmp, s_result, b, K, fac));
+    }
+#endif // MRA_ENABLE_CUDA
+
 #if defined(MRA_CHECK_NORMS)
     /**
      * Debug-only: cross-checks, for every member, that the flattened launch
@@ -1039,6 +1656,16 @@ namespace mra{
     // first allocation already covers every later launch and never needs to
     // grow (see its comment for why growing it would be unsafe).
     detail::with_ct_K(K, [&](auto ctK) {
+#if defined(MRA_ENABLE_CUDA)
+      // load balancing (MRA_CONV_LB, see detail::submit_convolution_lb), for the Ks with a tensor-core path
+      if constexpr (mra::accel::apply_conv_has_path<decltype(ctK)>()) {
+        if (detail::lb_mode() != 0) {
+          detail::submit_convolution_lb<T, NDIM>(slot, pool.device_id, num_members, total_nonzero, ctK, fac,
+                                                 thread_dims, smem_size, stream);
+          return;
+        }
+      }
+#endif // MRA_ENABLE_CUDA
       size_type grid_cap = detail::kernel_grid_cap(detail::convolution_kernel_batched<T, NDIM, decltype(ctK)>, threads, smem_size);
       size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
       const std::size_t tmp_elems = static_cast<std::size_t>(grid_cap) * convolution_tmp_size<NDIM>(K);

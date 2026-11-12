@@ -135,7 +135,7 @@ namespace mra {
      * The shared memory (apply_conv_shmem_size) holds W followed by two sets
      * of {Tx, Ty, Tz}.
      */
-    template<typename T, Dimension NDIM, NormId Term,
+    template<typename T, Dimension NDIM, NormId Term, bool Ranged = false,
              concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
@@ -148,8 +148,10 @@ namespace mra {
       const ViewTrans& trans,
       const ViewOpnorms& opnorms,
       const ViewF& f,
-      ViewResult& result  // size K, stores the sum
-      )
+      ViewResult& result,  // size K, stores the sum
+      int b_begin = 0,     // Ranged: only the applied terms b_begin .. b_begin + b_count - 1
+      int b_count = 0,
+      const uint4* tterm = nullptr)  // Ranged: term mu's matrix indices {d0, d1, d2} at tterm[mu], not NormId::Term
     {
       static_assert(std::is_same_v<T, double>, "apply_conv_k: only double is supported");
       static_assert(NDIM == 3, "apply_conv_k: only NDIM=3 is supported");
@@ -293,9 +295,17 @@ namespace mra {
       }
       auto prefetch = [&](int mu, T* tbuf) {
         /* the matrices of term mu: trans[d] holds them at the term's index (see NormId::Term) */
-        const size_type off_x = (size_type)norm(mu, 2, NormId::Term) * k * k;
-        const size_type off_y = (size_type)norm(mu, 1, NormId::Term) * k * k;
-        const size_type off_z = (size_type)norm(mu, 0, NormId::Term) * k * k;
+        size_type off_x, off_y, off_z;
+        if constexpr (!Ranged) {
+          off_x = (size_type)norm(mu, 2, NormId::Term) * k * k;
+          off_y = (size_type)norm(mu, 1, NormId::Term) * k * k;
+          off_z = (size_type)norm(mu, 0, NormId::Term) * k * k;
+        } else {
+          const uint4 tv = __ldg(tterm + mu);
+          off_x = size_type(tv.z * unsigned(k * k));
+          off_y = size_type(tv.y * unsigned(k * k));
+          off_z = size_type(tv.x * unsigned(k * k));
+        }
         #pragma unroll
         for (int j = 0; j < CJ; ++j) {
           if (csrc[j] != nullptr) {
@@ -319,6 +329,9 @@ namespace mra {
         return norm(mu, 0, NormId::Fac);
       };
       int mu = next_kept(0);
+      if constexpr (Ranged) {
+        for (int s = 0; s < b_begin && mu < rank; ++s) mu = next_kept(mu + 1);
+      }
       T mufac = 0.0;
       if (mu < rank) {
         prefetch(mu, tbufs);
@@ -399,7 +412,12 @@ namespace mra {
          * next term's matrices can go there while this one finishes */
         SYNCTHREADS();
 
-        const int mu_next = next_kept(mu + 1);
+        int mu_next;
+        if constexpr (Ranged) {
+          mu_next = (--b_count > 0) ? next_kept(mu + 1) : rank;  // b_count: terms left, this one included
+        } else {
+          mu_next = next_kept(mu + 1);
+        }
         T mufac_next = 0.0;
         if (mu_next < rank) {
           prefetch(mu_next, tbufs + (buf ^ 1) * 3 * k * k);
@@ -534,6 +552,14 @@ namespace mra {
         return norm(mu, 0, NormId::Fac);
       }
 
+      /* the number of applied terms */
+      DEVSCOPE int count() const {
+        int n = 0;
+        for (int w = 0; w < (m_mask_rank + 31) / 32; ++w) n += __popc(m_mask[w]);
+        for (int mu = m_mask_rank; mu < m_rank; ++mu) n += kept(mu);
+        return n;
+      }
+
     private:
       /* The calling warp fills the mask words of terms first, first + stride,
        * ... (32 terms each). */
@@ -599,7 +625,7 @@ namespace mra {
      * stored at s ^ h(x', y') (see widx), so no store or load has bank
      * conflicts.
      */
-    template<typename T, Dimension NDIM, NormId Term,
+    template<typename T, Dimension NDIM, NormId Term, bool Ranged = false,
              concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
@@ -612,8 +638,10 @@ namespace mra {
       const ViewTrans& trans,
       const ViewOpnorms& opnorms,
       const ViewF& f,
-      ViewResult& result  // size K, stores the sum
-      )
+      ViewResult& result,  // size K, stores the sum
+      int b_begin = 0,     // Ranged: see apply_conv_k
+      int b_count = 0,
+      const uint4* tterm = nullptr)
     {
       static_assert(std::is_same_v<T, double>, "apply_conv_k6: only double is supported");
       static_assert(NDIM == 3, "apply_conv_k6: only NDIM=3 is supported");
@@ -738,9 +766,16 @@ namespace mra {
         plan_yz |= plan_entry(i, false) << (8 * p);
       }
       auto prefetch = [&](int mu, T* tbuf) {
+        [[maybe_unused]] const uint4 tv = Ranged ? __ldg(tterm + mu) : uint4{};
         #pragma unroll
         for (int m = 0; m < 3; ++m) {  // 0: Tx, 1: Ty, 2: Tz
-          const T* src = trans[2 - m].data() + terms.offset(mu, 2 - m, k);
+          const T* src;
+          if constexpr (!Ranged) {
+            src = trans[2 - m].data() + terms.offset(mu, 2 - m, k);
+          } else {
+            const unsigned ti = (m == 0) ? tv.z : (m == 1) ? tv.y : tv.x;
+            src = trans[2 - m].data() + size_type(ti * unsigned(k * k));
+          }
           const uint32_t plan = (m == 0) ? plan_x : plan_yz;
           #pragma unroll
           for (int p = 0; p < PJ; ++p) {
@@ -773,6 +808,9 @@ namespace mra {
       int buf = 0;
       /* mufac is loaded along with the term's prefetch */
       int mu = terms.next(0);
+      if constexpr (Ranged) {
+        mu = terms.advance(mu, b_begin);
+      }
       T mufac = 0.0;
       if (mu < rank) {
         prefetch(mu, tbufs);
@@ -846,7 +884,12 @@ namespace mra {
          * next term's matrices can go there while this one finishes */
         SYNCTHREADS();
 
-        const int mu_next = terms.next(mu + 1);
+        int mu_next;
+        if constexpr (Ranged) {
+          mu_next = (--b_count > 0) ? terms.next(mu + 1) : rank;
+        } else {
+          mu_next = terms.next(mu + 1);
+        }
         T mufac_next = 0.0;
         if (mu_next < rank) {
           prefetch(mu_next, tbufs + (buf ^ 1) * TSET);
@@ -1094,14 +1137,16 @@ namespace mra {
     }
 
     /**
-     * ||f|| of the 4096 values at fptr, computed by one warp in the order
-     * normf uses in a 256-thread block, so the result is bit for bit the
-     * one convolution_kernel_impl gets: lane l plays threads l + 32j
-     * (j = 0..7) of sumabssq, then reduce_block's two reduce_warp stages.
+     * ||f|| of the N values at fptr by one warp, bit for bit as normf
+     * computes it in a BS-thread block: lane l does the sums of threads
+     * l + 32j, then reduce_block's two reduce_warp stages.
      */
+    template<unsigned BS, unsigned N>
     __device__ __forceinline__
-    double normf_block256_by_warp(const double* fptr) {
-      constexpr unsigned BS = 256, N = 4096, NJ = BS / MRA_WARP_SIZE;
+    double normf_block_by_warp(const double* fptr) {
+      constexpr unsigned NJ = BS / MRA_WARP_SIZE;
+      static_assert(BS % MRA_WARP_SIZE == 0 && NJ <= MRA_WARP_SIZE && N >= BS,
+                    "normf_block_by_warp: whole warps, at most 32, and every thread has a value");
       const unsigned lane = thread_id() % MRA_WARP_SIZE;
       const double* p = fptr + lane;
       double v = 0.0;  // warp j's sum in lane j, zero elsewhere
@@ -1282,15 +1327,17 @@ namespace mra {
         *reinterpret_cast<double2*>(&resultc[g * k * k + 8 * nt + 2 * t]) = make_double2(acc[nt][0], acc[nt][1]);
       }
     }
+#endif // MRA_HAVE_DMMA
 
     /**
      * Applies all terms of one (R or S) separated operator to the k^3 tensor
      * f with the term function for k: apply_conv_k (k = 16 or 8, K = 8),
      * apply_conv_k6 (k = 12, the R term of K = 6) or apply_conv_k6s (k = 6,
      * the S term of K = 6). What each needs from the block is listed in
-     * apply_term_needs.
+     * apply_term_needs. Declared for every target (the load-balanced kernels
+     * call it directly); does nothing without the tensor-core path.
      */
-    template<typename T, Dimension NDIM, NormId Term,
+    template<typename T, Dimension NDIM, NormId Term, bool Ranged = false,
              concepts::TensorViewArray<3, (size_t)NDIM> ViewTrans,
              concepts::TensorView<4> ViewOpnorms,
              concepts::TensorView<NDIM> ViewF,
@@ -1303,20 +1350,24 @@ namespace mra {
       const ViewTrans& trans,
       const ViewOpnorms& opnorms,
       const ViewF& f,
-      ViewResult& result  // size k, stores the sum
-      )
+      ViewResult& result,  // size k, stores the sum
+      int b_begin = 0,     // Ranged (k = 16, 12): see apply_conv_k
+      int b_count = 0,
+      const uint4* tterm = nullptr)
     {
+#ifdef MRA_HAVE_DMMA
       constexpr size_type kv = decltype(k)::value;
+      static_assert(!Ranged || kv == 16 || kv == 12, "apply_term: B-set ranges only for k = 16 and 12");
       if constexpr (kv == 16 || kv == 8) {
-        apply_conv_k<T, NDIM, Term>(opid, k, rank, optol, trans, opnorms, f, result);
+        apply_conv_k<T, NDIM, Term, Ranged>(opid, k, rank, optol, trans, opnorms, f, result, b_begin, b_count, tterm);
       } else if constexpr (kv == 12) {
-        apply_conv_k6<T, NDIM, Term>(opid, k, rank, optol, trans, opnorms, f, result);
+        apply_conv_k6<T, NDIM, Term, Ranged>(opid, k, rank, optol, trans, opnorms, f, result, b_begin, b_count, tterm);
       } else {
         static_assert(kv == 6, "apply_term: no term function for this k (see apply_term_needs)");
         apply_conv_k6s<T, NDIM, Term>(opid, k, rank, optol, trans, opnorms, f, result);
       }
-    }
 #endif // MRA_HAVE_DMMA
+    }
 
     /**
      * Whether apply_conv takes the tensor-core path for a K of type KT: K is
@@ -1412,12 +1463,13 @@ namespace mra {
       const ViewTranss& transs,
       const ViewOpnorms& opnorms,
       const T* fptr,      // f, (2K)^3
-      T* resultc)         // K^3
+      T* resultc,         // K^3
+      T cnorm = -1.0)     // ||f|| if known (the load-balancing pre-pass)
     {
 #ifdef MRA_HAVE_DMMA
       static_assert(decltype(K)::value == 8, "apply_conv_s_warp: only K = 8 is split off");
       /* ||f|| and the gate, as in convolution_kernel_impl */
-      const T cnorm = normf_block256_by_warp(fptr);
+      if (cnorm < 0) cnorm = normf_block_by_warp<256, 4096>(fptr);
       const T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
       if (!((cnorm * opnorm) > (tol / fac))) return;
       /* rank and optol, as in detail::apply_conv */
@@ -1426,6 +1478,43 @@ namespace mra {
       const T optol = 0.01*tolc/rank;
       apply_conv_k8w<T, NDIM, NormId::Snorm>(opid, rank, optol, transs, opnorms, fptr, resultc);
 #endif // MRA_HAVE_DMMA
+    }
+
+    /**
+     * For the load-balancing pre-pass, one warp per f: ||f|| into cnorm (as
+     * normf in a BS-thread block) and the number of applied k = 2K terms, 0
+     * if gated out. It must screen as apply_conv_k and apply_conv_k6 do,
+     * since the load-balanced kernels split f's terms by this count. Traps
+     * without the tensor-core path.
+     */
+    template<typename T, Dimension NDIM, unsigned BS, concepts::TensorView<4> ViewOpnorms>
+    DEVSCOPE int lb_count_r(
+      int opid,
+      auto K,
+      const T fac,
+      const T tol,
+      const ViewOpnorms& opnorms,
+      const T* fptr,  // f, (2K)^3
+      T& cnorm)
+    {
+      int n = 0;
+#ifdef MRA_HAVE_DMMA
+      constexpr unsigned k2 = 2 * decltype(K)::value;
+      cnorm = normf_block_by_warp<BS, k2 * k2 * k2>(fptr);
+      const T opnorm = opnorms(opid, 0, 0, (size_type)NormId::Opnorm);
+      if ((cnorm * opnorm) > (tol / fac)) {
+        const size_type rank = opnorms(opid, 0, 0, (size_type)NormId::Rank);
+        const T tolc = tol / fac / cnorm;
+        const T optol = 0.01*tolc/rank;
+        const unsigned lane = thread_id() % MRA_WARP_SIZE;
+        __shared__ typename conv_terms<T, NDIM, NormId::Rnorm>::mask_type mask[apply_conv_s_warps];
+        const conv_terms<T, NDIM, NormId::Rnorm> terms(opid, rank, optol, opnorms, mask[thread_id() / MRA_WARP_SIZE], lane);
+        n = terms.count();
+      }
+#elif defined(__CUDA_ARCH__)
+      __trap();
+#endif // MRA_HAVE_DMMA
+      return n;
     }
 
     /**
