@@ -50,11 +50,52 @@ namespace mra {
    */
   namespace detail {
     /**
-     * Determines which output functions have a non-zero node at the key of in_node and
-     * which have children below it.
+     * The host metadata of an input node that the propagate task reads: whether it is
+     * non-standard, which functions are non-zero, and which children are leaves. It holds
+     * no buffer, so sending it from the (device) dispatch task to the host propagate task
+     * does not make TTG push the node's coefficients out to the host. (TTG pushes out
+     * every datum a device task sends to a host task, by turning the flow into a write
+     * while other device tasks may still read the copy.)
      */
-    template <typename T, Dimension NDIM>
-    void transform_structure(const mra::FunctionsCompressedNode<T, NDIM>& in_node,
+    template <Dimension NDIM>
+    struct TransformNodeStructure {
+      static constexpr const int num_children = Key<NDIM>::num_children();
+      bool ns = false;
+      std::vector<char> nonzero;                              // per function
+      std::vector<std::array<bool, num_children>> child_leaf; // per function and child
+
+      TransformNodeStructure() = default;
+
+      template <typename T>
+      explicit TransformNodeStructure(const FunctionsCompressedNode<T, NDIM>& node, size_type N)
+      : ns(node.is_ns()), nonzero(N), child_leaf(N)
+      {
+        for (size_type i = 0; i < N; ++i) {
+          nonzero[i] = !node.is_zero(i);
+          for (int c = 0; c < num_children; ++c) child_leaf[i][c] = node.is_child_leaf(i, c);
+        }
+      }
+
+      bool is_ns() const { return ns; }
+      bool is_zero(size_type i) const { return !nonzero[i]; }
+      bool is_child_leaf(size_type i, int c) const { return child_leaf[i][c]; }
+      bool is_all_child_leaf(const Key<NDIM>& child) const {
+        const int c = child.childindex();
+        return std::all_of(child_leaf.begin(), child_leaf.end(), [c](const auto& leaf) { return leaf[c]; });
+      }
+
+      template <typename Archive>
+      void serialize(Archive& ar) { ar & ns & nonzero & child_leaf; }
+      template <typename Archive>
+      void serialize(Archive& ar, const unsigned int) { serialize(ar); }
+    };
+
+    /**
+     * Determines which output functions have a non-zero node at the key of in_node and
+     * which have children below it. NodeT is the input node or its TransformNodeStructure.
+     */
+    template <typename T, Dimension NDIM, typename NodeT>
+    void transform_structure(const NodeT& in_node,
                              const T* U, size_type N, size_type M,
                              std::vector<std::array<bool, mra::Key<NDIM>::num_children()>>& has_child,
                              SparsityInfo& sparsity)
@@ -142,18 +183,23 @@ namespace mra {
     std::nullptr_t batch_pool = nullptr; // never used, only captured
 #endif // MRA_ENABLE_HOST
 
-    ttg::Edge<mra::Key<NDIM>, node_type> node_p, node_t;
+    using structure_type = detail::TransformNodeStructure<NDIM>;
+    ttg::Edge<mra::Key<NDIM>, structure_type> node_p;
+    ttg::Edge<mra::Key<NDIM>, node_type> node_t;
     ttg::Edge<mra::Key<NDIM>, matrix_type> U_p(name + "-U"), U_t;
 
     /**
-     * Forward the input nodes to the propagate and transform tasks and seed the root
-     * with U, if it is fixed.
+     * Forward the input nodes to the transform task, their structure to the propagate
+     * task, and seed the root with U, if it is fixed. The propagate task receives only
+     * the structure: sending it the node would push its coefficients out to the host.
      */
     auto dispatch_fn = [U_fixed, fns_in, fns_out, name](const mra::Key<NDIM>& key, const node_type& node) -> TASKTYPE {
+      structure_type structure(node, fns_in->num_functions(key));
 #ifndef MRA_ENABLE_HOST
-      auto sends = ttg::device::forward(ttg::device::send<0>(key, node), ttg::device::send<1>(key, node));
+      auto sends = ttg::device::forward(ttg::device::send<0>(key, std::move(structure)),
+                                        ttg::device::send<1>(key, node));
 #else  // MRA_ENABLE_HOST
-      ttg::send<0>(key, node);
+      ttg::send<0>(key, std::move(structure));
       ttg::send<1>(key, node);
 #endif // MRA_ENABLE_HOST
       if (key.level() == 0 && U_fixed) {
@@ -184,7 +230,7 @@ namespace mra {
      * memory only, while the transform task reads U on the host (transform_structure). As a
      * host task it receives U into host memory and passes it on locally. */
     auto propagate_fn = [fns_in, fns_out, name](const mra::Key<NDIM>& key,
-                                                const node_type& in_node,
+                                                const structure_type& in_node,
                                                 const matrix_type& U) {
       if (in_node.is_ns()) {
         throw std::runtime_error(name + ": input must be compressed, not non-standard");
