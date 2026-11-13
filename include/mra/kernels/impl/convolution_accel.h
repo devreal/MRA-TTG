@@ -22,11 +22,21 @@ namespace mra {
     using wmma::apply_conv;
     using wmma::apply_conv_shmem_size;
     using wmma::apply_conv_min_threads;
+    /* WMMA never splits off the S term (see mma::apply_conv_splits_s) */
+    template<typename KT>
+    SCOPE constexpr bool apply_conv_splits_s() { return false; }
 #else
     using mma::apply_conv;
     using mma::apply_conv_shmem_size;
     using mma::apply_conv_min_threads;
+    using mma::apply_conv_splits_s;
 #endif
+    using mma::apply_conv_s_warp;
+    using mma::apply_conv_s_warps;
+    /* load balancing (see detail::convolution_kernel_batched_lb) */
+    using mma::apply_conv_has_path;
+    using mma::apply_term;
+    using mma::lb_count_r;
 
   } // namespace accel
 } // namespace mra
