@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -177,11 +178,14 @@ namespace mra {
       /* the nodes this process sends, taken out of the vector now */
       struct Source {
         map_type nodes;
+        std::set<key_type> keys;   // of the nodes this process holds, kept after they are sent
         std::mutex mtx;
       };
       auto source = std::make_shared<Source>();
       source->nodes = std::move(m_impl->nodes);
       m_impl->nodes.clear();
+      for (const auto& [key, node] : source->nodes) source->keys.insert(key);
+
       ttg::Edge<int, void> source_e(name + "-source");
       ttg::Edge<key_type, node_type> forward_e(name + "-forward");
 
@@ -203,8 +207,12 @@ namespace mra {
        * share with read-only consumers without copying it. Moving it on from the
        * task that took it over marks it read-only, after which TTG shares it among
        * all consumers of `out` (and defers a single consumer that takes it over).
-       * With the keymap of the store the node stays on its process. A device task,
-       * as the store, so that the node is not pushed out to the host. */
+       * The forward task runs on the process that holds the node (see its keymap):
+       * the source is a host task, and a host task sends the host copy of a datum to
+       * another process, while the data of a stored node is on the device. The
+       * forward task is a device task, so TTG pushes the node out to the host before
+       * sending it to a consumer on another process (with an MPI that cannot send
+       * from device memory). */
       auto forward_tt = ttg::make_tt<Space>([](const key_type& key, node_type&& node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::send<0>(key, std::move(node));
@@ -212,7 +220,18 @@ namespace mra {
         ttg::send<0>(key, std::move(node));
 #endif // MRA_ENABLE_HOST
       }, ttg::edges(forward_e), ttg::edges(out), name + "-forward", {"input"}, {"output"});
-      if constexpr (!std::is_same_v<ProcMap, ttg::Void>) forward_tt->set_keymap(procmap);
+      /* the process holding a node: only the source's own process sends it, so the
+       * keymap is only evaluated there for the keys it holds */
+      const int this_rank = ttg::default_execution_context().rank();
+      if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
+        forward_tt->set_keymap([source, this_rank, procmap](const key_type& key) {
+          return source->keys.count(key) ? this_rank : procmap(key);
+        });
+      } else {
+        forward_tt->set_keymap([source, this_rank](const key_type& key) {
+          return source->keys.count(key) ? this_rank : 0;
+        });
+      }
       if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) forward_tt->set_devicemap(devicemap);
 
       auto ins = std::make_tuple(dispatch_tt->template in<0>());
