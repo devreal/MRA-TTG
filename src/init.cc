@@ -1,4 +1,5 @@
 
+#include <cstdlib>
 #include <madness/mra/mra.h>
 #include <madness/world/world.h>
 #include <madness/mra/operator.h>
@@ -12,6 +13,10 @@
 namespace mra {
 
   void initialize(int& argc, char **& argv, int ncores) {
+    // PaRSEC's device memory zone allocator hands out multiples of its block size (512 KB by
+    // default), which wastes most of a block on the many small allocations of the MRA-TTG
+    // graphs (tree nodes, norms, sparsity bytes): 4 KB blocks, unless set in the environment
+    setenv("PARSEC_MCA_device_cuda_memory_block_size", "4096", /* overwrite = */ 0);
     ttg::initialize(argc, argv, ncores);
 
     mra::GLinitialize();
