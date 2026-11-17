@@ -176,8 +176,7 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::TransformFunctionsBatchArg<T, NDIM>>> batch_pool;
     if (enable_batching) {
-      batch_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::TransformFunctionsBatchArg<T, NDIM>>>(
-                     ttg::device::num_devices(), max_batch_size);
+      batch_pool = detail::shared_pool_registry<detail::TransformFunctionsBatchArg<T, NDIM>>(max_batch_size);
     }
 #else  // MRA_ENABLE_HOST
     std::nullptr_t batch_pool = nullptr; // never used, only captured

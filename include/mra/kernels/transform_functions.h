@@ -183,6 +183,7 @@ namespace mra {
     {
       using arg_t = TransformFunctionsBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("transform_functions", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

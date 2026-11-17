@@ -66,7 +66,7 @@ namespace mra {
 #ifndef MRA_ENABLE_HOST
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::TruncateBatchArg<T, NDIM>>> truncate_pool;
     if (enable_truncate_batching) {
-      truncate_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::TruncateBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      truncate_pool = detail::shared_pool_registry<detail::TruncateBatchArg<T, NDIM>>(mra::get_batch_size());
     }
 #else
     // GroupedBatchPoolRegistry only exists on device builds; this placeholder

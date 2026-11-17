@@ -57,7 +57,7 @@ namespace mra {
       /* shared by every instance of batch_group, whose batches may mix their tasks */
       using registry_t = detail::GroupedBatchPoolRegistry<detail::ConcatBatchArg<T, NDIM>>;
       batch_pool = batch_group.pool<registry_t>([&]{
-        return std::make_shared<registry_t>(ttg::device::num_devices(), max_batch_size);
+        return detail::shared_pool_registry<detail::ConcatBatchArg<T, NDIM>>(max_batch_size);
       }, K);
     }
 #else  // MRA_ENABLE_HOST

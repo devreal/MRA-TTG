@@ -69,7 +69,7 @@ namespace detail {
     // compress, batching here is unrestricted from the start.
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>> reconstruct_pool;
     if (enable_reconstruct_batching) {
-      reconstruct_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::ReconstructBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      reconstruct_pool = detail::shared_pool_registry<detail::ReconstructBatchArg<T, NDIM>>(mra::get_batch_size());
     }
 #else
     // GroupedBatchPoolRegistry only exists on device builds; this placeholder only

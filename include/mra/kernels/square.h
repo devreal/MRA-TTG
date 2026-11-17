@@ -210,6 +210,7 @@ namespace mra {
     {
       using arg_t = SquareBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("square", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

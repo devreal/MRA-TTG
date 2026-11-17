@@ -151,6 +151,7 @@ namespace mra {
     {
       using arg_t = NormBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("norm", batch.size());
 
       const std::size_t nb = batch.size();
       size_type total_blocks = 0;

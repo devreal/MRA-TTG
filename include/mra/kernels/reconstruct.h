@@ -673,6 +673,7 @@ namespace mra {
       size_type total_functions)
     {
       if (!batch.is_leader()) return;
+      BatchRange batch_range("reconstruct", batch.size());
 
       constexpr size_type num_children = Key<NDIM>::num_children();
 

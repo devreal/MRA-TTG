@@ -81,7 +81,7 @@ namespace mra {
          * the leader's K and kind of product (Matrix) apply to the whole batch */
         using registry_t = GroupedBatchPoolRegistry<InnerBatchArg<T, NDIM>>;
         batch_pool = batch_group.pool<registry_t>([&]{
-          return std::make_shared<registry_t>(ttg::device::num_devices(), max_batch_size);
+          return shared_pool_registry<InnerBatchArg<T, NDIM>>(max_batch_size);
         }, K, Matrix);
       }
 #else  // MRA_ENABLE_HOST

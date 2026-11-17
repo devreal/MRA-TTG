@@ -800,6 +800,7 @@ namespace mra {
       bool truncate)
     {
       if (!batch.is_leader()) return;
+      BatchRange batch_range("compress", batch.size());
       constexpr size_type num_children = Key<NDIM>::num_children();
 
       const std::size_t nb = batch.size();

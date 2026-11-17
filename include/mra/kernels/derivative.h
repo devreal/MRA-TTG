@@ -802,6 +802,7 @@ namespace mra {
     {
       using arg_t = DerivativeBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("derivative", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

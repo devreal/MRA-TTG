@@ -227,6 +227,7 @@ namespace mra {
       GroupedBatchPoolRegistry<TruncateBatchArg<T, NDIM>>& registry)
     {
       if (!batch.is_leader()) return;
+      BatchRange batch_range("truncate", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

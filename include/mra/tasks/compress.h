@@ -112,7 +112,7 @@ namespace detail {
       // to the whole batch
       using registry_t = detail::GroupedBatchPoolRegistry<detail::CompressBatchArg<T, NDIM>>;
       compress_pool = batch_group.pool<registry_t>([]{
-        return std::make_shared<registry_t>(ttg::device::num_devices(), mra::get_batch_size());
+        return detail::shared_pool_registry<detail::CompressBatchArg<T, NDIM>>(mra::get_batch_size());
       }, K, is_ns);
     }
 #else

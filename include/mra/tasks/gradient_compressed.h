@@ -187,10 +187,8 @@ namespace mra {
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::GradientDerivativeBatchArg<T, NDIM>>> deriv_pool;
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::GradientSpawnBatchArg<T, NDIM>>> spawn_pool;
     if (enable_batching) {
-      deriv_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::GradientDerivativeBatchArg<T, NDIM>>>(
-                     ttg::device::num_devices(), max_batch_size);
-      spawn_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::GradientSpawnBatchArg<T, NDIM>>>(
-                     ttg::device::num_devices(), max_batch_size);
+      deriv_pool = detail::shared_pool_registry<detail::GradientDerivativeBatchArg<T, NDIM>>(max_batch_size);
+      spawn_pool = detail::shared_pool_registry<detail::GradientSpawnBatchArg<T, NDIM>>(max_batch_size);
     }
 #else  // MRA_ENABLE_HOST
     std::nullptr_t deriv_pool = nullptr, spawn_pool = nullptr; // never used, only captured

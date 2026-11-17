@@ -415,6 +415,7 @@ namespace mra {
     {
       constexpr size_type num_children = Key<NDIM>::num_children();
       if (!batch.is_leader()) return;
+      BatchRange batch_range("gradient_compute", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

@@ -1047,6 +1047,7 @@ namespace mra{
       size_type total_functions)
     {
       if (!batch.is_leader()) return;
+      BatchRange batch_range("convolution", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

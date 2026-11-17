@@ -294,6 +294,7 @@ namespace mra {
     {
       using arg_t = MultiplyBroadcastBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("multiply_broadcast", batch.size());
 
       const std::size_t nb = batch.size();
       size_type total_nonzero = 0;

@@ -164,6 +164,7 @@ namespace mra {
     {
       using arg_t = ConcatBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("concat", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

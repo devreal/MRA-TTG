@@ -192,6 +192,7 @@ namespace mra {
     {
       using arg_t = GaxpyBatchArg<T, NDIM>;
       if (!batch.is_leader()) return;
+      BatchRange batch_range("gaxpy", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

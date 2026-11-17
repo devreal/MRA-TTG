@@ -170,7 +170,7 @@ namespace mra {
     // ever group into one launch.
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>> conv_pool;
     if (enable_conv_batching) {
-      conv_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      conv_pool = detail::shared_pool_registry<detail::ConvolutionBatchArg<T, NDIM>>(mra::get_batch_size());
     }
     // Separate pool/registry for norm_tt's simple_norm kernel: its own
     // SimpleNormBatchArg<T,NDIM> element type differs from
@@ -180,7 +180,7 @@ namespace mra {
     // is unrestricted-batchable exactly like the other tasks here.
     std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::SimpleNormBatchArg<T, NDIM>>> simple_norm_pool;
     if (enable_conv_batching) {
-      simple_norm_pool = std::make_shared<detail::GroupedBatchPoolRegistry<detail::SimpleNormBatchArg<T, NDIM>>>(ttg::device::num_devices(), mra::get_batch_size());
+      simple_norm_pool = detail::shared_pool_registry<detail::SimpleNormBatchArg<T, NDIM>>(mra::get_batch_size());
     }
 #else
     // GroupedBatchPoolRegistry only exists on device builds; this placeholder only

@@ -505,6 +505,7 @@ namespace mra {
       using arg_t = MulCompressedBatchArg<T, NDIM>;
       constexpr size_type num_children = Key<NDIM>::num_children();
       if (!batch.is_leader()) return;
+      BatchRange batch_range("multiply_compressed", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

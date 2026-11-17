@@ -187,6 +187,7 @@ namespace mra {
       GroupedBatchPoolRegistry<SimpleNormBatchArg<T, NDIM>>& registry)
     {
       if (!batch.is_leader()) return;
+      BatchRange batch_range("simple_norm", batch.size());
 
       const std::size_t nb = batch.size();
       const auto device = ttg::device::current_device();

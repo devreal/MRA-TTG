@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -35,12 +36,53 @@
 #include <parsec/mca/device/device_gpu.h>
 #include <parsec/utils/zone_malloc.h>
 #include "mra/misc/allocator.h"
+#include "mra/misc/init.h"  // at_finalize
 #include "mra/misc/platform.h"
 #include "mra/misc/types.h"  // for size_type -- see the ttg.h note above; do not
                              // rely on an includer having pulled this in already
 #include "mra/tensor/sparsity.h"  // find_nth_pred_warp
+#if defined(MRA_ENABLE_CUDA)
+#include <nvtx3/nvToolsExt.h>
+#endif
 
 namespace mra::detail {
+
+  /**
+   * NVTX range around the submission of one batch (domain "MRA-TTG batches"), named after
+   * the kernel family with the number of tasks in the batch as its payload. The range holds
+   * the kernel's launch, so nsys shows it on the GPU too (NVTX GPU projection), where the
+   * block count does not tell the batch size (e.g., the convolution's grid is capped).
+   */
+  class BatchRange {
+  public:
+    BatchRange(const char* name, std::size_t ntasks) {
+#if defined(MRA_ENABLE_CUDA)
+      static nvtxDomainHandle_t domain = nvtxDomainCreateA("MRA-TTG batches");
+      domain_ = domain;
+      nvtxEventAttributes_t attr = {};
+      attr.version = NVTX_VERSION;
+      attr.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+      attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
+      attr.message.ascii = name;
+      attr.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
+      attr.payload.ullValue = ntasks;
+      nvtxDomainRangePushEx(domain_, &attr);
+#else
+      (void)name; (void)ntasks;
+#endif
+    }
+    ~BatchRange() {
+#if defined(MRA_ENABLE_CUDA)
+      nvtxDomainRangePop(domain_);
+#endif
+    }
+    BatchRange(const BatchRange&) = delete;
+    BatchRange& operator=(const BatchRange&) = delete;
+  private:
+#if defined(MRA_ENABLE_CUDA)
+    nvtxDomainHandle_t domain_;
+#endif
+  };
 
   /**
    * zone_malloc against the SAME per-GPU memory pool PaRSEC pre-reserves at
@@ -497,19 +539,19 @@ namespace mra::detail {
 
     explicit GroupedBatchPool(int device_id) : device_id(device_id) { }
 
-    // Delegates to FixedDeviceRegion::ensure (see its class comment) for this
-    // slot's shared scratch region. Callers are expected to size num_elems
-    // from kernel_grid_cap (platform.h) -- a fixed bound for a given
-    // kernel/device, independent of any particular launch's batch size -- so
-    // the first call already requests the one size every later call will
-    // also need; exceeding it indicates that assumption broke (e.g. K
-    // changed at runtime). No locking: the slot is already exclusively
-    // checked_out to whoever is calling this (between their own
-    // acquire()/mark_submitted() pair), same as slot.args/slot.offsets being
-    // mutated without extra locking elsewhere.
+    // This slot's shared scratch region, of at least num_elems. Callers size
+    // num_elems from kernel_grid_cap (platform.h) -- a bound for a given
+    // kernel/device and K, independent of any particular launch's batch size
+    // -- so it is allocated once per K; a pool shared by the graphs of a whole
+    // run (shared_pool_registry) sees K grow (e.g. from one protocol to the
+    // next) and then regrows it, which is safe because a checked-out slot's
+    // previous submission has completed (see FixedDeviceRegion::grow).
+    // No locking: the slot is already exclusively checked_out to whoever is
+    // calling this (between their own acquire()/mark_submitted() pair), same
+    // as slot.args/slot.offsets being mutated without extra locking elsewhere.
     template <typename ElemT>
     ElemT* ensure_scratch(slot_t& s, std::size_t num_elems) {
-      s.dev_scratch.ensure(device_id, num_elems * sizeof(ElemT));
+      s.dev_scratch.grow(device_id, num_elems * sizeof(ElemT));
       return reinterpret_cast<ElemT*>(s.dev_scratch.get());
     }
 
@@ -595,20 +637,74 @@ namespace mra::detail {
 
     GroupedBatchPool<Arg>& get(int device_id) {
       auto& e = entries[device_id];
-      std::call_once(e.once, [&]{ e.pool = std::make_unique<GroupedBatchPool<Arg>>(device_id); });
-      return *e.pool;
+      GroupedBatchPool<Arg>* p = e.pool.load(std::memory_order_acquire);
+      if (p == nullptr) {
+        std::lock_guard<std::mutex> lock(e.mtx);
+        p = e.pool.load(std::memory_order_relaxed);
+        if (p == nullptr) {
+          p = new GroupedBatchPool<Arg>(device_id);
+          e.pool.store(p, std::memory_order_release);
+        }
+      }
+      return *p;
+    }
+
+    /**
+     * Frees every device's pool, as BatchPoolRegistry::release (for a registry
+     * that outlives the TTs using it, see shared_pool_registry). No task may
+     * use the registry concurrently; a later get() creates the pool anew.
+     */
+    void release() {
+      for (auto& e : entries) {
+        std::lock_guard<std::mutex> lock(e.mtx);
+        delete e.pool.exchange(nullptr, std::memory_order_acq_rel);
+      }
     }
 
     int get_max_batch_size() const { return max_batch_size; }
 
    private:
     struct entry_t {
-      std::once_flag once;
-      std::unique_ptr<GroupedBatchPool<Arg>> pool;
+      std::mutex mtx;
+      std::atomic<GroupedBatchPool<Arg>*> pool{nullptr};
+      ~entry_t() { delete pool.load(std::memory_order_relaxed); }
     };
     std::vector<entry_t> entries;
     int max_batch_size;
   };
+
+  /**
+   * The process-wide GroupedBatchPoolRegistry of a kernel family (Arg) and
+   * batch size, shared by every TT (and BatchGroup) of that family instead of
+   * one registry per TT. The pools' slots -- each with its CUDA/HIP event,
+   * device regions and pinned host staging -- thereby outlive the graph that
+   * created them and are reused by the next one: a program that executes many
+   * short graphs (e.g., one per tile of a computation) no longer creates and
+   * destroys them (event synchronization and destruction, zone and pinned
+   * frees) for each graph. Sharing is safe as the pools already are shared by
+   * concurrent tasks: acquire() only hands out a slot that is not checked out
+   * and whose previous submission has completed. The pools are freed in
+   * mra::finalize(), while PaRSEC's devices still exist.
+   */
+  template <typename Arg>
+  std::shared_ptr<GroupedBatchPoolRegistry<Arg>> shared_pool_registry(int max_batch_size) {
+    using registry_t = GroupedBatchPoolRegistry<Arg>;
+    static std::mutex mtx;
+    static std::map<int, std::shared_ptr<registry_t>> registries;
+    std::lock_guard<std::mutex> lock(mtx);
+    auto& r = registries[max_batch_size];
+    if (!r) {
+      r = std::make_shared<registry_t>(ttg::device::num_devices(), max_batch_size);
+      at_finalize([max_batch_size] {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = registries.find(max_batch_size);
+        if (it == registries.end()) return;
+        it->second->release();   // TTs that still refer to the registry find it empty
+        registries.erase(it);
+      });
+    }
+    return r;
+  }
 
   /**
    * One extra copy of a GroupedBatchPool slot, as packed by
