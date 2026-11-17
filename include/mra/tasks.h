@@ -23,6 +23,7 @@
 #include "mra/tasks/square.h"
 #include "mra/tasks/concat.h"
 #include "mra/tasks/multiply_compressed.h"
+#include "mra/tasks/compress_combined.h"
 #include "mra/tasks/gradient_compressed.h"
 #include "mra/tasks/replicate.h"
 

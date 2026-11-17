@@ -58,6 +58,25 @@ namespace mra {
 
   } // namespace detail
 
+  namespace detail {
+
+    /**
+     * The arguments of one launch of multiply_compressed_kernel that differ between the
+     * launches of a task of the two-level multiply (make_multiply_compressed_2level): work
+     * is the index of the launch's first work item in the task's list.
+     */
+    template <typename T, Dimension NDIM>
+    struct MulCompressedLaunch {
+      Key<NDIM> key;
+      SparseTensorView<T, NDIM+1> a_node, b_node, s_in, result;
+      std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()> out_arr;
+      size_type work;
+      size_type n_items;
+      T* tmp;
+    };
+
+  } // namespace detail
+
   template<Dimension NDIM>
   SCOPE size_type multiply_compressed_tmp_size(size_type K) {
     const size_type K2NDIM = std::pow(K, NDIM);
@@ -565,6 +584,118 @@ namespace mra {
       launch_multiply_compressed_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
                                                          total_items, D, hg, phibar, phi, quad_x, square, K,
                                                          slot.dev_src, stream);
+      pool.mark_submitted(slot, stream);
+    }
+
+    /** sparsity bytes in host memory, copied to a device buffer along with a batch */
+    struct SparsityPush {
+      void* dst;
+      const void* src;
+      size_type size;
+    };
+
+    /**
+     * What a task of the two-level multiply passes to coop(): its launches, step 1 first
+     * (one), then step 2 (one per child with work items); its work items in host memory,
+     * indexed by MulCompressedLaunch::work; the sparsity bytes of its outputs.
+     */
+    template <typename T, Dimension NDIM>
+    struct MulCompressed2BatchMember {
+      std::vector<MulCompressedLaunch<T, NDIM>> launches;
+      const MulCompressedWork<NDIM>* work;
+      size_type NA;
+      std::vector<SparsityPush> sparsity;
+    };
+
+    /**
+     * The batched launches of the two-level multiply, called by every member of a batch
+     * with the batch_view returned by its `co_await ttg::device::coop<Key<NDIM>>(key,
+     * member)` (a MulCompressed2BatchMember); the leader submits the batch. One grouped
+     * copy carries the arguments of both steps, the work items and the sparsity bytes;
+     * then multiply_compressed_kernel_batched runs twice, over the first launch of every
+     * member (step 1) and over the others (step 2), which read what step 1 wrote.
+     */
+    template <typename T, Dimension NDIM, typename BatchView>
+    void submit_multiply_compressed_2level_batch_leader(
+      BatchView& batch,
+      GroupedBatchPoolRegistry<MulCompressedBatchArg<T, NDIM>>& registry,
+      const Domain<NDIM>& D,
+      const concepts::TensorView<2> auto& hg,
+      const concepts::TensorView<2> auto& phibar,
+      const concepts::TensorView<2> auto& phi,
+      const concepts::TensorView<1> auto& quad_x,
+      size_type K)
+    {
+      using arg_t = MulCompressedBatchArg<T, NDIM>;
+      using work_t = MulCompressedWork<NDIM>;
+      using member_t = MulCompressed2BatchMember<T, NDIM>;
+      using launch_t = MulCompressedLaunch<T, NDIM>;
+      static_assert(std::is_trivially_copyable_v<work_t> && alignof(work_t) <= 16);
+      if (!batch.is_leader()) return;
+      BatchRange batch_range("multiply_compressed_2level", batch.size());
+
+      const std::size_t nb = batch.size();
+      auto member = [&](std::size_t m) -> const member_t& { return batch[m].template get<1>(); };
+      /* staged: the sparsity bytes, then the work items of every launch, each aligned (the
+       * staged bytes start 16-byte aligned on the device, see submit_grouped_copy) */
+      auto align_work = [](size_type n) { return (n + 15) & ~size_type(15); };
+      size_type n2 = 0, sparsity_bytes = 0, work_bytes = 0;
+      for (std::size_t m = 0; m < nb; ++m) {
+        n2 += member(m).launches.size() - 1;
+        for (const auto& p : member(m).sparsity) sparsity_bytes += p.size;
+        for (const auto& l : member(m).launches) work_bytes += align_work(l.n_items * sizeof(work_t));
+      }
+      const size_type num_args = nb + n2;
+      const size_type staged_bytes = align_work(sparsity_bytes) + work_bytes;
+
+      const auto device = ttg::device::current_device();
+      auto& pool = registry.get(device);
+      auto& slot = pool.acquire(num_args, num_args + 2, staged_bytes);
+      slot.args.clear();
+      slot.offsets.clear();
+      slot.extra_dsts.clear();
+      slot.extra_srcs.clear();
+      slot.extra_sizes.clear();
+      slot.sparsity.resize(staged_bytes);
+
+      size_type sparsity_offset = 0, work_offset = align_work(sparsity_bytes);
+      auto add_arg = [&](const member_t& mem, const launch_t& l) {
+        const size_type bytes = l.n_items * sizeof(work_t);
+        std::memcpy(&slot.sparsity[work_offset], mem.work + l.work, bytes);
+        slot.args.emplace_back(l.key, l.a_node, l.b_node, l.s_in, l.result, l.out_arr, work_offset, mem.NA, l.tmp);
+        work_offset += align_work(bytes);
+        slot.offsets.push_back(slot.offsets.back() + l.n_items);
+      };
+      /* step 1, with the sparsity of every member */
+      slot.offsets.push_back(0);
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (const auto& p : member(m).sparsity) {
+          std::memcpy(&slot.sparsity[sparsity_offset], p.src, p.size);
+          slot.extra_dsts.push_back(p.dst);
+          slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset]);
+          slot.extra_sizes.push_back(p.size);
+          sparsity_offset += p.size;
+        }
+        add_arg(member(m), member(m).launches[0]);
+      }
+      const size_type total1 = slot.offsets.back();
+      /* step 2 */
+      slot.offsets.push_back(0);
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (std::size_t i = 1; i < member(m).launches.size(); ++i) add_arg(member(m), member(m).launches[i]);
+      }
+      const size_type total2 = slot.offsets.back();
+
+      auto stream = ttg::device::current_stream();
+      submit_grouped_copy<arg_t>(slot, num_args, slot.offsets.size(), pool.device_id, stream);
+      launch_multiply_compressed_kernel_batched<T, NDIM>(slot.dev_args, slot.dev_offsets, static_cast<size_type>(nb),
+                                                         total1, D, hg, phibar, phi, quad_x, false, K,
+                                                         slot.dev_src, stream);
+      if (total2 > 0) {
+        launch_multiply_compressed_kernel_batched<T, NDIM>(slot.dev_args + nb, slot.dev_offsets + nb + 1, n2,
+                                                           total2, D, hg, phibar, phi, quad_x, false, K,
+                                                           slot.dev_src, stream);
+      }
       pool.mark_submitted(slot, stream);
     }
 

@@ -458,44 +458,94 @@ static void test_multiply_compressed(madness::World& world, mra::size_type K, re
     check_well_formed(world, result, "square_compressed, compressed output");
   }
 
-  /* f_i * h_i: trees differ per function */
+  /* the products with one and with two tree levels per task */
+  for (int levels : {1, 2}) {
+    mra::set_multiply_compressed_levels(levels);
+    const std::string lv = " (" + std::to_string(levels) + " levels)";
+    /* f_i * h_i: trees differ per function */
+    {
+      Graph G(K);
+      CompressedEdge f_e, h_e;
+      ReconstructedEdge prod_e;
+      G.load_compressed(f, f_e, "f");
+      G.load_compressed(h, h_e, "h");
+      G.add(mra::make_multiply_compressed<T, NDIM>(db, make_functions(N), make_functions(N), G.functiondata, K,
+                                                   f_e, h_e, prod_e));
+      vec_t result = empty_like(f.front(), N);
+      G.add(mra::vmra::make_vmra_store(result, prod_e));
+      G.execute();
+      madness::reconstruct(world, f);
+      madness::reconstruct(world, h);
+      vec_t ref = madness::mul(world, f, h);
+      check_close("multiply_compressed" + lv, max_diff_norm(world, ref, result), max_norm(world, ref));
+      check_well_formed(world, result, "multiply_compressed" + lv);
+    }
+
+    /* a * f_i: a is deeper than f in places and shallower in others */
+    {
+      vec_t av = {a};
+      Graph G(K);
+      CompressedEdge a_e, f_e, c_e;
+      ReconstructedEdge prod_e;
+      G.load_compressed(av, a_e, "a");
+      G.load_compressed(f, f_e, "f");
+      G.add(mra::make_multiply_compressed<T, NDIM>(db, make_functions(1), make_functions(N), G.functiondata, K,
+                                                   a_e, f_e, prod_e));
+      G.add(mra::make_compress(make_functions(N), K, false, G.functiondata, prod_e, c_e, "compress"));
+      vec_t result = empty_like(f.front(), N);
+      G.add(mra::vmra::make_vmra_store(result, c_e, true /* add_leaves */));
+      G.execute();
+      madness::reconstruct(world, av);
+      madness::reconstruct(world, f);
+      vec_t ref = madness::mul(world, a, f);
+      check_close("multiply_compressed broadcast, compressed output" + lv, max_diff_norm(world, ref, result), max_norm(world, ref));
+      check_well_formed(world, result, "multiply_compressed broadcast, compressed output" + lv);
+    }
+  }
+  mra::set_multiply_compressed_levels(1);
+
+  /* two levels, compressed from the packed output without unpacking it */
+  using PackedEdge = ttg::Edge<mra::Key<NDIM>, mra::CombinedReconstructedNode<T, NDIM>>;
   {
     Graph G(K);
-    CompressedEdge f_e, h_e;
+    CompressedEdge f_e, h_e, c_e;
     ReconstructedEdge prod_e;
+    PackedEdge packed_e;
     G.load_compressed(f, f_e, "f");
     G.load_compressed(h, h_e, "h");
-    G.add(mra::make_multiply_compressed<T, NDIM>(db, make_functions(N), make_functions(N), G.functiondata, K,
-                                                 f_e, h_e, prod_e));
+    G.add(mra::make_multiply_compressed_combined<T, NDIM>(db, make_functions(N), make_functions(N), G.functiondata,
+                                                          K, f_e, h_e, prod_e, packed_e));
+    G.add(mra::make_compress_combined(make_functions(N), K, false, G.functiondata, prod_e, packed_e, c_e));
     vec_t result = empty_like(f.front(), N);
-    G.add(mra::vmra::make_vmra_store(result, prod_e));
+    G.add(mra::vmra::make_vmra_store(result, c_e, true /* add_leaves */));
     G.execute();
     madness::reconstruct(world, f);
     madness::reconstruct(world, h);
     vec_t ref = madness::mul(world, f, h);
-    check_close("multiply_compressed", max_diff_norm(world, ref, result), max_norm(world, ref));
-    check_well_formed(world, result, "multiply_compressed");
+    check_close("multiply_compressed_combined + compress_combined", max_diff_norm(world, ref, result),
+                max_norm(world, ref));
+    check_well_formed(world, result, "multiply_compressed_combined + compress_combined");
   }
-
-  /* a * f_i: a is deeper than f in places and shallower in others */
   {
     vec_t av = {a};
     Graph G(K);
     CompressedEdge a_e, f_e, c_e;
     ReconstructedEdge prod_e;
+    PackedEdge packed_e;
     G.load_compressed(av, a_e, "a");
     G.load_compressed(f, f_e, "f");
-    G.add(mra::make_multiply_compressed<T, NDIM>(db, make_functions(1), make_functions(N), G.functiondata, K,
-                                                 a_e, f_e, prod_e));
-    G.add(mra::make_compress(make_functions(N), K, false, G.functiondata, prod_e, c_e, "compress"));
+    G.add(mra::make_multiply_compressed_combined<T, NDIM>(db, make_functions(1), make_functions(N), G.functiondata,
+                                                          K, a_e, f_e, prod_e, packed_e));
+    G.add(mra::make_compress_combined(make_functions(N), K, false, G.functiondata, prod_e, packed_e, c_e));
     vec_t result = empty_like(f.front(), N);
     G.add(mra::vmra::make_vmra_store(result, c_e, true /* add_leaves */));
     G.execute();
     madness::reconstruct(world, av);
     madness::reconstruct(world, f);
     vec_t ref = madness::mul(world, a, f);
-    check_close("multiply_compressed broadcast, compressed output", max_diff_norm(world, ref, result), max_norm(world, ref));
-    check_well_formed(world, result, "multiply_compressed broadcast, compressed output");
+    check_close("multiply_compressed_combined broadcast + compress_combined", max_diff_norm(world, ref, result),
+                max_norm(world, ref));
+    check_well_formed(world, result, "multiply_compressed_combined broadcast + compress_combined");
   }
 }
 
