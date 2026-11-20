@@ -331,8 +331,9 @@ namespace mra {
   /**
    * Compression of the product of make_multiply_compressed_combined: `in` its product
    * nodes at even levels, `packed` its packed outputs. Parameters and output as
-   * make_compress; pass the maps the multiply was built with. Tasks are batched with
-   * those of every make_compress and make_compress_combined of batch_group.
+   * make_compress; pass the maps the multiply was built with. The batches share the
+   * batch pool of batch_group with every make_compress and make_compress_combined of it,
+   * but a batch only holds tasks of one TT (the even or the odd compress tasks).
    */
   template <typename T, mra::Dimension NDIM, typename FunctionSetT,
             typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
@@ -427,13 +428,14 @@ namespace mra {
      * child of K), which reads the leaf from packed.
      */
     auto dispatch_fn = [fns](const key_type& key, const combined_type& packed) -> TASKTYPE {
-      constexpr auto seq = std::make_index_sequence<num_children>{};
       constexpr std::size_t EVEN_P = 0, EVEN_KEPT = num_children, ODD_P = 2*num_children,
                             ODD_KEPT = 3*num_children, EVEN_PACKED = 4*num_children, ODD_PACKED = 4*num_children + 1;
+      /* the parents to send placeholders to, by terminal: [0, num_children) the even
+       * terminals (a leaf at a child of K), [num_children, 2*num_children) the odd ones (a
+       * leaf at a grandchild); the same lists serve the p and the kept terminals */
+      std::array<std::vector<key_type>, 2*num_children> parents;
       std::vector<key_type> odd_keys;
-#ifndef MRA_ENABLE_HOST
-      auto sends = ttg::device::forward();
-#endif // MRA_ENABLE_HOST
+      bool any_leaf = false;
       for (size_type s = 0; s < packed.num_slots(); ++s) {
         const key_type& slot_key = packed.slot_key(s);
         const bool is_child = (slot_key.level() == key.level() + 1);
@@ -441,27 +443,35 @@ namespace mra {
           if (is_child) odd_keys.push_back(slot_key); // the slot is the node of an odd-level compress task
           continue;
         }
-        node_type empty(slot_key, fns->num_functions(slot_key));
+        parents[(is_child ? 0 : num_children) + slot_key.childindex()].push_back(slot_key.parent());
+        any_leaf = true;
+      }
+      /* the compress task reads a leaf child from packed, never its placeholder: one
+       * placeholder node and one empty "kept" serve every receiver, each a single data
+       * copy (a copy per send overflows the task's copies, MAX_PARAM_COUNT) */
+      auto to_all = [&]<std::size_t EvenFirst, std::size_t OddFirst, std::size_t... I, typename Value>(
+                        std::integral_constant<std::size_t, EvenFirst>, std::integral_constant<std::size_t, OddFirst>,
+                        std::index_sequence<I...>, Value&& value) {
 #ifndef MRA_ENABLE_HOST
-        if (is_child) {
-          sends.push_back(select_send_up<EVEN_P>(slot_key, std::move(empty), seq, "compress_combined-dispatch"));
-          sends.push_back(select_send_up<EVEN_KEPT>(slot_key, kept_info_type{}, seq, "compress_combined-dispatch"));
-        } else {
-          sends.push_back(select_send_up<ODD_P>(slot_key, std::move(empty), seq, "compress_combined-dispatch"));
-          sends.push_back(select_send_up<ODD_KEPT>(slot_key, kept_info_type{}, seq, "compress_combined-dispatch"));
-        }
+        return ttg::device::broadcast<(EvenFirst + I)..., (OddFirst + I)...>(
+                 std::make_tuple(parents[I]..., parents[num_children + I]...), std::forward<Value>(value));
 #else  // MRA_ENABLE_HOST
-        if (is_child) {
-          select_send_up<EVEN_P>(slot_key, std::move(empty), seq, "compress_combined-dispatch");
-          select_send_up<EVEN_KEPT>(slot_key, kept_info_type{}, seq, "compress_combined-dispatch");
-        } else {
-          select_send_up<ODD_P>(slot_key, std::move(empty), seq, "compress_combined-dispatch");
-          select_send_up<ODD_KEPT>(slot_key, kept_info_type{}, seq, "compress_combined-dispatch");
-        }
+        ttg::broadcast<(EvenFirst + I)..., (OddFirst + I)...>(
+          std::make_tuple(parents[I]..., parents[num_children + I]...), std::forward<Value>(value));
 #endif // MRA_ENABLE_HOST
+      };
+      constexpr auto seq = std::make_index_sequence<num_children>{};
+      using even_p = std::integral_constant<std::size_t, EVEN_P>;
+      using odd_p = std::integral_constant<std::size_t, ODD_P>;
+      using even_kept = std::integral_constant<std::size_t, EVEN_KEPT>;
+      using odd_kept = std::integral_constant<std::size_t, ODD_KEPT>;
+#ifndef MRA_ENABLE_HOST
+      auto sends = ttg::device::forward();
+      if (any_leaf) {
+        sends.push_back(to_all(even_p{}, odd_p{}, seq, node_type(key, fns->num_functions(key))));
+        sends.push_back(to_all(even_kept{}, odd_kept{}, seq, kept_info_type{}));
       }
       /* one data copy for all receivers */
-#ifndef MRA_ENABLE_HOST
       if (odd_keys.empty()) {
         sends.push_back(ttg::device::send<EVEN_PACKED>(key, packed));
       } else {
@@ -470,6 +480,10 @@ namespace mra {
       }
       co_await std::move(sends);
 #else  // MRA_ENABLE_HOST
+      if (any_leaf) {
+        to_all(even_p{}, odd_p{}, seq, node_type(key, fns->num_functions(key)));
+        to_all(even_kept{}, odd_kept{}, seq, kept_info_type{});
+      }
       if (odd_keys.empty()) {
         ttg::send<EVEN_PACKED>(key, packed);
       } else {
@@ -537,8 +551,8 @@ namespace mra {
     if (ctx.enable_batching) {
       even_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
       odd_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
-      batch_group.add(even_tt);
-      batch_group.add(odd_tt);
+      /* even_tt and odd_tt (and make_compress's TT) differ in type, so they cannot join
+       * one ttg::device::batch_group: each batches its own tasks, all share the pool */
     }
 #else  // MRA_ENABLE_HOST
     (void)max_batch_size;
