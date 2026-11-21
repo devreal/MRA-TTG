@@ -479,11 +479,41 @@ namespace mra::detail {
     struct slot_t {
       std::vector<Arg, DeviceAllocator<Arg>> args;                       // pinned host storage
       std::vector<size_type, DeviceAllocator<size_type>> offsets;        // pinned host storage
-      // Pinned host staging for each member's per-tensor sparsity bytes,
-      // gathered from host-side RangeSparsityBase (via sparsity_to_bytes).
-      // Source-only: submit_grouped_copy packs these bytes and scatters them
-      // to each destination tensor's own device buffer.
-      std::vector<unsigned char, DeviceAllocator<unsigned char>> sparsity;
+      // Pinned host staging for submit_grouped_copy's single H2D transfer:
+      // [staged bytes (`sparsity`) | args | offsets | GroupedCopyDesc table |
+      // appended source bytes]. Only ever grows (never cleared), so
+      // steady-state launches neither reallocate nor re-zero it.
+      std::vector<unsigned char, DeviceAllocator<unsigned char>> packed;
+
+      /* The bytes a leader stages for a launch, at the start of `packed`, so they are
+       * written once, where the transfer reads them (not copied there by
+       * submit_grouped_copy). The vector operations the leaders use: resize() before
+       * writing (it zero-fills the new bytes, as std::vector does, and may move the
+       * storage), data(), operator[], size(), clear(). */
+      class staged_bytes_t {
+        std::vector<unsigned char, DeviceAllocator<unsigned char>>& m_buf;
+        std::size_t m_size = 0;
+      public:
+        explicit staged_bytes_t(std::vector<unsigned char, DeviceAllocator<unsigned char>>& buf) : m_buf(buf) { }
+        void reserve(std::size_t n) { if (m_buf.size() < n) m_buf.resize(n); }
+        void resize(std::size_t n) {
+          if (m_buf.size() < n) m_buf.resize(n + n/4);
+          if (n > m_size) std::memset(m_buf.data() + m_size, 0, n - m_size);
+          m_size = n;
+        }
+        void clear() { m_size = 0; }
+        std::size_t size() const { return m_size; }
+        bool empty() const { return m_size == 0; }
+        unsigned char* data() { return m_buf.data(); }
+        const unsigned char* data() const { return m_buf.data(); }
+        unsigned char& operator[](std::size_t i) { return m_buf[i]; }
+        const unsigned char& operator[](std::size_t i) const { return m_buf[i]; }
+      };
+      // Each member's per-tensor sparsity bytes (gathered from host-side
+      // RangeSparsityBase via sparsity_to_bytes) and other host data a launch
+      // reads: scattered to the destination tensors' device buffers by the
+      // grouped copy, and readable by kernels at dev_src.
+      staged_bytes_t sparsity{packed};
 
       // Per-launch list of additional point-to-point H2D copies folded into
       // the same submit_grouped_copy call as args/offsets -- populated fresh
@@ -501,11 +531,6 @@ namespace mra::detail {
       std::vector<const void*> extra_srcs;
       std::vector<std::size_t> extra_sizes;
 
-      // Pinned host staging for submit_grouped_copy's single H2D transfer:
-      // [args | offsets | GroupedCopyDesc table | source bytes]. Only ever
-      // grows (never cleared), so steady-state launches neither reallocate
-      // nor re-zero it.
-      std::vector<unsigned char, DeviceAllocator<unsigned char>> packed;
       // `packed` as the device addresses it (cudaHostGetDevicePointer), for
       // grouped_copy_reads_host(); looked up again whenever `packed` moves.
       const unsigned char* packed_host = nullptr;
@@ -833,40 +858,48 @@ namespace mra::detail {
   {
     auto align_up = [](std::size_t n) { return (n + 15) & ~std::size_t(15); };
     const std::size_t num_extra = slot.extra_dsts.size();
-    const unsigned char* sparsity_begin = slot.sparsity.data();
-    const unsigned char* sparsity_end = sparsity_begin + slot.sparsity.size();
+    // The staged bytes are already in place at the start of `packed`. Sources within
+    // them are named by their offset; `packed` may move when it grows below, so
+    // they are told apart by address before that (compared as integers, the old
+    // storage is never read).
+    const std::size_t staged = slot.sparsity.size();
+    const std::uintptr_t staged_begin = reinterpret_cast<std::uintptr_t>(slot.packed.data());
+    const std::uintptr_t staged_end = staged_begin + staged;
+    auto in_staged = [&](const void* p, std::size_t size) {
+      const auto a = reinterpret_cast<std::uintptr_t>(p);
+      return a >= staged_begin && a + size <= staged_end;
+    };
 
-    // Sources outside slot.sparsity are appended after it.
+    // Sources outside the staged bytes are appended after the descriptors.
     std::size_t num_descs = 0;
-    std::size_t num_src_bytes = slot.sparsity.size();
+    std::size_t num_appended = 0;
     for (std::size_t k = 0; k < num_extra; ++k) {
       if (slot.extra_sizes[k] == 0) continue;
       ++num_descs;
-      auto src = static_cast<const unsigned char*>(slot.extra_srcs[k]);
-      if (src != nullptr && !(src >= sparsity_begin && src + slot.extra_sizes[k] <= sparsity_end)) {
-        num_src_bytes += slot.extra_sizes[k];
+      if (slot.extra_srcs[k] != nullptr && !in_staged(slot.extra_srcs[k], slot.extra_sizes[k])) {
+        num_appended += slot.extra_sizes[k];
       }
     }
 
     const std::size_t args_bytes = num_args*sizeof(Arg);
-    const std::size_t offsets_off = align_up(args_bytes);
+    const std::size_t args_off = align_up(staged);
+    const std::size_t offsets_off = align_up(args_off + args_bytes);
     const std::size_t descs_off = align_up(offsets_off + num_offsets*sizeof(size_type));
-    const std::size_t src_off = descs_off + num_descs*sizeof(GroupedCopyDesc);
-    const std::size_t total = src_off + num_src_bytes;
-    if (num_src_bytes > GroupedCopyDesc::zero_fill) {
+    const std::size_t appended_off = descs_off + num_descs*sizeof(GroupedCopyDesc);
+    const std::size_t total = appended_off + num_appended;
+    if (total >= GroupedCopyDesc::zero_fill) {
       throw std::runtime_error("submit_grouped_copy: source bytes exceed 32-bit descriptor offsets");
     }
 
-    if (slot.packed.size() < total) slot.packed.resize(total + total/4);
+    if (slot.packed.size() < total) slot.packed.resize(total + total/4); // keeps the staged bytes
     slot.dev_packed.grow(device_id, slot.packed.size());
 
     unsigned char* h = slot.packed.data();
-    std::memcpy(h, slot.args.data(), args_bytes);
+    std::memcpy(h + args_off, slot.args.data(), args_bytes);
     std::memcpy(h + offsets_off, slot.offsets.data(), num_offsets*sizeof(size_type));
-    std::memcpy(h + src_off, sparsity_begin, slot.sparsity.size());
     auto descs = reinterpret_cast<GroupedCopyDesc*>(h + descs_off);
     std::size_t d = 0;
-    std::size_t appended = slot.sparsity.size();
+    std::size_t appended = appended_off;
     for (std::size_t k = 0; k < num_extra; ++k) {
       const std::size_t size = slot.extra_sizes[k];
       if (size == 0) continue;
@@ -874,10 +907,10 @@ namespace mra::detail {
       std::uint32_t offset;
       if (src == nullptr) {
         offset = GroupedCopyDesc::zero_fill;
-      } else if (src >= sparsity_begin && src + size <= sparsity_end) {
-        offset = static_cast<std::uint32_t>(src - sparsity_begin);
+      } else if (in_staged(src, size)) {
+        offset = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(src) - staged_begin);
       } else {
-        std::memcpy(h + src_off + appended, src, size);
+        std::memcpy(h + appended, src, size);
         offset = static_cast<std::uint32_t>(appended);
         appended += size;
       }
@@ -885,9 +918,9 @@ namespace mra::detail {
     }
 
     unsigned char* dev = slot.dev_packed.get();
-    slot.dev_args = reinterpret_cast<Arg*>(dev);
+    slot.dev_args = reinterpret_cast<Arg*>(dev + args_off);
     slot.dev_offsets = reinterpret_cast<size_type*>(dev + offsets_off);
-    slot.dev_src = dev + src_off;
+    slot.dev_src = dev; // the staged bytes, and the base of the descriptors' offsets
     if (total == 0) return;
     if (grouped_copy_reads_host()) {
       /* one kernel reads everything from the pinned buffer: no cudaMemcpyAsync */
@@ -902,7 +935,7 @@ namespace mra::detail {
         slot.packed_mapped = static_cast<const unsigned char*>(mapped);
       }
       launch_grouped_copy_from_host(slot.packed_mapped, dev, total, descs_off,
-                                    static_cast<std::uint32_t>(num_descs), src_off, stream);
+                                    static_cast<std::uint32_t>(num_descs), 0, stream);
       return;
     }
 #if defined(MRA_ENABLE_CUDA)
@@ -912,7 +945,7 @@ namespace mra::detail {
 #endif
     if (num_descs > 0) {
       launch_grouped_copy_scatter(reinterpret_cast<const GroupedCopyDesc*>(dev + descs_off),
-                                  static_cast<std::uint32_t>(num_descs), dev + src_off, stream);
+                                  static_cast<std::uint32_t>(num_descs), dev, stream);
     }
   }
 
