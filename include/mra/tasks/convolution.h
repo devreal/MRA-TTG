@@ -3,6 +3,10 @@
 
 #include <iostream>
 #include <optional>
+#include <sstream>
+#include <atomic>
+#include <cstdlib>
+#include <numeric>
 #include <ttg.h>
 #include "mra/kernels.h"
 #include "mra/misc/batch_size.h"
@@ -73,6 +77,161 @@ namespace mra {
     std::ostream& operator<<(std::ostream& os, const KeyPair<NDIM>& kp) {
       return os << "(" << kp.source << "->" << kp.dest << ")";
     }
+
+    /**
+     * Key of a chunk of the contributions to one destination node (make_convolution's Apply
+     * task): the contributions of `dest` are split into `nchunks` chunks, this is chunk `chunk`
+     * with `size` contributions. The counts travel in the key because the chunk's aggregator
+     * needs its target when the first value arrives.
+     */
+    template<Dimension NDIM>
+    struct ChunkKey {
+      Key<NDIM> dest;
+      std::uint32_t chunk = 0;
+      std::uint32_t size = 0;
+      std::uint32_t nchunks = 0;
+
+      bool operator==(const ChunkKey&) const = default;
+      auto hash() const {
+        HashValue hashvalue = mulhash(dest.hash(), chunk);
+        return hashvalue;
+      }
+
+      template <typename Archive>
+      void serialize(Archive& ar) {
+        ar & dest & chunk & size & nchunks;
+      }
+
+      template <typename Archive>
+      void serialize(Archive& ar, const unsigned int) {
+        serialize(ar);
+      }
+    };
+
+    template<Dimension NDIM>
+    std::ostream& operator<<(std::ostream& os, const ChunkKey<NDIM>& ck) {
+      return os << "(" << ck.dest << " chunk " << ck.chunk << "/" << ck.nchunks << " size " << ck.size << ")";
+    }
+
+    /** Key of the sum of the `nchunks` partial results of `dest` and its shell-0 result (Sum task) */
+    template<Dimension NDIM>
+    struct SumKey {
+      Key<NDIM> dest;
+      std::uint32_t nchunks = 0;
+
+      bool operator==(const SumKey&) const = default;
+      auto hash() const { return dest.hash(); }
+
+      template <typename Archive>
+      void serialize(Archive& ar) {
+        ar & dest & nchunks;
+      }
+
+      template <typename Archive>
+      void serialize(Archive& ar, const unsigned int) {
+        serialize(ar);
+      }
+    };
+
+    template<Dimension NDIM>
+    std::ostream& operator<<(std::ostream& os, const SumKey<NDIM>& sk) {
+      return os << "(" << sk.dest << " sum of " << sk.nchunks << ")";
+    }
+
+    /* At most 2*C + 9 buffers per chunk task (C sources and their operator norms, the level's
+     * R/S, the shared assembly tables and norms1d, the result, a node's own shell-0 result and
+     * the result norms) must fit into MAX_PARAM_COUNT (32) flows. */
+    inline constexpr std::size_t conv_max_chunk_size = 11;
+    /* a Sum task selects its result, the result norms, the shell-0 result and the partial sums */
+    inline constexpr std::size_t conv_max_sum_parts = 28;
+
+    /**
+     * Contributions per chunk task (MRA_TTG_CONV_CHUNK, default 8, at most conv_max_chunk_size);
+     * 0 applies the contributions to a node one task at a time, in a chain. Host builds always
+     * use the chain.
+     */
+    inline std::size_t conv_chunk_size() {
+#ifdef MRA_ENABLE_HOST
+      return 0;
+#else
+      static const std::size_t c = [] {
+        const char* v = std::getenv("MRA_TTG_CONV_CHUNK");
+        if (v == nullptr || v[0] == '\0') return std::size_t{8};
+        return std::min<std::size_t>(std::strtoul(v, nullptr, 10), conv_max_chunk_size);
+      }();
+      return c;
+#endif
+    }
+
+    /** scratch memory for the contributions of one batch of chunk tasks (MRA_TTG_CONV_CHUNK_SCRATCH_MB, default 256) */
+    inline std::size_t conv_chunk_scratch_bytes() {
+      static const std::size_t b = [] {
+        const char* v = std::getenv("MRA_TTG_CONV_CHUNK_SCRATCH_MB");
+        std::size_t mb = (v == nullptr || v[0] == '\0') ? 256 : std::strtoul(v, nullptr, 10);
+        return std::max<std::size_t>(mb, 1) << 20;
+      }();
+      return b;
+    }
+
+    /**
+     * Distribution of the number of contributions per destination node of one convolution graph,
+     * printed when the graph is destroyed. Enabled with MRA_TTG_CONV_STATS=1; diagnostic only.
+     */
+    struct ConvContributionStats {
+      static constexpr std::size_t max_count = 4096;
+      std::string name;
+      size_type num_functions;
+      std::vector<std::atomic<std::uint64_t>> hist;
+      std::array<std::atomic<std::uint64_t>, 32> per_level_nodes{};
+      std::array<std::atomic<std::uint64_t>, 32> per_level_contribs{};
+
+      ConvContributionStats(std::string name, size_type num_functions)
+      : name(std::move(name)), num_functions(num_functions), hist(max_count + 1) {}
+
+      static bool enabled() {
+        static const bool e = [] {
+          const char* v = std::getenv("MRA_TTG_CONV_STATS");
+          return v != nullptr && v[0] != '\0' && v[0] != '0';
+        }();
+        return e;
+      }
+
+      void record(Level level, std::size_t n) {
+        hist[std::min(n, max_count)].fetch_add(1, std::memory_order_relaxed);
+        const std::size_t l = std::min<std::size_t>(level, 31);
+        per_level_nodes[l].fetch_add(1, std::memory_order_relaxed);
+        per_level_contribs[l].fetch_add(n, std::memory_order_relaxed);
+      }
+
+      ~ConvContributionStats() {
+        std::uint64_t nodes = 0, total = 0, maxn = 0;
+        for (std::size_t i = 0; i <= max_count; ++i) {
+          const auto c = hist[i].load();
+          nodes += c; total += c * i;
+          if (c) maxn = i;
+        }
+        if (nodes == 0) return;
+        auto quantile = [&](double q) {
+          std::uint64_t acc = 0;
+          const auto goal = static_cast<std::uint64_t>(q * nodes);
+          for (std::size_t i = 0; i <= max_count; ++i) {
+            acc += hist[i].load();
+            if (acc > goal) return i;
+          }
+          return max_count;
+        };
+        std::ostringstream os;
+        os << "MRA CONV STATS " << name << " functions " << num_functions << " dest nodes " << nodes
+           << " contributions " << total << " mean " << double(total) / nodes << " p50 " << quantile(0.5)
+           << " p90 " << quantile(0.9) << " p99 " << quantile(0.99) << " max " << maxn << " | per level (nodes:mean)";
+        for (std::size_t l = 0; l < 32; ++l) {
+          const auto nn = per_level_nodes[l].load();
+          if (nn) os << " " << l << "=" << nn << ":" << double(per_level_contribs[l].load()) / nn;
+        }
+        os << "\n";
+        std::cout << os.str() << std::flush;
+      }
+    };
 
     template<size_type NDIM, std::size_t I, std::size_t... Is>
     void foreach_child_impl(const Key<NDIM>& key, auto&& fn,
@@ -238,6 +397,20 @@ namespace mra {
     ttg::Edge<mra::Key<NDIM>, std::vector<detail::KeyPair<NDIM>>> contribution_edge; // connecting the down task to the accumulate dispatch task
 
     ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> screener_to_accumulate;
+
+    /**
+     * Chunked contributions (conv_chunk_size() > 0): the screener sends each source node to a
+     * Route task per (source, dest) pair, which forwards it to the chunk of dest that
+     * AccumulateDispatch assigned to the pair. An Apply task convolves its chunk's sources in
+     * parallel and adds them up; a node with several chunks has its partial sums and its
+     * shell-0 result added by a Sum task, a node with one chunk gets its shell-0 result added
+     * by the Apply task itself.
+     */
+    const std::size_t chunk_size = detail::conv_chunk_size();
+    ttg::Edge<detail::KeyPair<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> screener_to_route;
+    ttg::Edge<detail::KeyPair<NDIM>, detail::ChunkKey<NDIM>> route_chunk_edge;
+    ttg::Edge<detail::ChunkKey<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> apply_in;
+    ttg::Edge<detail::SumKey<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> sum_in;
 
     //ttg::Edge<mra::Key<NDIM>, mra::FunctionsCompressedNode<T, NDIM>> shell0_to_shellN;
     ttg::Edge<mra::Key<NDIM>, std::array<bool, Key<NDIM>::num_children()>> down_to_accumulate_leaf_info;
@@ -524,7 +697,7 @@ namespace mra {
      *       Taking the raw pointer here is a dirty hack!
      */
     auto screener_tt = ttg::make_tt<Space>(
-      [&, K, thresh, truncate_mode, cell_min_width, fac, name, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
+      [&, K, thresh, truncate_mode, cell_min_width, fac, name, chunk_size, up_tt_ptr = up_contributions_tt.get(), down_tt_ptr = down_contributions_tt.get()](
                               const mra::Key<NDIM>& key,
                               const mra::FunctionsCompressedNode<T, NDIM>& in_node,
                               const DenseTensor<T, 1>& cnorms) -> TASKTYPE {
@@ -732,7 +905,12 @@ namespace mra {
 
 #ifndef MRA_ENABLE_HOST
         if (!contributions.empty()) {
-          sends.push_back(ttg::device::broadcast<0>(std::move(contributions), in_node)); // broadcast the input node to the accumulate tasks
+          // broadcast the input node to the accumulate (chain) or route (chunked) tasks
+          if (chunk_size > 0) {
+            sends.push_back(ttg::device::broadcast<2>(std::move(contributions), in_node));
+          } else {
+            sends.push_back(ttg::device::broadcast<0>(std::move(contributions), in_node));
+          }
         }
         co_await std::move(sends);
 #else
@@ -741,7 +919,7 @@ namespace mra {
         }
 #endif // MRA_ENABLE_HOST
       },
-      ttg::edges(input, norm_edge), ttg::edges(screener_to_accumulate, up_contribution_edge), "Screen");
+      ttg::edges(input, norm_edge), ttg::edges(screener_to_accumulate, up_contribution_edge, screener_to_route), "Screen");
 
     /**
      * The task that applies the convolution operator on shell 0.
@@ -1008,11 +1186,17 @@ namespace mra {
      * It sends the node and the contributions to the first shellN task, or sends the node directly
      * to the output if there are no contributions to apply.
      */
+    std::shared_ptr<detail::ConvContributionStats> conv_stats;
+    if (detail::ConvContributionStats::enabled()) {
+      conv_stats = std::make_shared<detail::ConvContributionStats>(name, total_functions);
+    }
     auto accumulate_dispatch = ttg::make_tt<Space>(
       [=](const mra::Key<NDIM>& key,
           const mra::FunctionsCompressedNode<T, NDIM>& in_node,
           const std::vector<detail::KeyPair<NDIM>>& contributions,
           const std::array<bool, mra::Key<NDIM>::num_children()>& child_empty) -> TASKTYPE {
+
+        if (conv_stats) conv_stats->record(key.level(), contributions.size());
 
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
@@ -1031,6 +1215,40 @@ namespace mra {
           // if we have no contributions to apply, just forward the input to the output
           //std::cout << "ACCUMULATE DISPATCH " << key << " has no contributions, forwarding input to output" << std::endl;
           send_out(key, in_node, std::integral_constant<std::size_t, 3>{});
+        } else if (chunk_size > 0) {
+          // split the contributions into chunks of (nearly) equal size, at most chunk_size each
+          // unless that would give a Sum task more partial sums than it can select
+          const std::size_t n = contributions.size();
+          std::size_t nchunks = (n + chunk_size - 1) / chunk_size;
+          if (nchunks > detail::conv_max_sum_parts) {
+            nchunks = detail::conv_max_sum_parts;
+            if ((n + nchunks - 1) / nchunks > detail::conv_max_chunk_size) {
+              throw std::runtime_error("convolution: too many contributions to one node for the chunked path; "
+                                       "set MRA_TTG_CONV_CHUNK=0");
+            }
+          }
+          std::size_t begin = 0;
+          for (std::size_t j = 0; j < nchunks; ++j) {
+            const std::size_t size = n / nchunks + (j < n % nchunks ? 1 : 0);
+            detail::ChunkKey<NDIM> ck{key, static_cast<std::uint32_t>(j), static_cast<std::uint32_t>(size),
+                                      static_cast<std::uint32_t>(nchunks)};
+            std::vector<detail::KeyPair<NDIM>> pairs(contributions.begin() + begin, contributions.begin() + begin + size);
+            begin += size;
+#ifndef MRA_ENABLE_HOST
+            // an rvalue: the send keeps its own copy (it runs when the task completes)
+            sends.push_back(ttg::device::broadcast<12>(std::move(pairs), std::move(ck)));
+#else
+            ttg::broadcast<12>(std::move(pairs), std::move(ck));
+#endif
+          }
+          if (nchunks == 1) {
+            // the only chunk adds the shell-0 result itself
+            send_out(detail::ChunkKey<NDIM>{key, 0, static_cast<std::uint32_t>(n), 1}, in_node,
+                     std::integral_constant<std::size_t, 13>{});
+          } else {
+            send_out(detail::SumKey<NDIM>{key, static_cast<std::uint32_t>(nchunks)}, in_node,
+                     std::integral_constant<std::size_t, 14>{});
+          }
         } else {
           // send the input node and the list of contributions to the accumulate task that applies contributions one by one recursively.
           // in_node goes out on the const edge (index 0): it's read-only here since the
@@ -1059,7 +1277,8 @@ namespace mra {
       }, ttg::edges(to_shellN, contribution_edge, down_to_accumulate_leaf_info),
          ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, accumulate_contribution_recurse, accumulate_to_adjust_leaf,
                     adjust_leaf_edges[0], adjust_leaf_edges[1], adjust_leaf_edges[2], adjust_leaf_edges[3],
-                    adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7]),
+                    adjust_leaf_edges[4], adjust_leaf_edges[5], adjust_leaf_edges[6], adjust_leaf_edges[7],
+                    route_chunk_edge, apply_in, sum_in),
          "AccumulateDispatch");
 
     /**
@@ -1369,6 +1588,313 @@ namespace mra {
          ttg::edges(accumulate_node_recurse, accumulate_node_recurse_owned, accumulate_contribution_recurse, accumulate_to_adjust_leaf),
          "Accumulate");
 
+#ifndef MRA_ENABLE_HOST
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ConvolutionBatchArg<T, NDIM>>> chunk_conv_pool;
+    std::shared_ptr<detail::GroupedBatchPoolRegistry<detail::ConvSumBatchArg<T, NDIM>>> chunk_sum_pool;
+    if (chunk_size > 0) {
+      chunk_conv_pool = conv_pool ? conv_pool
+                                  : detail::shared_pool_registry<detail::ConvolutionBatchArg<T, NDIM>>(mra::get_batch_size());
+      chunk_sum_pool = detail::shared_pool_registry<detail::ConvSumBatchArg<T, NDIM>>(mra::get_batch_size());
+    }
+#endif // MRA_ENABLE_HOST
+
+    /**
+     * Route: joins a source node (from the screener) with the chunk its (source, dest) pair was
+     * assigned to (from AccumulateDispatch) and forwards the node to that chunk. No device work.
+     */
+    auto route_tt = ttg::make_tt<Space>(
+      [=](const detail::KeyPair<NDIM>& keypair,
+          const mra::FunctionsCompressedNode<T, NDIM>& source,
+          const detail::ChunkKey<NDIM>& chunk) -> TASKTYPE {
+#ifndef MRA_ENABLE_HOST
+        co_await ttg::device::send<0>(chunk, source);
+#else
+        ttg::send<0>(chunk, source);
+#endif // MRA_ENABLE_HOST
+      }, ttg::edges(screener_to_route, route_chunk_edge), ttg::edges(apply_in), "ConvRoute");
+
+    /**
+     * Apply: convolves the sources of one chunk in parallel, each into its own slot of scratch
+     * memory, and adds the slots into the chunk's partial sum, which goes to the node's Sum task.
+     * The only chunk of a node also receives the node's shell-0 result (its key is the node's,
+     * or it is invalid), adds it, and finishes the node as the last link of a chain does.
+     *
+     * Operator norms a chunk has to assemble itself (Owned) are claimed in a fixed order of
+     * the displacements, so two chunks waiting for each other's norms cannot deadlock.
+     */
+    auto apply_target = [](const detail::ChunkKey<NDIM>& ck) -> std::size_t {
+      return ck.size + (ck.nchunks == 1 ? 1 : 0);
+    };
+    auto apply_tt = ttg::make_tt<Space>(
+#ifndef MRA_ENABLE_HOST
+      [&, K, fac, thresh, truncate_mode, cell_min_width, enable_conv_batching, chunk_conv_pool, chunk_sum_pool](
+#else
+      [&, K](
+#endif // MRA_ENABLE_HOST
+          const detail::ChunkKey<NDIM>& ck,
+          const ttg::Aggregator<mra::FunctionsCompressedNode<T, NDIM>>& values) -> TASKTYPE {
+#ifdef MRA_ENABLE_HOST
+        throw std::logic_error("convolution: chunked contributions need a device build");
+#else
+        auto sends = ttg::device::forward();
+        const auto& key = ck.dest;
+        const Level level = key.level();
+        const size_type N = fns->num_functions(key);
+        const bool final_chunk = (ck.nchunks == 1);
+
+        /* the sources, and (only chunk) the node's own shell-0 result */
+        const mra::FunctionsCompressedNode<T, NDIM>* base = nullptr;
+        std::vector<const mra::FunctionsCompressedNode<T, NDIM>*> sources;
+        sources.reserve(values.size());
+        for (const auto& v : values) {
+          if (v.invalid() || v.key() == key) {
+            if (base != nullptr || !final_chunk) throw std::logic_error("convolution Apply: unexpected shell-0 result");
+            base = &v;
+          } else {
+            sources.push_back(&v);
+          }
+        }
+        if (sources.size() != ck.size || (final_chunk && base == nullptr)) {
+          throw std::logic_error("convolution Apply: chunk does not match its key");
+        }
+        const std::size_t nc = sources.size();
+
+        /* the operator of every displacement, claimed in a fixed order */
+        using OpResult = typename mra::GaussianConvolutionOperator<T, NDIM>::OpResult;
+        using OpStatus = typename mra::GaussianConvolutionOperator<T, NDIM>::Status;
+        std::vector<Key<NDIM>> disps(nc);
+        for (std::size_t j = 0; j < nc; ++j) disps[j] = key - sources[j]->key();
+        std::vector<std::size_t> order(nc);
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+          return disps[a].translation() < disps[b].translation();
+        });
+        std::vector<OpResult> res(nc);
+        std::vector<mra::DenseTensor<T, 4>*> norms(nc, nullptr); // owned by op's norms cache
+        std::vector<Key<NDIM>> owned_disps;
+        for (std::size_t j : order) {
+          for (;;) {
+            res[j] = op.try_get_op(level, disps[j]);
+            if (res[j].level_work != nullptr) {
+              // the screeners of this level obtained the level's table before sending
+              throw std::runtime_error("convolution Apply: level table not generated by the screener");
+            }
+            if (res[j].status != OpStatus::Pending) break;
+            co_await ttg::device::suspend();
+          }
+          if (res[j].status == OpStatus::Owned) {
+            norms[j] = op.make_norms_tensor(level, disps[j]);
+            owned_disps.push_back(disps[j]);
+          }
+        }
+        if (!owned_disps.empty() && op.validate_ops_enabled()) {
+          throw std::logic_error("convolution: MRA_VALIDATE_OPS needs MRA_TTG_CONV_CHUNK=0");
+        }
+
+        /* the result: the union of the non-zero functions of the sources (and the base) */
+        const bool base_data = base != nullptr && !base->invalid() && !base->empty();
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+        for (size_type i = 0; i < N; ++i) {
+          bool nonzero = base_data && base->sparsity().is_nonzero(i);
+          for (const auto* src : sources) nonzero = nonzero || src->sparsity().is_nonzero(i);
+          if (nonzero) sparsity.set_nonzero(i);
+        }
+        mra::FunctionsCompressedNode<T, NDIM> out(key, N);
+        out.allocate(sparsity, K, ttg::scope::Allocate);
+        DenseTensor<T, 1> resnorms;
+        if (final_chunk) {
+          out.set_ns();
+          mra::apply_leaf_info(out, *base);
+          resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
+        } // a partial sum is not non-standard: that is how Sum tells it from the shell-0 result
+
+        auto input = ttg::device::Input(out.coeffs().buffer());
+        for (const auto* src : sources) input.add(src->coeffs().buffer());
+        if (base_data) input.add(base->coeffs().buffer());
+        if (final_chunk) input.add(resnorms.buffer());
+        op.add_chunk_op_buffers(input, res, norms);
+        co_await ttg::device::select(input);
+        for (std::size_t j = 0; j < nc; ++j) {
+          if (norms[j] != nullptr) {
+            op.submit_assemble_norms_kernel(res[j], level, disps[j], *norms[j]);
+            res[j].norms = norms[j];
+          }
+        }
+
+        const auto device = ttg::device::current_device();
+        detail::ConvChunkWork<T, NDIM> work;
+        work.N = N;
+        work.tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
+        work.at = {true, level > 0};
+        auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
+        detail::rebind_view(work.empty_view, empty_node.coeffs().current_view());
+        DenseTensor<T, 1> no_norms;
+        detail::rebind_view(work.no_norms, no_norms.current_view());
+        work.contribs.resize(nc);
+        for (std::size_t j = 0; j < nc; ++j) {
+          auto& c = work.contribs[j];
+          const auto* src = sources[j];
+          detail::rebind_view(c.f, src->coeffs().current_view());
+          c.transr = {res[j].dims[0]->R.current_view(), res[j].dims[1]->R.current_view(), res[j].dims[2]->R.current_view()};
+          c.transs = {res[j].dims[0]->S.current_view(), res[j].dims[1]->S.current_view(), res[j].dims[2]->S.current_view()};
+          detail::rebind_view(c.opnorms, detail::batch_opnorms(res[j].norms->current_view(), fns->global_offset(key)));
+          SparsityInfo src_sparsity(N, SparsityInfo::InitType::AllZero);
+          for (size_type i = 0; i < N; ++i) {
+            if (src->sparsity().is_nonzero(i)) src_sparsity.set_nonzero(i);
+          }
+          c.n_nonzero = src_sparsity.count_nonzero();
+          c.sparsity.resize(N);
+          detail::sparsity_to_bytes(src_sparsity, c.sparsity.data(), N);
+        }
+        detail::rebind_view(work.out_view, out.coeffs().current_view());
+        work.out_sparsity.resize(N);
+        detail::sparsity_to_bytes(out.coeffs().sparsity(), work.out_sparsity.data(), N);
+        work.out_dev = const_cast<T*>(out.coeffs().buffer().device_ptr_on(device));
+        work.out_nonzero = sparsity.count_nonzero();
+        if (base_data) {
+          work.has_base = true;
+          detail::rebind_view(work.base_view, base->coeffs().current_view());
+        }
+        if (final_chunk) {
+          work.has_norms = true;
+          detail::rebind_view(work.resnorms_view, resnorms.current_view());
+          work.resnorms_dev = const_cast<T*>(resnorms.buffer().device_ptr_on(device));
+        }
+
+        if (enable_conv_batching) {
+          auto batch = co_await ttg::device::coop<detail::ChunkKey<NDIM>>(work);
+          if (batch.is_leader()) {
+            std::vector<detail::ConvChunkWork<T, NDIM>*> works(batch.size());
+            for (std::size_t m = 0; m < batch.size(); ++m) works[m] = &batch[m].template get<0>();
+            detail::submit_conv_chunk_works<T, NDIM>(works.data(), works.size(), *chunk_conv_pool, *chunk_sum_pool,
+                                                     K, fac, detail::conv_chunk_scratch_bytes());
+          }
+        } else {
+          detail::ConvChunkWork<T, NDIM>* w = &work;
+          detail::submit_conv_chunk_works<T, NDIM>(&w, 1, *chunk_conv_pool, *chunk_sum_pool, K, fac,
+                                                   detail::conv_chunk_scratch_bytes());
+        }
+
+        if (!owned_disps.empty()) {
+          // publish once this task has completed, see shell0_tt
+          sends.push_back(ttg::device::on_complete(
+            [opp = &op, level, owned_disps = std::move(owned_disps)]() {
+              for (const auto& d : owned_disps) opp->publish_op(level, d);
+            }));
+        }
+
+        if (final_chunk) {
+          co_await ttg::device::wait(resnorms.buffer());
+          bool empty = true;
+          auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
+          for (size_type i = 0; i < N; ++i) {
+            if (resnorms_host_view(i) != 0.0) {
+              empty = false;
+            } else {
+              out.set_zero(i);
+            }
+          }
+          if (empty) out.make_empty(); // drop the memory but keep child info
+          sends.push_back(ttg::device::send<1>(key, std::move(out)));
+        } else {
+          sends.push_back(ttg::device::send<0>(detail::SumKey<NDIM>{key, ck.nchunks}, std::move(out)));
+        }
+        co_await std::move(sends);
+#endif // MRA_ENABLE_HOST
+      }, ttg::edges(ttg::make_aggregator(apply_in, apply_target)),
+         ttg::edges(sum_in, accumulate_to_adjust_leaf), "ConvApply");
+
+    /**
+     * Sum: adds the partial sums of a node with several chunks and its shell-0 result (the
+     * non-standard or invalid value), and finishes the node as the last link of a chain does.
+     */
+    auto sum_target = [](const detail::SumKey<NDIM>& sk) -> std::size_t { return sk.nchunks + 1; };
+    auto sum_tt = ttg::make_tt<Space>(
+#ifndef MRA_ENABLE_HOST
+      [&, K, enable_conv_batching, chunk_sum_pool](
+#else
+      [&, K](
+#endif // MRA_ENABLE_HOST
+          const detail::SumKey<NDIM>& sk,
+          const ttg::Aggregator<mra::FunctionsCompressedNode<T, NDIM>>& values) -> TASKTYPE {
+#ifdef MRA_ENABLE_HOST
+        throw std::logic_error("convolution: chunked contributions need a device build");
+#else
+        const auto& key = sk.dest;
+        const size_type N = fns->num_functions(key);
+        const mra::FunctionsCompressedNode<T, NDIM>* base = nullptr;
+        std::vector<const mra::FunctionsCompressedNode<T, NDIM>*> parts;
+        for (const auto& v : values) {
+          if (v.invalid() || v.is_ns()) {
+            if (base != nullptr) throw std::logic_error("convolution Sum: two shell-0 results");
+            base = &v;
+          } else {
+            parts.push_back(&v);
+          }
+        }
+        if (base == nullptr || parts.size() != sk.nchunks) {
+          throw std::logic_error("convolution Sum: values do not match the key");
+        }
+        const bool base_data = !base->invalid() && !base->empty();
+
+        SparsityInfo sparsity(N, SparsityInfo::InitType::AllZero);
+        for (size_type i = 0; i < N; ++i) {
+          bool nonzero = base_data && base->sparsity().is_nonzero(i);
+          for (const auto* p : parts) nonzero = nonzero || (!p->empty() && p->sparsity().is_nonzero(i));
+          if (nonzero) sparsity.set_nonzero(i);
+        }
+        mra::FunctionsCompressedNode<T, NDIM> out(key, N);
+        out.allocate(sparsity, K, ttg::scope::Allocate);
+        out.set_ns();
+        mra::apply_leaf_info(out, *base);
+        DenseTensor<T, 1> resnorms(N, ttg::scope::SyncOut);
+
+        auto input = ttg::device::Input(out.coeffs().buffer(), resnorms.buffer());
+        if (base_data) input.add(base->coeffs().buffer());
+        for (const auto* p : parts) if (!p->empty()) input.add(p->coeffs().buffer());
+        co_await ttg::device::select(input);
+
+        const auto device = ttg::device::current_device();
+        detail::ConvSumWork<T, NDIM> work;
+        work.N = N;
+        if (base_data) work.srcs.push_back(base->coeffs().current_view());
+        for (const auto* p : parts) if (!p->empty()) work.srcs.push_back(p->coeffs().current_view());
+        detail::rebind_view(work.out_view, out.coeffs().current_view());
+        work.out_sparsity.resize(N);
+        detail::sparsity_to_bytes(out.coeffs().sparsity(), work.out_sparsity.data(), N);
+        work.out_dev = const_cast<T*>(out.coeffs().buffer().device_ptr_on(device));
+        work.out_nonzero = sparsity.count_nonzero();
+        detail::rebind_view(work.resnorms_view, resnorms.current_view());
+        work.resnorms_dev = const_cast<T*>(resnorms.buffer().device_ptr_on(device));
+
+        if (enable_conv_batching) {
+          auto batch = co_await ttg::device::coop<detail::SumKey<NDIM>>(work);
+          if (batch.is_leader()) {
+            std::vector<detail::ConvSumWork<T, NDIM>*> works(batch.size());
+            for (std::size_t m = 0; m < batch.size(); ++m) works[m] = &batch[m].template get<0>();
+            detail::submit_conv_sum_works<T, NDIM>(works.data(), works.size(), *chunk_sum_pool);
+          }
+        } else {
+          detail::ConvSumWork<T, NDIM>* w = &work;
+          detail::submit_conv_sum_works<T, NDIM>(&w, 1, *chunk_sum_pool);
+        }
+        co_await ttg::device::wait(resnorms.buffer());
+
+        bool empty = true;
+        auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
+        for (size_type i = 0; i < N; ++i) {
+          if (resnorms_host_view(i) != 0.0) {
+            empty = false;
+          } else {
+            out.set_zero(i);
+          }
+        }
+        if (empty) out.make_empty(); // drop the memory but keep child info
+        co_await ttg::device::send<0>(key, std::move(out));
+#endif // MRA_ENABLE_HOST
+      }, ttg::edges(ttg::make_aggregator(sum_in, sum_target)),
+         ttg::edges(accumulate_to_adjust_leaf), "ConvSum");
+
     /***************************************************************************************
      * Task that receives the final output node and its children (or an empty node) and
      * adjusts the leaf status of the node based on whether its children have data.
@@ -1653,6 +2179,9 @@ namespace mra {
       adjust_leaf_info_tt->set_keymap(procmap);
       accumulate_dispatch->set_keymap(procmap);
       accumulate_tt->set_keymap([=](const detail::KeyPair<NDIM>& kp) { return procmap(kp.dest); });
+      route_tt->set_keymap([=](const detail::KeyPair<NDIM>& kp) { return procmap(kp.dest); });
+      apply_tt->set_keymap([=](const detail::ChunkKey<NDIM>& ck) { return procmap(ck.dest); });
+      sum_tt->set_keymap([=](const detail::SumKey<NDIM>& sk) { return procmap(sk.dest); });
       //dispatch_adjust_parent_tt->set_keymap(procmap);
       //adjust_parent_tt->set_keymap(procmap);
     }
@@ -1671,6 +2200,9 @@ namespace mra {
       adjust_leaf_info_tt->set_devicemap(devicemap);
       accumulate_dispatch->set_devicemap(devicemap);
       accumulate_tt->set_devicemap([=](const detail::KeyPair<NDIM>& kp) { return devicemap(kp.dest); });
+      route_tt->set_devicemap([=](const detail::KeyPair<NDIM>& kp) { return devicemap(kp.dest); });
+      apply_tt->set_devicemap([=](const detail::ChunkKey<NDIM>& ck) { return devicemap(ck.dest); });
+      sum_tt->set_devicemap([=](const detail::SumKey<NDIM>& sk) { return devicemap(sk.dest); });
       //dispatch_adjust_parent_tt->set_devicemap(devicemap);
       //adjust_parent_tt->set_devicemap(devicemap);
     }
@@ -1696,6 +2228,13 @@ namespace mra {
           [](const detail::KeyPair<NDIM>&, const detail::KeyPair<NDIM>&) { return true; },
           max_batch_size);
 
+      apply_tt->set_batch_matcher(
+          [](const detail::ChunkKey<NDIM>&, const detail::ChunkKey<NDIM>&) { return true; },
+          max_batch_size);
+      sum_tt->set_batch_matcher(
+          [](const detail::SumKey<NDIM>&, const detail::SumKey<NDIM>&) { return true; },
+          max_batch_size);
+
       // norm_tt: unrestricted just like the two above -- simple_norm has no
       // operator data to begin with, so there is nothing to keep uniform
       // across a batch (see mra/kernels/simple_norm.h's batching-support
@@ -1710,7 +2249,7 @@ namespace mra {
 
     auto ins = std::make_tuple(screener_tt->template in<0>());
     auto outs = std::make_tuple(adjust_leaf_info_tt->template out<2>());
-    std::vector<std::unique_ptr<ttg::TTBase>> ops(8);
+    std::vector<std::unique_ptr<ttg::TTBase>> ops(11);
     ops[0] = std::move(up_contributions_tt);
     ops[1] = std::move(down_contributions_tt);
     ops[2] = std::move(norm_tt);
@@ -1719,6 +2258,9 @@ namespace mra {
     ops[5] = std::move(adjust_leaf_info_tt);
     ops[6] = std::move(accumulate_dispatch);
     ops[7] = std::move(accumulate_tt);
+    ops[8] = std::move(route_tt);
+    ops[9] = std::move(apply_tt);
+    ops[10] = std::move(sum_tt);
     //ops[8] = std::move(dispatch_adjust_parent_tt);
     //ops[9] = std::move(adjust_parent_tt);
 

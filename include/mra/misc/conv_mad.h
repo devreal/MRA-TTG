@@ -1373,6 +1373,37 @@ namespace mra {
     ///  - if res is Available: the cached norms tensor.
     /// res must not be Pending -- loop on try_get_op() and
     /// ttg::device::suspend() until it isn't, before calling this.
+    /// add_convolution_op_buffers() for several displacements at one level in one select()
+    /// (make_convolution's chunk tasks): the level's R/S once, and for each displacement its
+    /// cached norms tensor (Available) or the tensor it assembles (Owned, `norms[j]`, see
+    /// make_norms_tensor()), with the assembly's shared tables and norms1d added once.
+    /// No result may carry level_work or be Pending; all must share one table.
+    void add_chunk_op_buffers(ttg::device::Input& input, const std::vector<OpResult>& res,
+                              const std::vector<DenseTensor<T, 4>*>& norms) const {
+      if (res.empty()) return;
+      const auto* table = res[0].dims[0].table;
+      input.add(table->R.buffer());
+      input.add(table->S.buffer());
+      bool any_owned = false;
+      for (std::size_t j = 0; j < res.size(); ++j) {
+        assert(res[j].status != Status::Pending && res[j].level_work == nullptr);
+        if (res[j].dims[0].table != table) throw std::logic_error("add_chunk_op_buffers: displacements of different levels");
+        if (res[j].status == Status::Owned) {
+          assert(nullptr != norms[j]);
+          input.add(norms[j]->buffer());
+          any_owned = true;
+        } else {
+          input.add(res[j].norms->buffer());
+        }
+      }
+      if (any_owned) {
+        input.add(table->norms1d.buffer());
+        input.add(m_shared_fac.buffer());
+        input.add(m_shared_rank.buffer());
+        input.add(m_shared_term.buffer());
+      }
+    }
+
     void add_convolution_op_buffers(ttg::device::Input& input, const OpResult& res,
                                     ttg::Buffer<GenerateOp1DItem<T>>& items_buf,
                                     DenseTensor<T, 4>* norms) const {

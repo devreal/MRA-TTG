@@ -1122,6 +1122,337 @@ namespace mra{
       submit_convolution_kernel_batched<T, NDIM>(pool, slot, total_nonzero, K, fac, ttg::device::current_stream());
     }
 
+    /**
+     * The batched sum behind the chunked contributions of make_convolution: one member adds up
+     * to conv_sum_max_srcs nodes (srcs) into out, for every function out has allocated. A
+     * source that is zero at a function adds nothing there. With resnorms non-empty the member
+     * also writes the norm of each function of out, and demotes a function whose norm is
+     * exactly zero to allocated-but-zero, as the convolution kernel does; resnorms of the
+     * functions out does not allocate are zero-filled by the caller's grouped copy.
+     */
+    /**
+     * Points dst at src's data: a TensorView's copy assignment copies the elements (see its
+     * operator=), the move assignment rebinds.
+     */
+    template <typename ViewT, typename SrcT>
+    inline void rebind_view(ViewT& dst, SrcT&& src) {
+      dst = ViewT(std::forward<SrcT>(src));
+    }
+
+    inline constexpr size_type conv_sum_max_srcs = 32;
+
+    template <typename T, Dimension NDIM>
+    struct ConvSumBatchArg {
+      SparseTensorView<T, NDIM+1> out;
+      DenseTensorView<T, 1> resnorms;
+      size_type n = 0;      // functions of out
+      size_type nsrcs = 0;
+      std::array<SparseTensorView<T, NDIM+1>, conv_sum_max_srcs> srcs;
+    };
+
+    template <typename T, Dimension NDIM>
+    LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK)
+    GLOBALSCOPE void conv_sum_kernel_batched(
+      ConvSumBatchArg<T, NDIM>* args,     // device ptr, size == num_members
+      const size_type* member_offsets,    // device ptr, size == num_members+1
+      size_type num_members,
+      size_type total)
+    {
+      SHARED size_type member;
+      SHARED size_type local_pos;
+      SHARED size_type fnid;
+      for (size_type pos = blockIdx.x; pos < total; pos += gridDim.x) {
+#ifdef HAVE_DEVICE_ARCH
+        if (thread_id() < MRA_WARP_SIZE)
+#endif
+        {
+          size_type lp;
+          const size_type m = find_member_for_pos_warp(member_offsets, num_members, pos, &lp);
+          if (is_team_lead()) {
+            member = m;
+            local_pos = lp;
+          }
+        }
+        SYNCTHREADS();
+        auto& arg = args[member];
+#ifdef HAVE_DEVICE_ARCH
+        if (thread_id() < MRA_WARP_SIZE)
+#endif
+        {
+          const size_type f = find_nth_allocated_warp(arg.n, local_pos, arg.out);
+          if (is_team_lead()) fnid = f;
+        }
+        SYNCTHREADS();
+        const size_type i = fnid;
+        auto out = arg.out(i);
+        T* out_ptr = out.data();
+        const size_type size = out.size();
+        for (size_type e = thread_id(); e < size; e += block_size()) {
+          T sum = T(0);
+          for (size_type j = 0; j < arg.nsrcs; ++j) {
+            const auto& src = arg.srcs[j];
+            if (!src.is_zero(i)) sum += src(i).data()[e];
+          }
+          out_ptr[e] = sum;
+        }
+        SYNCTHREADS();
+        if (!arg.resnorms.empty()) {
+          const T norm = normf(out);
+          if (is_team_lead()) {
+            arg.resnorms[i] = norm;
+            if (norm == T(0)) arg.out.set_state(i, SparsityState::ALLOCATED);
+          }
+        }
+        SYNCTHREADS();
+      }
+    }
+
+  } // namespace detail
+
+  /**
+   * Launches the batched sum for the members marshaled into slot.args/slot.offsets (offsets:
+   * running sum of each member's allocated functions of out, `total` the last), after the
+   * grouped copy of slot.extra_* (out's sparsity bytes, the zero-fill of resnorms).
+   */
+  template <typename T, Dimension NDIM>
+  void submit_conv_sum_kernel_batched(
+    detail::GroupedBatchPool<detail::ConvSumBatchArg<T, NDIM>>& pool,
+    typename detail::GroupedBatchPool<detail::ConvSumBatchArg<T, NDIM>>::slot_t& slot,
+    size_type total,
+    ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+  {
+    using arg_t = detail::ConvSumBatchArg<T, NDIM>;
+    const size_type num_members = static_cast<size_type>(slot.args.size());
+    detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
+    if (total > 0) {
+      const size_type grid_cap = detail::kernel_grid_cap(detail::conv_sum_kernel_batched<T, NDIM>, MAX_THREADS_PER_BLOCK, 0);
+      const size_type grid_x = std::min<size_type>(total, grid_cap);
+      CALL_KERNEL((detail::conv_sum_kernel_batched<T, NDIM>), grid_x, MAX_THREADS_PER_BLOCK, 0, stream,
+                  (slot.dev_args, slot.dev_offsets, num_members, total));
+    }
+    checkSubmit();
+    pool.mark_submitted(slot, stream);
+  }
+#else
+  ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
+  namespace detail {
+
+    /** one contribution of a chunk of make_convolution (see ConvChunkWork) */
+    template <typename T, Dimension NDIM>
+    struct ConvChunkContribution {
+      SparseTensorView<T, NDIM+1> f;                        // the source node's coefficients
+      std::array<DenseTensorView<const T, 3>, NDIM> transr;
+      std::array<DenseTensorView<const T, 3>, NDIM> transs;
+      DenseTensorView<T, 4> opnorms;
+      std::vector<SparsityState> sparsity;                  // f's non-zero functions, as sparsity bytes
+      size_type n_nonzero = 0;
+    };
+
+    /**
+     * What a chunk task (make_convolution's Apply) hands its batch leader: the contributions,
+     * each convolved into its own slot of scratch memory, and the partial node (out) they are
+     * summed into.
+     */
+    template <typename T, Dimension NDIM>
+    struct ConvChunkWork {
+      size_type N = 0;
+      T tol = 0;
+      std::array<bool, 2> at = {true, true};
+      SparseTensorView<T, NDIM+1> empty_view;               // the (absent) accumulator of every contribution
+      DenseTensorView<T, 1> no_norms;                       // empty: no norms of the slots
+      std::vector<ConvChunkContribution<T, NDIM>> contribs;
+      SparseTensorView<T, NDIM+1> out_view;
+      std::vector<SparsityState> out_sparsity;              // out's sparsity bytes
+      T* out_dev = nullptr;                                 // out's device buffer (where its sparsity bytes start)
+      size_type out_nonzero = 0;
+      /* a node's only chunk also adds the node's own shell-0 result (base) and computes the
+       * norms of the final result */
+      bool has_base = false;
+      SparseTensorView<T, NDIM+1> base_view;
+      bool has_norms = false;                               // the chunk is the node's only one
+      DenseTensorView<T, 1> resnorms_view;                  // set iff has_norms (a default view is uninitialized)
+      T* resnorms_dev = nullptr;
+    };
+
+    /**
+     * What a sum task (make_convolution's Sum) hands its batch leader: srcs are added into
+     * out, and the norms of out's functions go to resnorms.
+     */
+    template <typename T, Dimension NDIM>
+    struct ConvSumWork {
+      size_type N = 0;
+      std::vector<SparseTensorView<T, NDIM+1>> srcs;
+      SparseTensorView<T, NDIM+1> out_view;
+      std::vector<SparsityState> out_sparsity;
+      T* out_dev = nullptr;
+      size_type out_nonzero = 0;
+      DenseTensorView<T, 1> resnorms_view;
+      T* resnorms_dev = nullptr;
+    };
+
+    /** values of T a scratch slot of N functions, n_nonzero of them allocated, occupies (aligned) */
+    template <typename T, Dimension NDIM>
+    inline size_type conv_chunk_slot_size(size_type N, size_type n_nonzero, size_type K) {
+      constexpr size_type align = std::max<size_type>(MRA_BUFFER_ALIGNMENT / sizeof(T), 1);
+      const size_type header = align_to_type<T>(N) / sizeof(T);
+      const size_type twok_ndim = static_cast<size_type>(std::pow(2*K, NDIM));
+      return (header + n_nonzero * twok_ndim + align - 1) / align * align;
+    }
+
+    /**
+     * Submits the chunks of `works`: every contribution is convolved by one batched
+     * convolution launch into its slot of the sum pool's scratch memory (sized for the
+     * launch, so it is held only until the launches completed), then one batched sum adds
+     * each chunk's slots into its out. Works are split into groups whose slots fit in
+     * scratch_cap_bytes (at least one work per group); each group has its own pair of launches.
+     */
+    template <typename T, Dimension NDIM>
+    void submit_conv_chunk_works(
+      ConvChunkWork<T, NDIM>* const* works,
+      std::size_t num_works,
+      GroupedBatchPoolRegistry<ConvolutionBatchArg<T, NDIM>>& conv_registry,
+      GroupedBatchPoolRegistry<ConvSumBatchArg<T, NDIM>>& sum_registry,
+      size_type K,
+      const T fac,
+      std::size_t scratch_cap_bytes)
+    {
+      const auto device = ttg::device::current_device();
+      auto& conv_pool = conv_registry.get(device);
+      auto& sum_pool = sum_registry.get(device);
+      auto stream = ttg::device::current_stream();
+
+      std::size_t w0 = 0;
+      while (w0 < num_works) {
+        /* the group [w0, w1) and its scratch */
+        std::size_t w1 = w0;
+        size_type scratch_values = 0;
+        size_type num_contribs = 0;
+        while (w1 < num_works) {
+          size_type v = 0;
+          for (const auto& c : works[w1]->contribs) v += conv_chunk_slot_size<T, NDIM>(works[w1]->N, c.n_nonzero, K);
+          if (w1 > w0 && (scratch_values + v) * sizeof(T) > scratch_cap_bytes) break;
+          scratch_values += v;
+          num_contribs += works[w1]->contribs.size();
+          ++w1;
+        }
+        const std::size_t ng = w1 - w0;
+
+        auto& sslot = sum_pool.acquire(ng, ng + 1, 0);
+        T* scratch = sum_pool.template ensure_scratch<T>(sslot, std::max<size_type>(scratch_values, 1));
+
+        /* convolve every contribution into its slot */
+        auto& cslot = conv_pool.acquire(num_contribs, num_contribs + 1, 0);
+        cslot.args.clear();
+        cslot.offsets.clear();
+        cslot.offsets.push_back(0);
+        cslot.sparsity.clear();
+        cslot.extra_dsts.clear();
+        cslot.extra_srcs.clear();
+        cslot.extra_sizes.clear();
+        sslot.args.clear();
+        sslot.offsets.clear();
+        sslot.offsets.push_back(0);
+        sslot.sparsity.clear();
+        sslot.extra_dsts.clear();
+        sslot.extra_srcs.clear();
+        sslot.extra_sizes.clear();
+        size_type offset = 0;
+        for (std::size_t w = w0; w < w1; ++w) {
+          auto& work = *works[w];
+          ConvSumBatchArg<T, NDIM> sarg;
+          rebind_view(sarg.out, work.out_view);
+          rebind_view(sarg.resnorms, work.has_norms ? work.resnorms_view : work.no_norms);
+          sarg.n = work.N;
+          sarg.nsrcs = work.contribs.size() + (work.has_base ? 1 : 0);
+          if (sarg.nsrcs > conv_sum_max_srcs) throw std::runtime_error("convolution: too many contributions in a chunk");
+          if (work.has_base) rebind_view(sarg.srcs[work.contribs.size()], work.base_view);
+          for (std::size_t j = 0; j < work.contribs.size(); ++j) {
+            auto& c = work.contribs[j];
+            T* slot_ptr = scratch + offset;
+            offset += conv_chunk_slot_size<T, NDIM>(work.N, c.n_nonzero, K);
+            SparseTensorView<T, NDIM+1> slot_view(slot_ptr, make_dims<NDIM+1>(work.N, 2*K));
+            cslot.extra_dsts.push_back(slot_ptr);
+            cslot.extra_srcs.push_back(c.sparsity.data());
+            cslot.extra_sizes.push_back(work.N);
+            cslot.args.emplace_back(work.empty_view, c.f, slot_view, work.no_norms, work.N,
+                                    c.transr, c.transs, c.opnorms, work.tol, work.at);
+            cslot.offsets.push_back(cslot.offsets.back() + c.n_nonzero);
+            rebind_view(sarg.srcs[j], slot_view);
+          }
+          if (work.out_dev == nullptr || (work.has_norms && work.resnorms_dev == nullptr) || scratch == nullptr) {
+            throw std::runtime_error("convolution chunk: null device pointer: out " + std::to_string(work.out_dev == nullptr) +
+                                     " resnorms " + std::to_string(work.resnorms_dev == nullptr) +
+                                     " scratch " + std::to_string(scratch == nullptr));
+          }
+          sslot.extra_dsts.push_back(work.out_dev);
+          sslot.extra_srcs.push_back(work.out_sparsity.data());
+          sslot.extra_sizes.push_back(work.N);
+          if (work.has_norms) {
+            sslot.extra_dsts.push_back(work.resnorms_dev);
+            sslot.extra_srcs.push_back(nullptr); // zero-fill
+            sslot.extra_sizes.push_back(work.N * sizeof(T));
+          }
+          sslot.args.push_back(sarg);
+          sslot.offsets.push_back(sslot.offsets.back() + work.out_nonzero);
+        }
+        {
+          BatchRange batch_range("convolution_chunk", num_contribs);
+          submit_convolution_kernel_batched<T, NDIM>(conv_pool, cslot, cslot.offsets.back(), K, fac, stream);
+        }
+        {
+          BatchRange batch_range("convolution_sum", ng);
+          submit_conv_sum_kernel_batched<T, NDIM>(sum_pool, sslot, sslot.offsets.back(), stream);
+        }
+        w0 = w1;
+      }
+    }
+
+    /** Submits the sums of `works` (make_convolution's Sum tasks) in one batched launch. */
+    template <typename T, Dimension NDIM>
+    void submit_conv_sum_works(
+      ConvSumWork<T, NDIM>* const* works,
+      std::size_t num_works,
+      GroupedBatchPoolRegistry<ConvSumBatchArg<T, NDIM>>& sum_registry)
+    {
+      const auto device = ttg::device::current_device();
+      auto& pool = sum_registry.get(device);
+      auto& slot = pool.acquire(num_works, num_works + 1, 0);
+      slot.args.clear();
+      slot.offsets.clear();
+      slot.offsets.push_back(0);
+      slot.sparsity.clear();
+      slot.extra_dsts.clear();
+      slot.extra_srcs.clear();
+      slot.extra_sizes.clear();
+      for (std::size_t w = 0; w < num_works; ++w) {
+        auto& work = *works[w];
+        if (work.srcs.size() > conv_sum_max_srcs) throw std::runtime_error("convolution: too many partial sums of a node");
+        ConvSumBatchArg<T, NDIM> arg;
+        rebind_view(arg.out, work.out_view);
+        rebind_view(arg.resnorms, work.resnorms_view);
+        arg.n = work.N;
+        arg.nsrcs = work.srcs.size();
+        for (std::size_t j = 0; j < work.srcs.size(); ++j) rebind_view(arg.srcs[j], work.srcs[j]);
+        if (work.out_dev == nullptr || work.resnorms_dev == nullptr) {
+          throw std::runtime_error("convolution sum: null device pointer: out " + std::to_string(work.out_dev == nullptr) +
+                                   " resnorms " + std::to_string(work.resnorms_dev == nullptr));
+        }
+        slot.extra_dsts.push_back(work.out_dev);
+        slot.extra_srcs.push_back(work.out_sparsity.data());
+        slot.extra_sizes.push_back(work.N);
+        slot.extra_dsts.push_back(work.resnorms_dev);
+        slot.extra_srcs.push_back(nullptr); // zero-fill
+        slot.extra_sizes.push_back(work.N * sizeof(T));
+        slot.args.push_back(arg);
+        slot.offsets.push_back(slot.offsets.back() + work.out_nonzero);
+      }
+      BatchRange batch_range("convolution_sum", num_works);
+      submit_conv_sum_kernel_batched<T, NDIM>(pool, slot, slot.offsets.back(), ttg::device::current_stream());
+    }
+
   } // namespace detail
 #endif // !MRA_ENABLE_HOST
 
@@ -1155,6 +1486,13 @@ namespace mra{
     size_type total_nonzero,
     size_type K,
     const double fac,
+    ttg::device::Stream stream);
+
+  extern template
+  void submit_conv_sum_kernel_batched<double, 3>(
+    detail::GroupedBatchPool<detail::ConvSumBatchArg<double, 3>>& pool,
+    typename detail::GroupedBatchPool<detail::ConvSumBatchArg<double, 3>>::slot_t& slot,
+    size_type total,
     ttg::device::Stream stream);
 #endif // !MRA_ENABLE_HOST
 

@@ -34,6 +34,13 @@ namespace mra {
     size_type K,
     const double fac,
     ttg::device::Stream stream);
+
+  template
+  void submit_conv_sum_kernel_batched<double, 3>(
+    detail::GroupedBatchPool<detail::ConvSumBatchArg<double, 3>>& pool,
+    typename detail::GroupedBatchPool<detail::ConvSumBatchArg<double, 3>>::slot_t& slot,
+    size_type total,
+    ttg::device::Stream stream);
 #endif // !MRA_ENABLE_HOST
 
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
