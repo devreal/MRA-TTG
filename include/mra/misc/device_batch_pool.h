@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -440,6 +441,39 @@ namespace mra::detail {
    * kernel families -- bundling them with the Arg region into one slot ties
    * their lifetime to that specific family's batches instead.
    */
+  /**
+   * Whether a GroupedBatchPool slot is returned to its pool once the stream work of the
+   * submitting device task completed, as the device scheduler observes it
+   * (ttg_parsec::detail::defer_to_stream_completion: where ttg::device::wait() completes,
+   * or the event PaRSEC records after the task's last submission fired), instead of
+   * through an event recorded at submission and queried by acquire().
+   * MRA_TTG_BATCH_SLOT_RELEASE=event selects the event.
+   */
+  inline bool release_slots_with_task() {
+#if defined(TTG_HAVE_STREAM_COMPLETION_CALLBACKS)
+    static const bool with_task = [] {
+      const char* v = std::getenv("MRA_TTG_BATCH_SLOT_RELEASE");
+      return v == nullptr || std::string(v) != "event";
+    }();
+    return with_task;
+#else
+    return false;
+#endif
+  }
+
+  /**
+   * Whether submit_grouped_copy has its copy kernel read the packed arguments from the
+   * pinned host buffer (mapped into the device's address space) instead of transferring
+   * them with cudaMemcpyAsync first. MRA_TTG_GROUPED_COPY=memcpy selects the transfer.
+   */
+  inline bool grouped_copy_reads_host() {
+    static const bool reads_host = [] {
+      const char* v = std::getenv("MRA_TTG_GROUPED_COPY");
+      return v == nullptr || std::string(v) != "memcpy";
+    }();
+    return reads_host;
+  }
+
   template <typename Arg>
   struct GroupedBatchPool {
     struct slot_t {
@@ -472,6 +506,11 @@ namespace mra::detail {
       // grows (never cleared), so steady-state launches neither reallocate
       // nor re-zero it.
       std::vector<unsigned char, DeviceAllocator<unsigned char>> packed;
+      // `packed` as the device addresses it (cudaHostGetDevicePointer), for
+      // grouped_copy_reads_host(); looked up again whenever `packed` moves.
+      const unsigned char* packed_host = nullptr;
+      const unsigned char* packed_mapped = nullptr;
+
       // Device counterpart of `packed`. Grown in submit_grouped_copy while
       // the slot is checked out -- safe because acquire() only hands out a
       // slot once its previous submission has completed (see
@@ -507,8 +546,11 @@ namespace mra::detail {
       hipEvent_t event;
 #endif
       bool event_recorded = false; // false until this slot has been submitted at least once
-      // See BatchPool::slot_t::checked_out above for why this is needed.
+      // See BatchPool::slot_t::checked_out above for why this is needed. With
+      // release_slots_with_task(), it stays set after mark_submitted until the
+      // submitting task's stream work completed.
       bool checked_out = false;
+      GroupedBatchPool* owner = nullptr;
 
       slot_t() {
 #if defined(MRA_ENABLE_CUDA)
@@ -574,6 +616,7 @@ namespace mra::detail {
       }
       slots.push_back(std::make_unique<slot_t>());
       auto& s = *slots.back();
+      s.owner = this;
       ensure_capacity(s, num_args, num_offsets, num_sparsity);
       s.checked_out = true;
       return s;
@@ -581,8 +624,17 @@ namespace mra::detail {
 
     /* Call right after the H2D copy + kernel launch(es) have been issued on
      * `stream`. Releases the slot (clears checked_out) so a future
-     * acquire() may hand it out again once its device event completes. */
+     * acquire() may hand it out again once its device event completes --
+     * or, with release_slots_with_task(), once the device scheduler observed
+     * that the work the calling task submitted to its stream (this slot's
+     * copy and launches) completed: no event is recorded or queried here. */
     void mark_submitted(slot_t& s, ttg::device::Stream stream) {
+#if defined(TTG_HAVE_STREAM_COMPLETION_CALLBACKS)
+      if (release_slots_with_task() &&
+          ttg_parsec::detail::defer_to_stream_completion(&GroupedBatchPool::release_slot, &s)) {
+        return;
+      }
+#endif
       std::lock_guard<std::mutex> lock(mtx);
 #if defined(MRA_ENABLE_CUDA)
       check_cuda_rt(cudaEventRecord(s.event, stream), "cudaEventRecord");
@@ -596,6 +648,14 @@ namespace mra::detail {
     int device_id;
 
    private:
+    /* defer_to_stream_completion callback: the slot's submission completed */
+    static void release_slot(void* p) {
+      auto& s = *static_cast<slot_t*>(p);
+      std::lock_guard<std::mutex> lock(s.owner->mtx);
+      s.event_recorded = false;
+      s.checked_out = false;
+    }
+
 #if defined(MRA_ENABLE_CUDA)
     static bool event_ready(cudaEvent_t event) {
       cudaError_t err = cudaEventQuery(event);
@@ -728,6 +788,16 @@ namespace mra::detail {
                                    const unsigned char* src, ttg::device::Stream stream);
 
   /**
+   * Copies `total` bytes from host (pinned memory mapped into the device's address space,
+   * `host` its device address) to dev, and performs the num_descs copies described at
+   * host + descs_off, reading their sources from host + src_off. One kernel on stream, no
+   * transfer before it. Defined in src/kernels/batch_pool.cc.
+   */
+  void launch_grouped_copy_from_host(const unsigned char* host, unsigned char* dev, std::size_t total,
+                                     std::size_t descs_off, std::uint32_t num_descs, std::size_t src_off,
+                                     ttg::device::Stream stream);
+
+  /**
    * Issues the host->device transfer for a GroupedBatchPool slot's args and
    * offsets, PLUS every point-to-point copy queued in
    * slot.extra_dsts/extra_srcs/extra_sizes, and points slot.dev_args/
@@ -819,6 +889,22 @@ namespace mra::detail {
     slot.dev_offsets = reinterpret_cast<size_type*>(dev + offsets_off);
     slot.dev_src = dev + src_off;
     if (total == 0) return;
+    if (grouped_copy_reads_host()) {
+      /* one kernel reads everything from the pinned buffer: no cudaMemcpyAsync */
+      if (slot.packed_host != h) {
+        void* mapped = nullptr;
+#if defined(MRA_ENABLE_CUDA)
+        check_cuda_rt(cudaHostGetDevicePointer(&mapped, h, 0), "cudaHostGetDevicePointer");
+#elif defined(MRA_ENABLE_HIP)
+        check_hip_rt(hipHostGetDevicePointer(&mapped, h, 0), "hipHostGetDevicePointer");
+#endif
+        slot.packed_host = h;
+        slot.packed_mapped = static_cast<const unsigned char*>(mapped);
+      }
+      launch_grouped_copy_from_host(slot.packed_mapped, dev, total, descs_off,
+                                    static_cast<std::uint32_t>(num_descs), src_off, stream);
+      return;
+    }
 #if defined(MRA_ENABLE_CUDA)
     check_cuda_rt(cudaMemcpyAsync(dev, h, total, cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync");
 #elif defined(MRA_ENABLE_HIP)
