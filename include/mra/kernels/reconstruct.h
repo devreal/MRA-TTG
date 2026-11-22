@@ -371,6 +371,27 @@ namespace mra {
   ;
 #endif // MRA_HAVE_KERNEL_DEFINITIONS
 
+  namespace detail {
+
+    /**
+     * One launch of the reconstruct kernel by a task of make_nonstandard_2level: a node,
+     * the scaling coefficients from its parent, the scaling coefficients of the children
+     * that are written (r_arr, empty views for the others) and the non-standard block.
+     * n_nonzero is the size of the union of the sparsity of node, from_parent and r_arr.
+     */
+    template <typename T, Dimension NDIM>
+    struct Reconstruct2Launch {
+      Key<NDIM> key;
+      SparseTensorView<T, NDIM+1> node;
+      SparseTensorView<T, NDIM+1> from_parent;
+      std::array<SparseTensorView<T, NDIM+1>, Key<NDIM>::num_children()> r_arr;
+      SparseTensorView<T, NDIM+1> ns;
+      size_type n = 0;
+      size_type n_nonzero = 0;
+    };
+
+  } // namespace detail
+
 #ifndef MRA_ENABLE_HOST
   /**
    * Batching support for the reconstruct kernel, used by ttg::device::coop()/
@@ -536,6 +557,53 @@ namespace mra {
     }
 #endif // MRA_CHECK_NORMS
 
+    /**
+     * One launch of reconstruct_kernel_batched over num_members members (args and
+     * member_offsets on the device), with the slot's occupancy-sized scratch. Launches on
+     * the same stream may share the slot: they run one after the other.
+     */
+    template <typename T, Dimension NDIM>
+    void launch_reconstruct_kernel_batched(
+      GroupedBatchPool<ReconstructBatchArg<T, NDIM>>& pool,
+      typename GroupedBatchPool<ReconstructBatchArg<T, NDIM>>::slot_t& slot,
+      ReconstructBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      size_type K,
+      bool accumulate_NS,
+      const concepts::TensorView<2> auto& hg,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      auto smem_size = transform_shmem_size<T, NDIM>(2*K);
+      const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
+
+      // total_nonzero can run into the thousands for a large batch, far beyond
+      // what the device can run concurrently -- cap the grid at actual
+      // occupancy and let reconstruct_kernel_batched's own grid-stride loop
+      // (see its comment) pick up the rest, rather than submitting one
+      // immediately-resident block per position.
+      // Scratch is sized from grid_cap -- a fixed bound for this kernel/device,
+      // independent of total_nonzero -- not from grid_x, so ensure_scratch's
+      // first allocation already covers every later launch and never needs to
+      // grow (see its comment for why growing it would be unsafe).
+      size_type grid_cap = kernel_grid_cap(reconstruct_kernel_batched<T, NDIM, SparseTensorView<T, 2>>, threads, smem_size);
+      size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * reconstruct_tmp_size<NDIM>(K));
+
+      // an empty grid (no nonzero function in the batch) is an invalid launch
+      if (grid_x > 0) {
+        CALL_KERNEL((reconstruct_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
+                    (args, member_offsets, num_members, total_nonzero, shared_tmp, K, accumulate_NS, hg));
+      }
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
+
   } // namespace detail
 
   /**
@@ -587,32 +655,8 @@ namespace mra {
     checkSubmit();
 #endif // MRA_CHECK_NORMS
 
-    Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = transform_shmem_size<T, NDIM>(2*K);
-    const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
-
-    // total_nonzero can run into the thousands for a large batch, far beyond
-    // what the device can run concurrently -- cap the grid at actual
-    // occupancy and let reconstruct_kernel_batched's own grid-stride loop
-    // (see its comment) pick up the rest, rather than submitting one
-    // immediately-resident block per position.
-    // Scratch is sized from grid_cap -- a fixed bound for this kernel/device,
-    // independent of total_nonzero -- not from grid_x, so ensure_scratch's
-    // first allocation already covers every later launch and never needs to
-    // grow (see its comment for why growing it would be unsafe).
-    size_type grid_cap = detail::kernel_grid_cap(detail::reconstruct_kernel_batched<T, NDIM, SparseTensorView<T, 2>>, threads, smem_size);
-    size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
-    T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * reconstruct_tmp_size<NDIM>(K));
-
-    // an empty grid (no nonzero function in the batch) is an invalid launch
-
-    if (grid_x > 0) {
-      CALL_KERNEL((detail::reconstruct_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                  (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, K, accumulate_NS, hg));
-
-    }
-    checkSubmit();
-
+    detail::launch_reconstruct_kernel_batched<T, NDIM>(pool, slot, slot.dev_args, slot.dev_offsets, num_members,
+                                                       total_nonzero, K, accumulate_NS, hg, stream);
     pool.mark_submitted(slot, stream);
   }
 #else
@@ -799,6 +843,100 @@ namespace mra {
       const size_type total_nonzero = slot.offsets[nb];
       submit_reconstruct_kernel_batched<T, NDIM>(pool, slot, total_nonzero, K, accumulate_NS, hg,
                                                   ttg::device::current_stream());
+    }
+
+    /** sparsity bytes in host memory, copied to the start of a device buffer with a batch */
+    struct ReconstructSparsityPush {
+      void* dst;
+      const void* src;
+      size_type size;
+    };
+
+    /**
+     * What a task of make_nonstandard_2level passes through coop(): its launches, step 1
+     * (at the task's key) first, then step 2 (one per child with a launch), and the
+     * sparsity bytes of the outputs, which must be on the device before step 1 runs.
+     */
+    template <typename T, Dimension NDIM>
+    struct Reconstruct2BatchMember {
+      std::vector<Reconstruct2Launch<T, NDIM>> launches;
+      std::vector<ReconstructSparsityPush> sparsity;
+    };
+
+    /**
+     * The batched launches of make_nonstandard_2level, called by every member of a batch
+     * with the batch_view returned by its `co_await ttg::device::coop<Key<NDIM>>(key,
+     * member)`; the leader submits the batch. One grouped copy carries the arguments of
+     * both steps and the sparsity bytes; then reconstruct_kernel_batched runs twice, over
+     * the first launch of every member (step 1) and over the others (step 2), which read
+     * the scaling coefficients step 1 wrote.
+     */
+    template <typename T, Dimension NDIM, typename BatchView>
+    void submit_nonstandard_2level_batch_leader(
+      BatchView& batch,
+      GroupedBatchPoolRegistry<ReconstructBatchArg<T, NDIM>>& registry,
+      size_type K,
+      const concepts::TensorView<2> auto& hg)
+    {
+      using arg_t = ReconstructBatchArg<T, NDIM>;
+      using member_t = Reconstruct2BatchMember<T, NDIM>;
+      using launch_t = Reconstruct2Launch<T, NDIM>;
+      if (!batch.is_leader()) return;
+      BatchRange batch_range("nonstandard_2level", batch.size());
+
+      const std::size_t nb = batch.size();
+      auto member = [&](std::size_t m) -> const member_t& { return batch[m].template get<1>(); };
+      size_type n2 = 0, sparsity_bytes = 0;
+      for (std::size_t m = 0; m < nb; ++m) {
+        n2 += member(m).launches.size() - 1;
+        for (const auto& p : member(m).sparsity) sparsity_bytes += p.size;
+      }
+      const size_type num_args = nb + n2;
+
+      const auto device = ttg::device::current_device();
+      auto& pool = registry.get(device);
+      auto& slot = pool.acquire(num_args, num_args + 2, sparsity_bytes);
+      slot.args.clear();
+      slot.offsets.clear();
+      slot.extra_dsts.clear();
+      slot.extra_srcs.clear();
+      slot.extra_sizes.clear();
+      slot.sparsity.resize(sparsity_bytes);
+
+      auto add_arg = [&](const launch_t& l) {
+        slot.args.emplace_back(l.key, l.node, l.from_parent, l.r_arr, SparseTensorView<T, NDIM+1>{}, l.ns, l.n);
+        slot.offsets.push_back(slot.offsets.back() + l.n_nonzero);
+      };
+      /* step 1, with the sparsity of every member */
+      size_type sparsity_offset = 0;
+      slot.offsets.push_back(0);
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (const auto& p : member(m).sparsity) {
+          std::memcpy(&slot.sparsity[sparsity_offset], p.src, p.size);
+          slot.extra_dsts.push_back(p.dst);
+          slot.extra_srcs.push_back(&slot.sparsity[sparsity_offset]);
+          slot.extra_sizes.push_back(p.size);
+          sparsity_offset += p.size;
+        }
+        add_arg(member(m).launches[0]);
+      }
+      const size_type total1 = slot.offsets.back();
+      /* step 2 */
+      slot.offsets.push_back(0);
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (std::size_t i = 1; i < member(m).launches.size(); ++i) add_arg(member(m).launches[i]);
+      }
+      const size_type total2 = slot.offsets.back();
+
+      auto stream = ttg::device::current_stream();
+      submit_grouped_copy<arg_t>(slot, num_args, slot.offsets.size(), pool.device_id, stream);
+      launch_reconstruct_kernel_batched<T, NDIM>(pool, slot, slot.dev_args, slot.dev_offsets,
+                                                 static_cast<size_type>(nb), total1, K, false, hg, stream);
+      if (total2 > 0) {
+        launch_reconstruct_kernel_batched<T, NDIM>(pool, slot, slot.dev_args + nb, slot.dev_offsets + nb + 1, n2,
+                                                   total2, K, false, hg, stream);
+      }
+      pool.mark_submitted(slot, stream);
     }
 
   } // namespace detail

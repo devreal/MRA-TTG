@@ -9,6 +9,7 @@
 #include "mra/tasks/compress.h"
 #include "mra/tasks/gaxpy.h"
 #include "mra/tasks/reconstruct.h"
+#include "mra/tasks/nonstandard_2level.h"
 #include "mra/tasks/multiply.h"
 #include "mra/tasks/project.h"
 #include "mra/tasks/norm.h"
