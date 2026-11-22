@@ -240,6 +240,14 @@ namespace mra {
       slot.extra_srcs.clear();
       slot.extra_sizes.clear();
 
+      /* with results_via_slot(), the members' kept views are host memory: the kernel writes
+       * into the slot instead (see GroupedBatchPool::add_result) */
+      const bool slot_results = results_via_slot();
+      if (slot_results) {
+        std::size_t result_bytes = 0;
+        for (std::size_t m = 0; m < nb; ++m) result_bytes += (batch[m].template get<4>() * sizeof(T) + 15) / 16 * 16;
+        pool.begin_results(slot, result_bytes);
+      }
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_key        = batch[m].template get<0>();
         auto& m_node       = batch[m].template get<1>();
@@ -248,7 +256,13 @@ namespace mra {
         const size_type m_N = batch[m].template get<4>();
         const T m_tol        = batch[m].template get<5>();
 
-        slot.args.emplace_back(m_key, m_node, m_kept, m_child_kept, m_N, m_tol);
+        if (slot_results) {
+          /* zero-filled: the kernel only visits the node's non-zero functions */
+          DenseTensorView<T, 1> kept_slot(pool.template add_result<T>(slot, m_kept.data(), m_N, true), m_N);
+          slot.args.emplace_back(m_key, m_node, kept_slot, m_child_kept, m_N, m_tol);
+        } else {
+          slot.args.emplace_back(m_key, m_node, m_kept, m_child_kept, m_N, m_tol);
+        }
         slot.offsets[m + 1] = slot.offsets[m] + m_N;
       }
       const size_type total_blocks = slot.offsets[nb];

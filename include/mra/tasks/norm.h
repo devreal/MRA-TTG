@@ -73,6 +73,26 @@ namespace mra{
       const size_type n_nonzero = in.empty() ? 0 : in.coeffs().sparsity().count_nonzero();
 
       norm_vector_type norms;
+#ifndef MRA_ENABLE_HOST
+      /* with results_via_slot(), the batch's kernel writes the norms into its slot, from where
+       * they are copied straight into `norms` before this task resumes (see submit_norm_batch_leader) */
+      if (n_nonzero > 0 && enable_batching && detail::results_via_slot()) {
+        norms.resize(N);
+        auto fnnorms = FunctionNorms(name, in);
+        co_await ttg::device::select(in.coeffs().buffer(), fnnorms.buffer());
+        auto node_view = in.coeffs().current_view();
+        T* norm_result_ptr = norms.data();
+        auto batch = co_await ttg::device::coop<mra::Key<NDIM>>(node_view, norm_result_ptr, N);
+        detail::submit_norm_batch_leader<T, NDIM>(batch, *batch_pool, K);
+        fnnorms.compute();
+#if defined(MRA_CHECK_NORMS)
+        co_await ttg::device::wait(fnnorms.buffer());
+#else
+        co_await ttg::device::wait();
+#endif
+        fnnorms.verify();
+      } else
+#endif // MRA_ENABLE_HOST
       if (n_nonzero > 0) {
         /* the kernel writes every function's entry, no need to sync the tensor in */
         auto norms_result = norm_tensor_type(N, ttg::scope::SyncOut);

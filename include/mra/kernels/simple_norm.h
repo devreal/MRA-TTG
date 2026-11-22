@@ -200,12 +200,26 @@ namespace mra {
       slot.extra_srcs.clear();
       slot.extra_sizes.clear();
 
+      /* with results_via_slot(), the members' result views are host memory: the kernel writes
+       * into the slot instead (see GroupedBatchPool::add_result and make_convolution) */
+      const bool slot_results = results_via_slot();
+      if (slot_results) {
+        std::size_t result_bytes = 0;
+        for (std::size_t m = 0; m < nb; ++m) result_bytes += (batch[m].template get<2>() * sizeof(T) + 15) / 16 * 16;
+        pool.begin_results(slot, result_bytes);
+      }
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_node         = batch[m].template get<0>();
         auto& m_result_norms = batch[m].template get<1>();
         const size_type m_N  = batch[m].template get<2>();
 
-        slot.args.emplace_back(m_node, m_result_norms, m_N);
+        if (slot_results) {
+          std::remove_reference_t<decltype(m_result_norms)> slot_norms(
+            pool.template add_result<T>(slot, m_result_norms.data(), m_N, true), m_N);
+          slot.args.emplace_back(m_node, slot_norms, m_N);
+        } else {
+          slot.args.emplace_back(m_node, m_result_norms, m_N);
+        }
         slot.offsets[m + 1] = slot.offsets[m] + m_N;
       }
       const size_type total_blocks = slot.offsets[nb];

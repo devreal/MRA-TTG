@@ -144,16 +144,25 @@ namespace mra {
        * below and forwarded to the parent); scope::SyncIn (rather than
        * Allocate) ensures this host fill reaches the device copy the
        * kernel reads/writes. */
-      kept_tensor_type kept(N, ttg::scope::SyncOut);
+#ifndef MRA_ENABLE_HOST
+      /* With results_via_slot(), the batch's kernel writes kept into its slot, from where it is
+       * copied into kept's host memory before this task resumes (see
+       * submit_truncate_batch_leader): kept is not needed on the device here, and its host
+       * copy is the valid one (SyncIn) for the parent, which takes it to the device. */
+      const bool slot_results = enable_truncate_batching && detail::results_via_slot();
+#else
+      const bool slot_results = false;
+#endif
+      kept_tensor_type kept(N, slot_results ? ttg::scope::SyncIn : ttg::scope::SyncOut);
       std::array<const kept_tensor_type*, num_children> children =
             {&child0, &child1, &child2, &child3, &child4, &child5, &child6, &child7};
 
       const T tol = mra::truncate_tol(key, thresh, cell_min_width, truncate_mode);
 
 #ifndef MRA_ENABLE_HOST
-      auto input = ttg::device::Input(kept.buffer(),
-                                      child0.buffer(), child1.buffer(), child2.buffer(), child3.buffer(),
+      auto input = ttg::device::Input(child0.buffer(), child1.buffer(), child2.buffer(), child3.buffer(),
                                       child4.buffer(), child5.buffer(), child6.buffer(), child7.buffer());
+      if (!slot_results) input.add(kept.buffer());
       if (!node.empty()) input.add(node.coeffs().buffer());
       co_await ttg::device::select(input);
 #endif // MRA_ENABLE_HOST
@@ -164,7 +173,8 @@ namespace mra {
       }
 
       auto node_view = node.coeffs().current_view();
-      auto kept_view = kept.current_view();
+      /* with slot_results, the host memory the leader has the results copied to */
+      auto kept_view = slot_results ? decltype(kept.current_view())(kept.buffer().host_ptr(), N) : kept.current_view();
 
 #ifndef MRA_ENABLE_HOST
       if (enable_truncate_batching) {
@@ -184,8 +194,13 @@ namespace mra {
 
 #ifndef MRA_ENABLE_HOST
       // make sure the children are available on the host
-      co_await ttg::device::wait(kept.buffer(), child0.buffer(), child1.buffer(), child2.buffer(), child3.buffer(),
-                                  child4.buffer(), child5.buffer(), child6.buffer(), child7.buffer());
+      if (slot_results) {
+        co_await ttg::device::wait(child0.buffer(), child1.buffer(), child2.buffer(), child3.buffer(),
+                                    child4.buffer(), child5.buffer(), child6.buffer(), child7.buffer());
+      } else {
+        co_await ttg::device::wait(kept.buffer(), child0.buffer(), child1.buffer(), child2.buffer(), child3.buffer(),
+                                    child4.buffer(), child5.buffer(), child6.buffer(), child7.buffer());
+      }
 #endif // MRA_ENABLE_HOST
 
       std::array child_kept_host = {child0.view_on(ttg::device::Device::host()),

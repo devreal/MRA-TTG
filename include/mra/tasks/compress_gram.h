@@ -199,12 +199,19 @@ namespace mra {
 #endif
         const std::size_t tmp_size = use_batching ? 0 : compress_tmp_size<NDIM>(K)*n_nonzero;
         if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
-        d_sumsq.reset(std::max<size_type>(n_nonzero, 1), ttg::scope::Allocate);
+        /* the sums are scratch here: in the batch's slot with results_via_slot() */
+#ifndef MRA_ENABLE_HOST
+        const bool slot_results = use_batching && detail::results_via_slot();
+#else
+        const bool slot_results = false;
+#endif
+        if (!slot_results) d_sumsq.reset(std::max<size_type>(n_nonzero, 1), ttg::scope::Allocate);
         const auto& hgT = functiondata.get_hgT();
         auto& dc = d.coeffs();
 
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(p.coeffs().buffer(), dc.buffer(), hgT.buffer(), d_sumsq, r.buffer());
+        auto input = ttg::device::Input(p.coeffs().buffer(), dc.buffer(), hgT.buffer(), r.buffer());
+        if (!slot_results) input.add(d_sumsq);
         if (tmp_size > 0) input.add(tmp_scratch);
         auto select_in = [&](const node_type& n) {
           if (!n.empty()) input.add(n.coeffs().buffer());

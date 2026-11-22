@@ -343,8 +343,21 @@ namespace detail {
           // sparsity, so they are only transferred where this node may
           // truncate and are device-only scratch otherwise.
           const bool may_truncate = enable_truncate && key.level() > 1;
+          // When batching with results_via_slot(), the kernel writes the sums into pinned
+          // memory of the batch's slot, from where they are copied into d_sumsq's host memory
+          // before this task resumes: d_sumsq is then host memory only, and only needed where
+          // the host reads it (the leader gives the kernel slot memory as scratch otherwise).
+#ifndef MRA_ENABLE_HOST
+          const bool slot_results = use_batching && detail::results_via_slot();
+#else
+          const bool slot_results = false;
+#endif
           /* stores sumsq for each non-zero function; indexed by compact position, not fnid */
-          d_sumsq.reset(n_nonzero, may_truncate ? ttg::scope::SyncOut : ttg::scope::Allocate);
+          if (!slot_results) {
+            d_sumsq.reset(n_nonzero, may_truncate ? ttg::scope::SyncOut : ttg::scope::Allocate);
+          } else if (may_truncate) {
+            d_sumsq.reset(n_nonzero, ttg::scope::SyncOut);
+          }
 
           // Computed up front (depends only on key/thresh/cell_min_width/
           // truncate_mode, all known before the kernel runs) so the kernel
@@ -378,7 +391,8 @@ namespace detail {
           }
 
 #ifndef MRA_ENABLE_HOST
-          auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(), d_sumsq);
+          auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer());
+          if (!slot_results) input.add(d_sumsq);
           if (tmp_size > 0) input.add(tmp_scratch);
           if (pack_child_kept) input.add(child_kept_packed);
           auto select_in = [&](const auto& in) {
@@ -463,7 +477,16 @@ namespace detail {
           /* wait for kernel and transfer sums back, only if we need them */
 #ifndef MRA_ENABLE_HOST
           if (may_truncate) {
-            co_await ttg::device::wait(d_sumsq, norms.buffer());
+            if (slot_results) {
+              /* the sums land in d_sumsq's host memory once the batch's stream work completed */
+#if defined(MRA_CHECK_NORMS)
+              co_await ttg::device::wait(norms.buffer());
+#else
+              co_await ttg::device::wait();
+#endif
+            } else {
+              co_await ttg::device::wait(d_sumsq, norms.buffer());
+            }
           }
 #if defined(MRA_CHECK_NORMS)
           else {

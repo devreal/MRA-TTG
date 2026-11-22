@@ -1081,6 +1081,25 @@ namespace mra{
       }
       slot.sparsity.resize(total_sparsity_bytes);
 
+      /* With results_via_slot(), a member may pass its resnorms tensor's host memory as its
+       * resnorms view (see make_convolution): the kernel then writes the norms into the slot
+       * instead (see GroupedBatchPool::add_result). Other members pass the device view. */
+      auto resnorms_to_host = [&](auto& b) {
+        const auto& view = b.template get<3>();
+        return !view.empty() && view.data() == b.template get<11>().buffer().host_ptr();
+      };
+      bool slot_results = false;
+      if (results_via_slot()) {
+        std::size_t result_bytes = 0;
+        for (std::size_t m = 0; m < nb; ++m) {
+          if (resnorms_to_host(batch[m])) {
+            result_bytes += (batch[m].template get<2>().dim(0) * sizeof(T) + 15) / 16 * 16;
+          }
+        }
+        slot_results = result_bytes > 0;
+        if (slot_results) pool.begin_results(slot, result_bytes);
+      }
+
       size_type sparsity_offset = 0;
       for (std::size_t m = 0; m < nb; ++m) {
         auto& m_in            = batch[m].template get<0>();
@@ -1107,14 +1126,20 @@ namespace mra{
         slot.extra_sizes.push_back(n);
         sparsity_offset += n;
 
-        if (!m_resnorms.empty()) {
-          slot.extra_dsts.push_back(const_cast<T*>(m_resnorms_tensor.buffer().device_ptr_on(device)));
-          slot.extra_srcs.push_back(nullptr); // zero-fill, see GroupedBatchPool::slot_t::extra_srcs
-          slot.extra_sizes.push_back(n * sizeof(T));
+        if (slot_results && resnorms_to_host(batch[m])) {
+          /* zero-filled: the kernel only visits out's non-zero functions */
+          DenseTensorView<T, 1> resnorms_slot(pool.template add_result<T>(slot, m_resnorms.data(), n, true), n);
+          slot.args.emplace_back(m_in, m_f, m_result, resnorms_slot, n,
+                                 m_transr, m_transs, m_opnorms, m_tol, m_at);
+        } else {
+          if (!m_resnorms.empty()) {
+            slot.extra_dsts.push_back(const_cast<T*>(m_resnorms_tensor.buffer().device_ptr_on(device)));
+            slot.extra_srcs.push_back(nullptr); // zero-fill, see GroupedBatchPool::slot_t::extra_srcs
+            slot.extra_sizes.push_back(n * sizeof(T));
+          }
+          slot.args.emplace_back(m_in, m_f, m_result, m_resnorms, n,
+                                 m_transr, m_transs, m_opnorms, m_tol, m_at);
         }
-
-        slot.args.emplace_back(m_in, m_f, m_result, m_resnorms, n,
-                               m_transr, m_transs, m_opnorms, m_tol, m_at);
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;
       }
@@ -1275,6 +1300,7 @@ namespace mra{
       bool has_norms = false;                               // the chunk is the node's only one
       DenseTensorView<T, 1> resnorms_view;                  // set iff has_norms (a default view is uninitialized)
       T* resnorms_dev = nullptr;
+      T* resnorms_host = nullptr;                           // with results_via_slot(): where the norms go instead
     };
 
     /**
@@ -1291,6 +1317,7 @@ namespace mra{
       size_type out_nonzero = 0;
       DenseTensorView<T, 1> resnorms_view;
       T* resnorms_dev = nullptr;
+      T* resnorms_host = nullptr;                           // with results_via_slot(): where the norms go instead
     };
 
     /** values of T a scratch slot of N functions, n_nonzero of them allocated, occupies (aligned) */
@@ -1342,6 +1369,15 @@ namespace mra{
 
         auto& sslot = sum_pool.acquire(ng, ng + 1, 0);
         T* scratch = sum_pool.template ensure_scratch<T>(sslot, std::max<size_type>(scratch_values, 1));
+        /* the norms of the final results go to the slot's pinned memory, see results_via_slot() */
+        const bool slot_results = results_via_slot();
+        if (slot_results) {
+          std::size_t result_bytes = 0;
+          for (std::size_t w = w0; w < w1; ++w) {
+            if (works[w]->has_norms) result_bytes += (works[w]->N * sizeof(T) + 15) / 16 * 16;
+          }
+          sum_pool.begin_results(sslot, result_bytes);
+        }
 
         /* convolve every contribution into its slot */
         auto& cslot = conv_pool.acquire(num_contribs, num_contribs + 1, 0);
@@ -1364,7 +1400,13 @@ namespace mra{
           auto& work = *works[w];
           ConvSumBatchArg<T, NDIM> sarg;
           rebind_view(sarg.out, work.out_view);
-          rebind_view(sarg.resnorms, work.has_norms ? work.resnorms_view : work.no_norms);
+          if (work.has_norms && slot_results) {
+            DenseTensorView<T, 1> slot_norms(sum_pool.template add_result<T>(sslot, work.resnorms_host, work.N, true),
+                                             work.N);
+            rebind_view(sarg.resnorms, slot_norms);
+          } else {
+            rebind_view(sarg.resnorms, work.has_norms ? work.resnorms_view : work.no_norms);
+          }
           sarg.n = work.N;
           sarg.nsrcs = work.contribs.size() + (work.has_base ? 1 : 0);
           if (sarg.nsrcs > conv_sum_max_srcs) throw std::runtime_error("convolution: too many contributions in a chunk");
@@ -1382,7 +1424,8 @@ namespace mra{
             cslot.offsets.push_back(cslot.offsets.back() + c.n_nonzero);
             rebind_view(sarg.srcs[j], slot_view);
           }
-          if (work.out_dev == nullptr || (work.has_norms && work.resnorms_dev == nullptr) || scratch == nullptr) {
+          if (work.out_dev == nullptr || scratch == nullptr ||
+              (work.has_norms && (slot_results ? work.resnorms_host == nullptr : work.resnorms_dev == nullptr))) {
             throw std::runtime_error("convolution chunk: null device pointer: out " + std::to_string(work.out_dev == nullptr) +
                                      " resnorms " + std::to_string(work.resnorms_dev == nullptr) +
                                      " scratch " + std::to_string(scratch == nullptr));
@@ -1390,7 +1433,7 @@ namespace mra{
           sslot.extra_dsts.push_back(work.out_dev);
           sslot.extra_srcs.push_back(work.out_sparsity.data());
           sslot.extra_sizes.push_back(work.N);
-          if (work.has_norms) {
+          if (work.has_norms && !slot_results) {
             sslot.extra_dsts.push_back(work.resnorms_dev);
             sslot.extra_srcs.push_back(nullptr); // zero-fill
             sslot.extra_sizes.push_back(work.N * sizeof(T));
@@ -1427,25 +1470,40 @@ namespace mra{
       slot.extra_dsts.clear();
       slot.extra_srcs.clear();
       slot.extra_sizes.clear();
+      /* the norms of the results go to the slot's pinned memory, see results_via_slot() */
+      const bool slot_results = results_via_slot();
+      if (slot_results) {
+        std::size_t result_bytes = 0;
+        for (std::size_t w = 0; w < num_works; ++w) result_bytes += (works[w]->N * sizeof(T) + 15) / 16 * 16;
+        pool.begin_results(slot, result_bytes);
+      }
       for (std::size_t w = 0; w < num_works; ++w) {
         auto& work = *works[w];
         if (work.srcs.size() > conv_sum_max_srcs) throw std::runtime_error("convolution: too many partial sums of a node");
         ConvSumBatchArg<T, NDIM> arg;
         rebind_view(arg.out, work.out_view);
-        rebind_view(arg.resnorms, work.resnorms_view);
+        if (slot_results) {
+          DenseTensorView<T, 1> slot_norms(pool.template add_result<T>(slot, work.resnorms_host, work.N, true), work.N);
+          rebind_view(arg.resnorms, slot_norms);
+        } else {
+          rebind_view(arg.resnorms, work.resnorms_view);
+        }
         arg.n = work.N;
         arg.nsrcs = work.srcs.size();
         for (std::size_t j = 0; j < work.srcs.size(); ++j) rebind_view(arg.srcs[j], work.srcs[j]);
-        if (work.out_dev == nullptr || work.resnorms_dev == nullptr) {
-          throw std::runtime_error("convolution sum: null device pointer: out " + std::to_string(work.out_dev == nullptr) +
-                                   " resnorms " + std::to_string(work.resnorms_dev == nullptr));
+        T* const norms_dst = slot_results ? work.resnorms_host : work.resnorms_dev;
+        if (work.out_dev == nullptr || norms_dst == nullptr) {
+          throw std::runtime_error("convolution sum: null pointer: out " + std::to_string(work.out_dev == nullptr) +
+                                   " resnorms " + std::to_string(norms_dst == nullptr));
         }
         slot.extra_dsts.push_back(work.out_dev);
         slot.extra_srcs.push_back(work.out_sparsity.data());
         slot.extra_sizes.push_back(work.N);
-        slot.extra_dsts.push_back(work.resnorms_dev);
-        slot.extra_srcs.push_back(nullptr); // zero-fill
-        slot.extra_sizes.push_back(work.N * sizeof(T));
+        if (!slot_results) {
+          slot.extra_dsts.push_back(work.resnorms_dev);
+          slot.extra_srcs.push_back(nullptr); // zero-fill
+          slot.extra_sizes.push_back(work.N * sizeof(T));
+        }
         slot.args.push_back(arg);
         slot.offsets.push_back(slot.offsets.back() + work.out_nonzero);
       }

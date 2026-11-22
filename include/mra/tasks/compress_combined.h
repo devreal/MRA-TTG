@@ -212,7 +212,18 @@ namespace mra {
         if (tmp_size > 0) tmp_scratch.reset(tmp_size, ttg::scope::Allocate);
         const auto& hgT = ctx.functiondata->get_hgT();
         const bool may_truncate = ctx.enable_truncate && key.level() > 1;
-        d_sumsq.reset(n_nonzero, may_truncate ? ttg::scope::SyncOut : ttg::scope::Allocate);
+        /* see do_compress (compress.h): with results_via_slot(), d_sumsq is host memory the
+         * batch's results are copied to, and only where the host reads them */
+#ifndef MRA_ENABLE_HOST
+        const bool slot_results = use_batching && detail::results_via_slot();
+#else
+        const bool slot_results = false;
+#endif
+        if (!slot_results) {
+          d_sumsq.reset(n_nonzero, may_truncate ? ttg::scope::SyncOut : ttg::scope::Allocate);
+        } else if (may_truncate) {
+          d_sumsq.reset(n_nonzero, ttg::scope::SyncOut);
+        }
         const T trunc_tol = ctx.enable_truncate ? mra::truncate_tol(key, ctx.thresh, ctx.cell_min_width,
                                                                     ctx.truncate_mode)
                                                 : T{};
@@ -228,7 +239,8 @@ namespace mra {
         }
 
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer(), d_sumsq);
+        auto input = ttg::device::Input(p.coeffs().buffer(), d.buffer(), hgT.buffer());
+        if (!slot_results) input.add(d_sumsq);
         if (tmp_size > 0) input.add(tmp_scratch);
         if (pack_child_kept) input.add(child_kept_packed);
         if (own.node != nullptr && !own.node->empty()) input.add(own.node->coeffs().buffer());
@@ -274,7 +286,15 @@ namespace mra {
         norms.compute();
 #ifndef MRA_ENABLE_HOST
         if (may_truncate) {
-          co_await ttg::device::wait(d_sumsq, norms.buffer());
+          if (slot_results) {
+#if defined(MRA_CHECK_NORMS)
+            co_await ttg::device::wait(norms.buffer());
+#else
+            co_await ttg::device::wait();
+#endif
+          } else {
+            co_await ttg::device::wait(d_sumsq, norms.buffer());
+          }
         }
 #if defined(MRA_CHECK_NORMS)
         else {

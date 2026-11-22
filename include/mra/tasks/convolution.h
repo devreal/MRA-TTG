@@ -653,13 +653,27 @@ namespace mra {
         DenseTensor<T, 1> cnorms;
 
         if (!in_node.empty()) {
-          cnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
+          /* With results_via_slot(), the batch's kernel writes the norms into its slot, from
+           * where they are copied into cnorms' host memory before this task resumes (see
+           * submit_simple_norm_batch_leader): cnorms is not needed on the device here, and its
+           * host copy is the valid one (SyncIn) for whoever receives it. */
+          const bool slot_results = enable_conv_batching && detail::results_via_slot();
+#else
+          const bool slot_results = false;
+#endif
+          cnorms = DenseTensor<T, 1>(N, slot_results ? ttg::scope::SyncIn : ttg::scope::SyncOut);
+#ifndef MRA_ENABLE_HOST
+          if (slot_results) {
+            co_await ttg::device::select(in_node.buffer());
+          } else {
+            co_await ttg::device::select(in_node.buffer(), cnorms.buffer());
+          }
 #endif
 
           auto node_view = in_node.coeffs().current_view();
-          auto result_view = cnorms.current_view();
+          auto result_view = slot_results ? decltype(cnorms.current_view())(cnorms.buffer().host_ptr(), N)
+                                          : cnorms.current_view();
 
 #ifndef MRA_ENABLE_HOST
           if (enable_conv_batching) {
@@ -682,7 +696,11 @@ namespace mra {
           }
 
 #ifndef MRA_ENABLE_HOST
-          co_await ttg::device::wait(cnorms.buffer());
+          if (slot_results) {
+            co_await ttg::device::wait();
+          } else {
+            co_await ttg::device::wait(cnorms.buffer());
+          }
 #endif
         }
         send_out(key, std::move(cnorms), std::integral_constant<std::size_t, 0>{});
@@ -1013,6 +1031,14 @@ namespace mra {
         // submit_convolution_batch_leader for the batched path (see their
         // comments in kernels/convolution.h).
         DenseTensor<T, 1> resnorms(N, ttg::scope::SyncOut);
+        /* with results_via_slot(), the batch's kernel writes the norms into its slot, from where
+         * they are copied into resnorms' host memory before this task resumes (see
+         * submit_convolution_batch_leader): resnorms is not needed on the device */
+#ifndef MRA_ENABLE_HOST
+        const bool slot_results = enable_conv_batching && detail::results_via_slot();
+#else
+        const bool slot_results = false;
+#endif
         T tol = truncate_tol(key, thresh, cell_min_width, truncate_mode);
         std::array<bool, 2> at = {true, key.level()>0}; // apply terms analogue in MADNESS
         // if (key.level() == 0) at[1] = false; // do not apply S at level 0
@@ -1036,8 +1062,8 @@ namespace mra {
 
 
 #ifndef MRA_ENABLE_HOST
-        auto input = ttg::device::Input(in_node.coeffs().buffer(), resnorms.buffer(),
-                                        out.coeffs().buffer());
+        auto input = ttg::device::Input(in_node.coeffs().buffer(), out.coeffs().buffer());
+        if (!slot_results) input.add(resnorms.buffer());
         if (tmp_size > 0) input.add(tmp);
         op.add_convolution_op_buffers(input, res, items_buf, norms);
         co_await ttg::device::select(input);
@@ -1068,7 +1094,8 @@ namespace mra {
         // empty in node view
         auto empty_node = mra::FunctionsCompressedNode<T, NDIM>();
         auto empty_node_view = empty_node.coeffs().current_view();
-        auto resnorms_view = resnorms.current_view();
+        auto resnorms_view = slot_results ? decltype(resnorms.current_view())(resnorms.buffer().host_ptr(), N)
+                                          : resnorms.current_view();
 
 #ifndef MRA_ENABLE_HOST
         if (enable_conv_batching) {
@@ -1117,7 +1144,13 @@ namespace mra {
         // R/S and the assembled norms tensor are only ever consumed on the
         // device, so they stay there.
         // need_generate implies need_assemble (see the try_get_op() loop above).
-        if (need_generate) {
+        if (slot_results) {
+          if (need_generate) {
+            co_await ttg::device::wait(res.level_work->norms1d.buffer());
+          } else {
+            co_await ttg::device::wait();
+          }
+        } else if (need_generate) {
           co_await ttg::device::wait(resnorms.buffer(), res.level_work->norms1d.buffer());
         } else {
           co_await ttg::device::wait(resnorms.buffer());
@@ -1139,9 +1172,10 @@ namespace mra {
 
         /* check if the result norms are >0.0 and send an empty node otherwise */
         bool empty = true;
-        auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
+        const T* resnorms_host = slot_results ? resnorms.buffer().host_ptr()
+                                              : resnorms.view_on(ttg::device::Device::host()).data();
         for (size_type i = 0; i < N; ++i) {
-          if (resnorms_host_view[i] != 0.0) {
+          if (resnorms_host[i] != 0.0) {
             empty = false;
           } else {
             // set function to zero
@@ -1436,6 +1470,12 @@ namespace mra {
         // comments in kernels/convolution.h).
         resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
       }
+      /* see shell0_tt: with results_via_slot(), resnorms is host memory only */
+#ifndef MRA_ENABLE_HOST
+      const bool slot_results = last_key && enable_conv_batching && detail::results_via_slot();
+#else
+      const bool slot_results = false;
+#endif
 #ifndef MRA_ENABLE_HOST
       // When reusing in_node's storage as out, in_node is already moved-from
       // -- out.coeffs().buffer() is now the SAME underlying buffer, so there
@@ -1444,7 +1484,7 @@ namespace mra {
       if (!reuse_in_node) input.add(in_node.coeffs().buffer());
       if (tmp_size > 0) input.add(tmp);
       op.add_convolution_op_buffers(input, res, items_buf, norms);
-      if (last_key) {
+      if (last_key && !slot_results) {
         // if this is the last we want to get the norms of the result back
         input.add(resnorms.buffer());
       }
@@ -1475,7 +1515,8 @@ namespace mra {
       // kernel's write target. convolution_process_one's staged_in (see its
       // comment in kernels/convolution.h) is exactly what makes that safe.
       auto in_node_view = reuse_in_node ? out_view : in_node.coeffs().current_view();
-      auto resnorms_view = resnorms.current_view();
+      auto resnorms_view = slot_results ? decltype(resnorms.current_view())(resnorms.buffer().host_ptr(), N)
+                                        : resnorms.current_view();
 
 #ifndef MRA_ENABLE_HOST
       if (enable_conv_batching) {
@@ -1537,7 +1578,9 @@ namespace mra {
           }));
       }
       // wait for norms to come back
-      if (last_key) {
+      if (slot_results) {
+        co_await ttg::device::wait();
+      } else if (last_key) {
         co_await ttg::device::wait(resnorms.buffer());
       }
 #endif // MRA_ENABLE_HOST
@@ -1546,10 +1589,10 @@ namespace mra {
 
       if (last_key) {
         bool empty = true;
-        auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
+        const T* resnorms_host = slot_results ? resnorms.buffer().host_ptr()
+                                              : resnorms.view_on(ttg::device::Device::host()).data();
         for (size_type i = 0; i < N; ++i) {
-          //std::cout << "ACCUMULATE " << key << " result norm for function " << i << ": " << resnorms_host_view(i) << std::endl;
-          if (resnorms_host_view(i) != 0.0) {
+          if (resnorms_host[i] != 0.0) {
             assert(out.is_nonzero(i) && "if the norm is non-zero we should have non-zero coefficients");
             empty = false;
           } else {
@@ -1707,11 +1750,14 @@ namespace mra {
           mra::apply_leaf_info(out, *base);
           resnorms = DenseTensor<T, 1>(N, ttg::scope::SyncOut);
         } // a partial sum is not non-standard: that is how Sum tells it from the shell-0 result
+        /* with results_via_slot(), the norms land in resnorms' host memory through the batch's
+         * slot (see submit_conv_chunk_works): resnorms is not needed on the device */
+        const bool slot_results = detail::results_via_slot();
 
         auto input = ttg::device::Input(out.coeffs().buffer());
         for (const auto* src : sources) input.add(src->coeffs().buffer());
         if (base_data) input.add(base->coeffs().buffer());
-        if (final_chunk) input.add(resnorms.buffer());
+        if (final_chunk && !slot_results) input.add(resnorms.buffer());
         op.add_chunk_op_buffers(input, res, norms);
         co_await ttg::device::select(input);
         for (std::size_t j = 0; j < nc; ++j) {
@@ -1757,8 +1803,12 @@ namespace mra {
         }
         if (final_chunk) {
           work.has_norms = true;
-          detail::rebind_view(work.resnorms_view, resnorms.current_view());
-          work.resnorms_dev = const_cast<T*>(resnorms.buffer().device_ptr_on(device));
+          if (slot_results) {
+            work.resnorms_host = resnorms.buffer().host_ptr();
+          } else {
+            detail::rebind_view(work.resnorms_view, resnorms.current_view());
+            work.resnorms_dev = const_cast<T*>(resnorms.buffer().device_ptr_on(device));
+          }
         }
 
         if (enable_conv_batching) {
@@ -1784,11 +1834,17 @@ namespace mra {
         }
 
         if (final_chunk) {
-          co_await ttg::device::wait(resnorms.buffer());
+          const T* resnorms_host;
+          if (slot_results) {
+            co_await ttg::device::wait();
+            resnorms_host = resnorms.buffer().host_ptr();
+          } else {
+            co_await ttg::device::wait(resnorms.buffer());
+            resnorms_host = resnorms.view_on(ttg::device::Device::host()).data();
+          }
           bool empty = true;
-          auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
           for (size_type i = 0; i < N; ++i) {
-            if (resnorms_host_view(i) != 0.0) {
+            if (resnorms_host[i] != 0.0) {
               empty = false;
             } else {
               out.set_zero(i);
@@ -1848,8 +1904,12 @@ namespace mra {
         out.set_ns();
         mra::apply_leaf_info(out, *base);
         DenseTensor<T, 1> resnorms(N, ttg::scope::SyncOut);
+        /* with results_via_slot(), the norms land in resnorms' host memory through the batch's
+         * slot (see submit_conv_sum_works): resnorms is not needed on the device */
+        const bool slot_results = detail::results_via_slot();
 
-        auto input = ttg::device::Input(out.coeffs().buffer(), resnorms.buffer());
+        auto input = ttg::device::Input(out.coeffs().buffer());
+        if (!slot_results) input.add(resnorms.buffer());
         if (base_data) input.add(base->coeffs().buffer());
         for (const auto* p : parts) if (!p->empty()) input.add(p->coeffs().buffer());
         co_await ttg::device::select(input);
@@ -1864,8 +1924,12 @@ namespace mra {
         detail::sparsity_to_bytes(out.coeffs().sparsity(), work.out_sparsity.data(), N);
         work.out_dev = const_cast<T*>(out.coeffs().buffer().device_ptr_on(device));
         work.out_nonzero = sparsity.count_nonzero();
-        detail::rebind_view(work.resnorms_view, resnorms.current_view());
-        work.resnorms_dev = const_cast<T*>(resnorms.buffer().device_ptr_on(device));
+        if (slot_results) {
+          work.resnorms_host = resnorms.buffer().host_ptr();
+        } else {
+          detail::rebind_view(work.resnorms_view, resnorms.current_view());
+          work.resnorms_dev = const_cast<T*>(resnorms.buffer().device_ptr_on(device));
+        }
 
         if (enable_conv_batching) {
           auto batch = co_await ttg::device::coop<detail::SumKey<NDIM>>(work);
@@ -1878,12 +1942,18 @@ namespace mra {
           detail::ConvSumWork<T, NDIM>* w = &work;
           detail::submit_conv_sum_works<T, NDIM>(&w, 1, *chunk_sum_pool);
         }
-        co_await ttg::device::wait(resnorms.buffer());
+        const T* resnorms_host;
+        if (slot_results) {
+          co_await ttg::device::wait();
+          resnorms_host = resnorms.buffer().host_ptr();
+        } else {
+          co_await ttg::device::wait(resnorms.buffer());
+          resnorms_host = resnorms.view_on(ttg::device::Device::host()).data();
+        }
 
         bool empty = true;
-        auto resnorms_host_view = resnorms.view_on(ttg::device::Device::host());
         for (size_type i = 0; i < N; ++i) {
-          if (resnorms_host_view(i) != 0.0) {
+          if (resnorms_host[i] != 0.0) {
             empty = false;
           } else {
             out.set_zero(i);

@@ -168,9 +168,19 @@ namespace mra {
       slot.extra_dsts.clear();
       slot.extra_srcs.clear();
       slot.extra_sizes.clear();
+      /* with results_via_slot(), the members pass the host memory their norms go to, and the
+       * kernel writes them into the slot (see GroupedBatchPool::add_result) */
+      const bool slot_results = results_via_slot();
+      if (slot_results) {
+        std::size_t result_bytes = 0;
+        for (std::size_t m = 0; m < nb; ++m) result_bytes += (batch[m].template get<2>() * sizeof(T) + 15) / 16 * 16;
+        pool.begin_results(slot, result_bytes);
+      }
       for (std::size_t m = 0; m < nb; ++m) {
         auto& b = batch[m];
-        slot.args.emplace_back(b.template get<0>(), b.template get<1>());
+        T* result = b.template get<1>();
+        if (slot_results) result = pool.template add_result<T>(slot, result, b.template get<2>(), true);
+        slot.args.emplace_back(b.template get<0>(), result);
         slot.offsets[m + 1] = slot.offsets[m] + b.template get<2>();
       }
 

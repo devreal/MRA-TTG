@@ -838,6 +838,18 @@ namespace mra {
       }
       slot.sparsity.resize(total_sparsity_bytes);
 
+      // With results_via_slot(), every member's sums of squares go to the slot's pinned
+      // results region (as scratch, or copied to the member's d_sumsq host memory where it
+      // has one, i.e. where the host reads them; see do_compress).
+      const bool slot_results = results_via_slot();
+      if (slot_results) {
+        std::size_t result_bytes = 0;
+        for (std::size_t m = 0; m < nb; ++m) {
+          result_bytes += (batch[m].template get<8>() * sizeof(T) + 15) / 16 * 16;
+        }
+        pool.begin_results(slot, result_bytes);
+      }
+
       size_type sparsity_offset = 0;
       auto key = batch[0].template get<0>();
       for (std::size_t m = 0; m < nb; ++m) {
@@ -885,8 +897,15 @@ namespace mra {
           sparsity_offset += num_children * n;
         }
 
+        T* m_sumsq_ptr;
+        if (slot_results) {
+          T* host_dst = m_d_sumsq.empty() ? nullptr : m_d_sumsq.host_ptr();
+          m_sumsq_ptr = pool.template add_result<T>(slot, host_dst, m_n_nonzero, false);
+        } else {
+          m_sumsq_ptr = m_d_sumsq.current_device_ptr();
+        }
         slot.args.emplace_back(m_key, m_node_in, m_p_in, m_result_in,
-                               m_d_sumsq.current_device_ptr(), m_in_views, n, kept_offset, m_trunc_tol, m_ns_in);
+                               m_sumsq_ptr, m_in_views, n, kept_offset, m_trunc_tol, m_ns_in);
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;
       }

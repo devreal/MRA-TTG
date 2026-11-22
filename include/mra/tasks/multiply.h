@@ -132,11 +132,7 @@ namespace mra {
         submit_multiply_kernel(D, keyA, keyB, t1_view, t2_view, out_view, hgT_view, phi_view,
           phiT_view, phibar_view, quad_x_view, N, n_nonzero, K, tmp_device, ttg::device::current_stream());
 
-        norms.compute();
-#ifndef MRA_ENABLE_HOST
-        co_await ttg::device::wait(norms.buffer());
-#endif // MRA_ENABLE_HOST
-
+        /* see make_gaxpy: waiting has the sends prepared once the kernel completed */
         norms.compute();
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::wait(norms.buffer());

@@ -144,12 +144,13 @@ namespace mra{
                               scalarA, scalarB, N, n_nonzero, K, ttg::device::current_stream());
         }
 
+        /* Nothing comes back to the host (unless MRA_CHECK_NORMS), but waiting has the members
+         * of a batch prepare their sends once the batch completed, instead of between the
+         * leader's launch and the stream event recorded after the batch was submitted. */
         norms.compute();
-
 #ifndef MRA_ENABLE_HOST
         co_await ttg::device::wait(norms.buffer());
 #endif // MRA_ENABLE_HOST
-
         norms.verify();
 
         send_out(std::move(out));

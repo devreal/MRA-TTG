@@ -462,6 +462,22 @@ namespace mra::detail {
   }
 
   /**
+   * Whether batched kernels write the small per-member results the host reads (sums of
+   * squares, norms) into pinned memory of their slot instead of the members' device
+   * buffers, see GroupedBatchPool::add_result: the members then wait for their stream
+   * work (ttg::device::wait() without buffers) instead of transferring the results back.
+   * Requires slots released with their task (release_slots_with_task()), whose release
+   * copies the results to the members. MRA_TTG_RESULTS_VIA_SLOT=0 disables it.
+   */
+  inline bool results_via_slot() {
+    static const bool via_slot = [] {
+      const char* v = std::getenv("MRA_TTG_RESULTS_VIA_SLOT");
+      return release_slots_with_task() && (v == nullptr || std::string(v) != "0");
+    }();
+    return via_slot;
+  }
+
+  /**
    * Whether submit_grouped_copy has its copy kernel read the packed arguments from the
    * pinned host buffer (mapped into the device's address space) instead of transferring
    * them with cudaMemcpyAsync first. MRA_TTG_GROUPED_COPY=memcpy selects the transfer.
@@ -565,6 +581,20 @@ namespace mra::detail {
       // event has completed.
       FixedDeviceRegion<unsigned char> dev_scratch;
 
+      // Pinned memory the kernels of a launch write the members' host-bound results to,
+      // through `results_mapped`, and where they are copied from to the members' own host
+      // memory once the launch completed (see begin_results/add_result).
+      std::vector<unsigned char, DeviceAllocator<unsigned char>> results;
+      unsigned char* results_host = nullptr;    // results.data() when results_mapped was looked up
+      unsigned char* results_mapped = nullptr;  // results as the device addresses it
+      std::size_t results_used = 0;
+      struct result_copy_t {
+        std::size_t offset;
+        void* dst;
+        std::size_t bytes;
+      };
+      std::vector<result_copy_t> result_copies;
+
 #if defined(MRA_ENABLE_CUDA)
       cudaEvent_t event;
 #elif defined(MRA_ENABLE_HIP)
@@ -625,6 +655,52 @@ namespace mra::detail {
     GroupedBatchPool(const GroupedBatchPool&) = delete;
     GroupedBatchPool& operator=(const GroupedBatchPool&) = delete;
 
+    /**
+     * Prepares the slot's results region (see results_via_slot()) for at most max_bytes of
+     * results added with add_result, before the launch is built. Grows it only while the slot
+     * is checked out, before any pointer into it was handed out.
+     */
+    void begin_results(slot_t& s, std::size_t max_bytes) {
+      s.results_used = 0;
+      s.result_copies.clear();
+      if (s.results.size() < max_bytes) {
+        s.results.resize(max_bytes + max_bytes/4);
+      }
+      if (s.results.empty()) return;
+      if (s.results_host != s.results.data()) {
+        void* mapped = nullptr;
+#if defined(MRA_ENABLE_CUDA)
+        check_cuda_rt(cudaHostGetDevicePointer(&mapped, s.results.data(), 0), "cudaHostGetDevicePointer");
+#elif defined(MRA_ENABLE_HIP)
+        check_hip_rt(hipHostGetDevicePointer(&mapped, s.results.data(), 0), "hipHostGetDevicePointer");
+#endif
+        s.results_host = s.results.data();
+        s.results_mapped = static_cast<unsigned char*>(mapped);
+      }
+    }
+
+    /**
+     * Space for n values of a member's results, which the launch's kernels write through the
+     * returned (device-addressable) pointer and which are copied to host_dst (host memory of
+     * the member, n values; nullptr makes the space scratch of the launch) once the launch completed, before any member of the batch is
+     * resumed (see mark_submitted). Zero-filled if zero_fill. Requires results_via_slot() and
+     * begin_results with enough room.
+     */
+    template <typename ElemT>
+    ElemT* add_result(slot_t& s, ElemT* host_dst, std::size_t n, bool zero_fill) {
+      constexpr std::size_t align = 16;
+      const std::size_t offset = (s.results_used + align - 1) / align * align;
+      const std::size_t bytes = n * sizeof(ElemT);
+      if (offset + bytes > s.results.size()) {
+        throw std::logic_error("GroupedBatchPool::add_result: results region too small, see begin_results");
+      }
+      s.results_used = offset + bytes;
+      if (zero_fill) std::memset(s.results.data() + offset, 0, bytes);
+      /* without a destination, the region is scratch for the launch only */
+      if (host_dst != nullptr && bytes > 0) s.result_copies.push_back({offset, host_dst, bytes});
+      return reinterpret_cast<ElemT*>(s.results_mapped + offset);
+    }
+
     /* Never blocks -- same reuse policy as BatchPool::acquire (one non-
      * blocking event query covering every region at once). Only reserves the
      * host-side vectors; the device region is sized by submit_grouped_copy
@@ -667,6 +743,16 @@ namespace mra::detail {
       check_hip_rt(hipEventRecord(s.event, stream), "hipEventRecord");
 #endif
       s.event_recorded = true;
+      if (!s.result_copies.empty()) {
+        /* no completion callback left for the results (rare): the members resume once their
+         * stream work completed and read the results then, so they must be in place now */
+#if defined(MRA_ENABLE_CUDA)
+        check_cuda_rt(cudaEventSynchronize(s.event), "cudaEventSynchronize");
+#elif defined(MRA_ENABLE_HIP)
+        check_hip_rt(hipEventSynchronize(s.event), "hipEventSynchronize");
+#endif
+        copy_results(s);
+      }
       s.checked_out = false;
     }
 
@@ -674,8 +760,15 @@ namespace mra::detail {
 
    private:
     /* defer_to_stream_completion callback: the slot's submission completed */
+    static void copy_results(slot_t& s) {
+      for (const auto& c : s.result_copies) std::memcpy(c.dst, s.results.data() + c.offset, c.bytes);
+      s.result_copies.clear();
+    }
+
     static void release_slot(void* p) {
       auto& s = *static_cast<slot_t*>(p);
+      /* runs before any member of the batch resumes (see ttg_parsec::detail::defer_to_stream_completion) */
+      copy_results(s);
       std::lock_guard<std::mutex> lock(s.owner->mtx);
       s.event_recorded = false;
       s.checked_out = false;
