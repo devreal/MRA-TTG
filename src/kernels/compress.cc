@@ -64,6 +64,17 @@ namespace mra {
     bool,
     DenseTensorView<double, 2> const&,
     ttg::device::Stream);
+  template void detail::launch_compress_kernel_batched<double, 3, DenseTensorView<double, 2>>(
+    detail::GroupedBatchPool<detail::CompressBatchArg<double, 3>>&,
+    detail::GroupedBatchPool<detail::CompressBatchArg<double, 3>>::slot_t&,
+    detail::CompressBatchArg<double, 3>*,
+    const size_type*,
+    size_type,
+    size_type,
+    size_type,
+    bool,
+    DenseTensorView<double, 2> const&,
+    ttg::device::Stream);
 #endif // !MRA_ENABLE_HOST
 #endif // MRA_ENABLE_EXPLICIT_INSTANTIATION
 

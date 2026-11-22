@@ -2,6 +2,8 @@
 #define MRA_KERNELS_COMPRESS_H
 
 #include <array>
+#include <cstring>
+#include <vector>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -580,7 +582,8 @@ namespace mra {
       // a device kernel reading an offset out of this struct.
       size_type,                                                         // child_kept_offset: byte offset of this member's packed [num_children x n] "kept" bytes (child-major, see compress_process_one) into the slot's staged source bytes (slot.dev_src); no_child_kept if this member cannot truncate
       T,                                                                 // trunc_tol: this member's own truncate_tol(key, ...); 0 when truncation is disabled
-      SparseTensorView<T, NDIM+1>                                        // ns_in: this node's own non-standard coeffs (make_compress_from_ns), empty otherwise
+      SparseTensorView<T, NDIM+1>,                                       // ns_in: this node's own non-standard coeffs (make_compress_from_ns), empty otherwise
+      size_type                                                          // kept_out_offset: byte offset into slot.dev_src where the kernel writes whether each function of the result is kept (1) or not (0), after truncation, for a later launch reading it as child_kept (make_compress_combined with two levels); no_child_kept if not written
     >;
 
     /* Named indices into CompressBatchArg, so callers don't sprinkle magic
@@ -596,6 +599,7 @@ namespace mra {
       static constexpr std::size_t child_kept_offset = 7;
       static constexpr std::size_t trunc_tol       = 8;
       static constexpr std::size_t ns_in           = 9;
+      static constexpr std::size_t kept_out_offset = 10;
     };
 
     /* CompressBatchArg's child_kept_offset for a member that cannot truncate */
@@ -656,9 +660,80 @@ namespace mra {
                                       std::get<idx::in_views>(arg), std::get<idx::ns_in>(arg),
                                       member_N, local_pos, blockIdx.x,
                                       child_kept, std::get<idx::trunc_tol>(arg));
+        /* whether the function is kept, for a later launch (see kept_out_offset); the team
+         * lead decided the truncation above */
+        const size_type kept_out = std::get<idx::kept_out_offset>(arg);
+#if defined(HAVE_DEVICE_ARCH)
+        const bool first_warp = thread_id() < MRA_WARP_SIZE;
+#else
+        constexpr bool first_warp = true;
+#endif
+        if (kept_out != no_child_kept && first_warp) {
+          const size_type fnid = find_nth_nonzero_warp(member_N, local_pos, std::get<idx::p_in>(arg));
+          if (is_team_lead()) {
+            const_cast<unsigned char*>(kept_base)[kept_out + fnid] = std::get<idx::result_in>(arg).is_zero(fnid) ? 0 : 1;
+          }
+        }
       }
     }
 
+  } // namespace detail
+
+  namespace detail {
+    /**
+     * One launch of compress_kernel_batched over num_members members (args and
+     * member_offsets on the device, after the slot's grouped copy), with the slot's
+     * occupancy-sized scratch. Launches on the same stream may share the slot: they run
+     * one after the other.
+     */
+    template<typename T, Dimension NDIM, typename HgtT>
+    void launch_compress_kernel_batched(
+      GroupedBatchPool<CompressBatchArg<T, NDIM>>& pool,
+      typename GroupedBatchPool<CompressBatchArg<T, NDIM>>::slot_t& slot,
+      CompressBatchArg<T, NDIM>* args,
+      const size_type* member_offsets,
+      size_type num_members,
+      size_type total_nonzero,
+      size_type K,
+      bool is_ns,
+      const HgtT& hgT,
+      ttg::device::Stream stream)
+#if defined(MRA_HAVE_KERNEL_DEFINITIONS)
+    {
+      Dim3 thread_dims = max_thread_dims(2*K);
+      auto smem_size = transform_shmem_size<T, NDIM>(2*K);
+      const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
+
+      // total_nonzero can run into the thousands for a large batch, far beyond
+      // what the device can run concurrently -- cap the grid at actual
+      // occupancy and let compress_kernel_batched's own grid-stride loop (see
+      // its comment) pick up the rest, rather than submitting one
+      // immediately-resident block per position.
+      // Scratch is sized from grid_cap -- a fixed bound for this kernel/device,
+      // independent of total_nonzero -- not from grid_x, so ensure_scratch's
+      // first allocation already covers every later launch and never needs to
+      // grow (see its comment for why growing it would be unsafe). Only the
+      // tmp transform workspace is pooled here -- d_sumsq stays per-member
+      // (CompressBatchArg's own field), since the host may read every compact
+      // position back afterward (see CompressBatchArg's comment).
+      dispatch_k(K, [&](auto Kc) {
+        using KT = decltype(Kc);
+        size_type grid_cap = detail::kernel_grid_cap(detail::compress_kernel_batched<T, NDIM, HgtT, KT>, threads, smem_size);
+        size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
+        T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * compress_tmp_size<NDIM>(K));
+
+        // a batch of empty nodes (no nonzero function) has nothing to compute, and a launch
+        // with an empty grid is invalid
+        if (grid_x > 0) {
+          CALL_KERNEL((detail::compress_kernel_batched<T, NDIM, HgtT, KT>), grid_x, thread_dims, smem_size, stream,
+                      (args, member_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, Kc, is_ns, hgT));
+        }
+      });
+      checkSubmit();
+    }
+#else
+    ;
+#endif // MRA_HAVE_KERNEL_DEFINITIONS
   } // namespace detail
 
   /**
@@ -692,36 +767,8 @@ namespace mra {
     // Single combined H2D transfer for args/offsets, plus every member's
     // p_in/result_in scatter destination copy -- see submit_grouped_copy.
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
-
-    Dim3 thread_dims = max_thread_dims(2*K);
-    auto smem_size = transform_shmem_size<T, NDIM>(2*K);
-    const int threads = static_cast<int>(thread_dims.x) * static_cast<int>(thread_dims.y) * static_cast<int>(thread_dims.z);
-
-    // total_nonzero can run into the thousands for a large batch, far beyond
-    // what the device can run concurrently -- cap the grid at actual
-    // occupancy and let compress_kernel_batched's own grid-stride loop (see
-    // its comment) pick up the rest, rather than submitting one
-    // immediately-resident block per position.
-    // Scratch is sized from grid_cap -- a fixed bound for this kernel/device,
-    // independent of total_nonzero -- not from grid_x, so ensure_scratch's
-    // first allocation already covers every later launch and never needs to
-    // grow (see its comment for why growing it would be unsafe). Only the
-    // tmp transform workspace is pooled here -- d_sumsq stays per-member
-    // (CompressBatchArg's own field), since the host may read every compact
-    // position back afterward (see CompressBatchArg's comment).
-    dispatch_k(K, [&](auto Kc) {
-      using KT = decltype(Kc);
-      size_type grid_cap = detail::kernel_grid_cap(detail::compress_kernel_batched<T, NDIM, HgtT, KT>, threads, smem_size);
-      size_type grid_x = std::min<size_type>(total_nonzero, grid_cap);
-      T* shared_tmp = pool.template ensure_scratch<T>(slot, static_cast<std::size_t>(grid_cap) * compress_tmp_size<NDIM>(K));
-
-      // a batch of empty nodes (no nonzero function) has nothing to compute, and a launch
-      // with an empty grid is invalid
-      if (grid_x > 0) {
-        CALL_KERNEL((detail::compress_kernel_batched<T, NDIM, HgtT, KT>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, slot.dev_src, Kc, is_ns, hgT));
-      }
-    });
+    detail::launch_compress_kernel_batched<T, NDIM>(pool, slot, slot.dev_args, slot.dev_offsets, num_members,
+                                                     total_nonzero, K, is_ns, hgT, stream);
     checkSubmit();
 
     pool.mark_submitted(slot, stream);
@@ -905,12 +952,155 @@ namespace mra {
           m_sumsq_ptr = m_d_sumsq.current_device_ptr();
         }
         slot.args.emplace_back(m_key, m_node_in, m_p_in, m_result_in,
-                               m_sumsq_ptr, m_in_views, n, kept_offset, m_trunc_tol, m_ns_in);
+                               m_sumsq_ptr, m_in_views, n, kept_offset, m_trunc_tol, m_ns_in, no_child_kept);
 
         slot.offsets[m + 1] = slot.offsets[m] + m_n_nonzero;
       }
       const size_type total_nonzero = slot.offsets[nb];
       submit_compress_kernel_batched<T, NDIM>(pool, slot, total_nonzero, K, is_ns, hgT, ttg::device::current_stream());
+    }
+
+    /** bytes in host memory, copied to the start of a device buffer with a batch */
+    struct CompressSparsityPush {
+      void* dst;
+      const void* src;
+      size_type size;
+    };
+
+    /** one node compressed by a task of make_compress_combined with two levels */
+    template <typename T, Dimension NDIM>
+    struct Compress2Launch {
+      using view_type = SparseTensorView<T, NDIM+1>;
+      Key<NDIM> key;
+      view_type node_in, p, result;
+      std::array<view_type, Key<NDIM>::num_children()> in_views;
+      size_type n = 0, n_nonzero = 0;
+      T* d_sumsq_dev = nullptr;  // without results_via_slot()
+      T* d_sumsq_host = nullptr; // with results_via_slot(): where the host reads them, or nullptr
+      T trunc_tol = 0;
+      std::vector<unsigned char> child_kept; // [num_children x n], empty if the node cannot truncate
+      int kept_out_row = -1;     // step 1: the row of the task's step-2 child_kept it writes, -1 none
+    };
+
+    /**
+     * What a task of make_compress_combined with two levels passes through coop(): step 1
+     * (the children compressed by the task), step 2 (the task's key, which reads the
+     * scaling coefficients step 1 wrote and their "kept" bits), and the sparsity bytes of
+     * the outputs.
+     */
+    template <typename T, Dimension NDIM>
+    struct Compress2BatchMember {
+      std::vector<Compress2Launch<T, NDIM>> step1;
+      Compress2Launch<T, NDIM> step2;
+      std::vector<CompressSparsityPush> sparsity;
+    };
+
+    /**
+     * The batched launches of make_compress_combined with two levels, called by every
+     * member with the batch_view of its `co_await ttg::device::coop<Key<NDIM>>(key,
+     * member)`; the leader submits the batch. One grouped copy carries the arguments and
+     * the bytes of both steps; then compress_kernel_batched runs over step 1 of every
+     * member, which also writes whether each function is kept into the child_kept bytes
+     * of step 2, and over step 2.
+     */
+    template <typename T, Dimension NDIM, typename BatchView, typename HgtT>
+    void submit_compress_2level_batch_leader(
+      BatchView& batch,
+      GroupedBatchPoolRegistry<CompressBatchArg<T, NDIM>>& registry,
+      size_type K,
+      bool is_ns,
+      const HgtT& hgT)
+    {
+      using arg_t = CompressBatchArg<T, NDIM>;
+      using member_t = Compress2BatchMember<T, NDIM>;
+      using launch_t = Compress2Launch<T, NDIM>;
+      if (!batch.is_leader()) return;
+      BatchRange batch_range("compress_2level", batch.size());
+
+      const std::size_t nb = batch.size();
+      auto member = [&](std::size_t m) -> const member_t& { return batch[m].template get<1>(); };
+      const bool slot_results = results_via_slot();
+      size_type n1 = 0, staged_bytes = 0;
+      std::size_t result_bytes = 0;
+      auto count_launch = [&](const launch_t& l) {
+        staged_bytes += l.child_kept.size();
+        result_bytes += (l.n_nonzero * sizeof(T) + 15) / 16 * 16;
+      };
+      for (std::size_t m = 0; m < nb; ++m) {
+        n1 += member(m).step1.size();
+        for (const auto& l : member(m).step1) count_launch(l);
+        count_launch(member(m).step2);
+        for (const auto& p : member(m).sparsity) staged_bytes += p.size;
+      }
+      const size_type num_args = n1 + nb;
+
+      const auto device = ttg::device::current_device();
+      auto& pool = registry.get(device);
+      auto& slot = pool.acquire(num_args, num_args + 2, staged_bytes);
+      slot.args.clear();
+      slot.offsets.clear();
+      slot.extra_dsts.clear();
+      slot.extra_srcs.clear();
+      slot.extra_sizes.clear();
+      slot.sparsity.resize(staged_bytes);
+      if (slot_results) pool.begin_results(slot, result_bytes);
+
+      size_type staged = 0;
+      auto stage = [&](const void* src, size_type size) {
+        std::memcpy(&slot.sparsity[staged], src, size);
+        const size_type offset = staged;
+        staged += size;
+        return offset;
+      };
+      /* the sparsity of the outputs, and the child_kept bytes of step 2, which step 1 completes */
+      std::vector<size_type> kept2(nb, no_child_kept);
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (const auto& p : member(m).sparsity) {
+          const size_type offset = stage(p.src, p.size);
+          slot.extra_dsts.push_back(p.dst);
+          slot.extra_srcs.push_back(&slot.sparsity[offset]);
+          slot.extra_sizes.push_back(p.size);
+        }
+        const auto& ck = member(m).step2.child_kept;
+        if (!ck.empty()) kept2[m] = stage(ck.data(), ck.size());
+      }
+      auto add_arg = [&](const launch_t& l, size_type kept_out) {
+        const size_type kept = l.child_kept.empty() ? no_child_kept : stage(l.child_kept.data(), l.child_kept.size());
+        T* sumsq = slot_results ? pool.template add_result<T>(slot, l.d_sumsq_host, l.n_nonzero, false) : l.d_sumsq_dev;
+        slot.args.emplace_back(l.key, l.node_in, l.p, l.result, sumsq, l.in_views, l.n, kept, l.trunc_tol,
+                               SparseTensorView<T, NDIM+1>{}, kept_out);
+        slot.offsets.push_back(slot.offsets.back() + l.n_nonzero);
+      };
+      slot.offsets.push_back(0);
+      for (std::size_t m = 0; m < nb; ++m) {
+        for (const auto& l : member(m).step1) {
+          const size_type kept_out = (l.kept_out_row < 0 || kept2[m] == no_child_kept)
+                                   ? no_child_kept : kept2[m] + static_cast<size_type>(l.kept_out_row) * member(m).step2.n;
+          add_arg(l, kept_out);
+        }
+      }
+      const size_type total1 = slot.offsets.back();
+      slot.offsets.push_back(0);
+      for (std::size_t m = 0; m < nb; ++m) {
+        const auto& l = member(m).step2;
+        /* step 2 reads child_kept from the bytes staged above */
+        slot.args.emplace_back(l.key, l.node_in, l.p, l.result,
+                               slot_results ? pool.template add_result<T>(slot, l.d_sumsq_host, l.n_nonzero, false)
+                                            : l.d_sumsq_dev,
+                               l.in_views, l.n, kept2[m], l.trunc_tol, SparseTensorView<T, NDIM+1>{}, no_child_kept);
+        slot.offsets.push_back(slot.offsets.back() + l.n_nonzero);
+      }
+      const size_type total2 = slot.offsets.back();
+
+      auto stream = ttg::device::current_stream();
+      submit_grouped_copy<arg_t>(slot, num_args, slot.offsets.size(), pool.device_id, stream);
+      if (total1 > 0) {
+        launch_compress_kernel_batched<T, NDIM>(pool, slot, slot.dev_args, slot.dev_offsets, n1, total1, K, is_ns,
+                                                hgT, stream);
+      }
+      launch_compress_kernel_batched<T, NDIM>(pool, slot, slot.dev_args + n1, slot.dev_offsets + n1 + 1,
+                                              static_cast<size_type>(nb), total2, K, is_ns, hgT, stream);
+      pool.mark_submitted(slot, stream);
     }
 
   } // namespace detail
