@@ -19,6 +19,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <cxxabi.h>
+#include <typeinfo>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -113,6 +116,110 @@ namespace mra::detail {
 #endif
 
   /**
+   * Accounting of the device regions of the batch pools (FixedDeviceRegion), per pool kind
+   * (kernel family and region) and device: bytes held now and at the peak, how many came from
+   * PaRSEC's zone and how many from the cudaMalloc/hipMalloc fallback, and how many regions
+   * (one per slot) exist. Printed at mra::finalize with MRA_TTG_REGION_STATS=1; each fallback
+   * allocation and each failure is reported as it happens with MRA_TTG_REGION_STATS=2.
+   */
+  struct DeviceRegionStats {
+    struct entry_t {
+      std::string name;
+      int device = -1;
+      std::atomic<std::int64_t> bytes{0}, peak_bytes{0}, regions{0}, peak_regions{0};
+      std::atomic<std::int64_t> zone_allocs{0}, malloc_allocs{0}, malloc_bytes{0}, failures{0};
+      std::atomic<std::int64_t> grows{0};
+    };
+
+    static int level() {
+      static const int l = [] {
+        const char* v = std::getenv("MRA_TTG_REGION_STATS");
+        return v ? std::atoi(v) : 0;
+      }();
+      return l;
+    }
+
+    static DeviceRegionStats& instance() {
+      static DeviceRegionStats* s = [] {
+        auto* p = new DeviceRegionStats();  /* leaked: used until the end of the process */
+        at_finalize([p] { if (level() > 0) p->print("finalize"); });
+        return p;
+      }();
+      return *s;
+    }
+
+    entry_t* entry(const std::string& name, int device) {
+      std::lock_guard<std::mutex> lock(mtx);
+      for (auto& e : entries) if (e->name == name && e->device == device) return e.get();
+      entries.push_back(std::make_unique<entry_t>());
+      entries.back()->name = name;
+      entries.back()->device = device;
+      return entries.back().get();
+    }
+
+    static void raise_max(std::atomic<std::int64_t>& m, std::int64_t v) {
+      std::int64_t cur = m.load(std::memory_order_relaxed);
+      while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed)) { }
+    }
+
+    void on_alloc(entry_t* e, std::size_t bytes, bool from_zone) {
+      if (e) {
+        raise_max(e->peak_bytes, e->bytes.fetch_add(bytes, std::memory_order_relaxed) + bytes);
+        raise_max(e->peak_regions, e->regions.fetch_add(1, std::memory_order_relaxed) + 1);
+        (from_zone ? e->zone_allocs : e->malloc_allocs).fetch_add(1, std::memory_order_relaxed);
+        if (!from_zone) e->malloc_bytes.fetch_add(bytes, std::memory_order_relaxed);
+      }
+      raise_max(peak_total, total.fetch_add(bytes, std::memory_order_relaxed) + bytes);
+    }
+
+    void on_free(entry_t* e, std::size_t bytes) {
+      if (e) {
+        e->bytes.fetch_sub(bytes, std::memory_order_relaxed);
+        e->regions.fetch_sub(1, std::memory_order_relaxed);
+      }
+      total.fetch_sub(bytes, std::memory_order_relaxed);
+    }
+
+    void print(const char* when, const entry_t* highlight = nullptr) {
+      std::lock_guard<std::mutex> lock(mtx);
+      std::fprintf(stderr, "[%d] MRA-TTG device regions (%s): now %.1f MB, peak %.1f MB\n",
+                   ttg::default_execution_context().rank(), when, total.load() / 1048576.0,
+                   peak_total.load() / 1048576.0);
+      std::fprintf(stderr, "[%d]   %-3s %10s %10s %7s %7s %7s %7s %10s %5s %6s  %s\n",
+                   ttg::default_execution_context().rank(), "dev", "now MB", "peak MB",
+                   "regions", "peak", "zone", "malloc", "malloc MB", "fail", "grows", "pool");
+      for (auto& e : entries) {
+        std::fprintf(stderr, "[%d] %c %-3d %10.1f %10.1f %7lld %7lld %7lld %7lld %10.1f %5lld %6lld  %s\n",
+                     ttg::default_execution_context().rank(), e.get() == highlight ? '*' : ' ',
+                     e->device,
+                     e->bytes.load() / 1048576.0, e->peak_bytes.load() / 1048576.0,
+                     (long long)e->regions.load(), (long long)e->peak_regions.load(),
+                     (long long)e->zone_allocs.load(), (long long)e->malloc_allocs.load(),
+                     e->malloc_bytes.load() / 1048576.0, (long long)e->failures.load(),
+                     (long long)e->grows.load(), e->name.c_str());
+      }
+    }
+
+    std::mutex mtx;
+    std::vector<std::unique_ptr<entry_t>> entries;
+    std::atomic<std::int64_t> total{0}, peak_total{0};
+  };
+
+  /* "MulCompressedBatchArg<double, 3ul>.scratch" for Arg = mra::detail::MulCompressedBatchArg<double, 3ul> */
+  template <typename Arg>
+  std::string region_stats_name(const char* region) {
+    std::string n;
+    int status = 0;
+    char* d = abi::__cxa_demangle(typeid(Arg).name(), nullptr, nullptr, &status);
+    n = (status == 0 && d) ? d : typeid(Arg).name();
+    std::free(d);
+    for (const char* ns : {"mra::detail::", "mra::", "std::"}) {
+      for (auto pos = n.find(ns); pos != std::string::npos; pos = n.find(ns)) n.erase(pos, std::strlen(ns));
+    }
+    return n + "." + region;
+  }
+
+  /**
    * A single device allocation, requested once and never resized: the first
    * call to ensure() allocates it -- preferring PaRSEC's zone_malloc (the
    * same per-GPU pool ttg::Buffer's own device-side allocation draws from,
@@ -155,6 +262,8 @@ namespace mra::detail {
 
     ElemT* get() const { return ptr_; }
     operator ElemT*() const { return ptr_; }
+    /* the DeviceRegionStats entry this region is counted in */
+    void set_stats(DeviceRegionStats::entry_t* e) { stats_ = e; }
     bool empty() const { return ptr_ == nullptr; }
 
     void ensure(int device_id, std::size_t num_elems) {
@@ -180,25 +289,51 @@ namespace mra::detail {
    private:
     void allocate(int device_id, std::size_t num_elems) {
       device_id_ = device_id;
-      void* p = zone_malloc(parsec_gpu_device(device_id)->memory, num_elems*sizeof(ElemT));
+      auto* gpu = parsec_gpu_device(device_id);
+      const std::size_t bytes = num_elems*sizeof(ElemT);
+      void* p = zone_malloc(gpu->memory, bytes);
       if (p != nullptr) {
         ptr_ = static_cast<ElemT*>(p);
         from_zone_ = true;
       } else {
         // Zone exhausted right now -- fall back to a plain allocation
         // rather than failing outright.
+        auto& stats = DeviceRegionStats::instance();
+        std::size_t free_b = 0, total_b = 0;
 #if defined(MRA_ENABLE_CUDA)
-        check_cuda_rt(cudaMalloc(&ptr_, num_elems*sizeof(ElemT)), "cudaMalloc (zone_malloc fallback)");
+        cudaError_t err = cudaMalloc(&ptr_, bytes);
+        cudaMemGetInfo(&free_b, &total_b);
 #elif defined(MRA_ENABLE_HIP)
-        check_hip_rt(hipMalloc(&ptr_, num_elems*sizeof(ElemT)), "hipMalloc (zone_malloc fallback)");
+        hipError_t err = hipMalloc(&ptr_, bytes);
+        hipMemGetInfo(&free_b, &total_b);
+#endif
+        const bool failed = (err != decltype(err){});
+        if (failed && stats_) stats_->failures.fetch_add(1, std::memory_order_relaxed);
+        if (DeviceRegionStats::level() > 1 || failed) {
+          std::fprintf(stderr, "[%d] MRA-TTG device region %s: cudaMalloc of %.1f MB on device %d "
+                       "(zone in use %.1f of %.1f MB, device free %.1f of %.1f MB) for %s\n",
+                       ttg::default_execution_context().rank(), failed ? "FAILED" : "fallback",
+                       bytes / 1048576.0, device_id,
+                       zone_in_use(gpu->memory) / 1048576.0,
+                       (double)gpu->mem_block_size * gpu->mem_nb_blocks / 1048576.0,
+                       free_b / 1048576.0, total_b / 1048576.0,
+                       stats_ ? stats_->name.c_str() : "?");
+          if (failed) stats.print("allocation failure", stats_);
+        }
+#if defined(MRA_ENABLE_CUDA)
+        check_cuda_rt(err, "cudaMalloc (zone_malloc fallback)");
+#elif defined(MRA_ENABLE_HIP)
+        check_hip_rt(err, "hipMalloc (zone_malloc fallback)");
 #endif
         from_zone_ = false;
       }
       capacity_ = num_elems;
+      DeviceRegionStats::instance().on_alloc(stats_, bytes, from_zone_);
     }
 
     void release() {
       if (!ptr_) return;
+      DeviceRegionStats::instance().on_free(stats_, capacity_*sizeof(ElemT));
       if (from_zone_) {
         zone_free(parsec_gpu_device(device_id_)->memory, ptr_);
       } else {
@@ -216,6 +351,7 @@ namespace mra::detail {
     std::size_t capacity_ = 0;
     int device_id_ = -1;
     bool from_zone_ = false;
+    DeviceRegionStats::entry_t* stats_ = nullptr;
   };
 
   /**
@@ -277,7 +413,10 @@ namespace mra::detail {
 
     // Named device_id, not device, purely so the ttg::device::Stream parameter
     // a few lines down doesn't read like it might be related to this member.
-    explicit BatchPool(int device_id) : device_id(device_id) { }
+    explicit BatchPool(int device_id)
+    : device_id(device_id)
+    , args_stats(DeviceRegionStats::instance().entry(region_stats_name<Arg>("args"), device_id))
+    { }
 
     BatchPool(const BatchPool&) = delete;
     BatchPool& operator=(const BatchPool&) = delete;
@@ -300,6 +439,7 @@ namespace mra::detail {
       }
       slots.push_back(std::make_unique<slot_t>());
       auto& s = *slots.back();
+      s.dev_args.set_stats(args_stats);
       ensure_capacity(s, num_members);
       s.checked_out = true;
       return s;
@@ -349,6 +489,7 @@ namespace mra::detail {
 
     std::mutex mtx;
     std::vector<std::unique_ptr<slot_t>> slots;
+    DeviceRegionStats::entry_t* args_stats;
   };
 
   /**
@@ -580,6 +721,7 @@ namespace mra::detail {
       // is never handed out by acquire() until its previous submission's
       // event has completed.
       FixedDeviceRegion<unsigned char> dev_scratch;
+      std::size_t dev_scratch_bytes = 0;  // for DeviceRegionStats
 
       // Pinned memory the kernels of a launch write the members' host-bound results to,
       // through `results_mapped`, and where they are copied from to the members' own host
@@ -634,7 +776,11 @@ namespace mra::detail {
       }
     };
 
-    explicit GroupedBatchPool(int device_id) : device_id(device_id) { }
+    explicit GroupedBatchPool(int device_id)
+    : device_id(device_id)
+    , scratch_stats(DeviceRegionStats::instance().entry(region_stats_name<Arg>("scratch"), device_id))
+    , packed_stats(DeviceRegionStats::instance().entry(region_stats_name<Arg>("packed"), device_id))
+    { }
 
     // This slot's shared scratch region, of at least num_elems. Callers size
     // num_elems from kernel_grid_cap (platform.h) -- a bound for a given
@@ -648,6 +794,10 @@ namespace mra::detail {
     // as slot.args/slot.offsets being mutated without extra locking elsewhere.
     template <typename ElemT>
     ElemT* ensure_scratch(slot_t& s, std::size_t num_elems) {
+      if (s.dev_scratch.empty() || num_elems * sizeof(ElemT) > s.dev_scratch_bytes) {
+        if (!s.dev_scratch.empty()) scratch_stats->grows.fetch_add(1, std::memory_order_relaxed);
+        s.dev_scratch_bytes = num_elems * sizeof(ElemT);
+      }
       s.dev_scratch.grow(device_id, num_elems * sizeof(ElemT));
       return reinterpret_cast<ElemT*>(s.dev_scratch.get());
     }
@@ -718,6 +868,8 @@ namespace mra::detail {
       slots.push_back(std::make_unique<slot_t>());
       auto& s = *slots.back();
       s.owner = this;
+      s.dev_scratch.set_stats(scratch_stats);
+      s.dev_packed.set_stats(packed_stats);
       ensure_capacity(s, num_args, num_offsets, num_sparsity);
       s.checked_out = true;
       return s;
@@ -800,6 +952,8 @@ namespace mra::detail {
 
     std::mutex mtx;
     std::vector<std::unique_ptr<slot_t>> slots;
+    DeviceRegionStats::entry_t* scratch_stats;
+    DeviceRegionStats::entry_t* packed_stats;
   };
 
   /**
