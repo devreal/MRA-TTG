@@ -14,6 +14,7 @@
 #include "mra/misc/domain.h"
 #include "mra/misc/functiondata.h"
 #include "mra/misc/batch_size.h"
+#include "mra/misc/two_level.h"
 #include "mra/tensor/leafstatus.h"
 #include "mra/tensor/sparsityinfo.h"
 #include "mra/tensor/sparsitymanager.h"
@@ -286,24 +287,32 @@ namespace mra {
   }
 
   /**
-   * make_multiply_compressed with tasks only at even levels: the task at a key unfilters
+   * make_multiply_compressed with tasks that handle two levels: the task at a key unfilters
    * both factors at the key into its children (step 1) and, for every child where the
    * product continues, again into the grandchildren (step 2), multiplying wherever the
    * product ends. Half the levels on the critical path, and about 8x fewer kernel tasks.
    *
-   * - The routers send each compressed node to the task that reads it: a node at an even
-   *   level to the task at its key, a node at an odd level to the task at its parent as
-   *   the node of its child. A task needs all 18 nodes, so the router of a node at an even
-   *   level sends empty nodes for the children where the factor has none, and where a
-   *   factor has no node at a grandchild with a task, the balance task sends empty nodes
-   *   for the grandchild and its children.
-   * - The scaling coefficients at the grandchildren with a task travel in one
-   *   CombinedReconstructedNode, broadcast to all of them; the task at a key reads its slot.
-   * - The product nodes at the children and the leaves at the grandchildren are written
-   *   to a second CombinedReconstructedNode, the packed output, broadcast to one emit task
-   *   per child, which copies them out into nodes and sends them on. The product node at
-   *   the key is sent directly. The scaling coefficients at the children between the two
-   *   steps are in a third, which stays with the task.
+   * Where the tasks are depends on the maps (TwoLevelPlan): a key and its children are
+   * handled by one task only if they map to the same process and device, so the packed
+   * output of a task is only read where it was written. Elsewhere (above the level where
+   * the maps distribute the tree, and along their cuts) a task handles its key only (step
+   * 1), and its children with a task are the keys of the next tasks. With ttg::Void maps,
+   * the tasks are at even levels.
+   *
+   * - The routers send each compressed node to the task that reads it: to the task at its
+   *   key, or to the task at its parent as the node of its child (a child covered by a
+   *   two-level task). A task takes nodes for all 8 children, so the router of a node with
+   *   a task sends empty nodes for the children where the factor has none, and for all 8
+   *   children if the task handles one level. Where a factor has no node at the key of a
+   *   next task, the balance task sends empty nodes for that key and its children.
+   * - The scaling coefficients at the keys of the next tasks travel in one
+   *   CombinedReconstructedNode (`down`), broadcast to all of them; the task at a key reads
+   *   its slot.
+   * - The product nodes at the children (two levels) and the leaves below the key are
+   *   written to a second CombinedReconstructedNode, the packed output, broadcast to one
+   *   emit task per child, which copies them out into nodes and sends them on. The product
+   *   node at the key is sent directly. The scaling coefficients at the children between
+   *   the two steps are in a third, which stays with the task.
    *
    * Both steps run multiply_compressed_kernel, one launch for step 1 and one per child
    * for step 2, on the same stream. Batched, a batch runs two launches of
@@ -327,8 +336,8 @@ namespace mra {
 
   /**
    * make_multiply_compressed_2level without unpacking: `out` receives only the product
-   * nodes at even levels, and `packed` the packed output of each task, keyed by the task's
-   * key, for make_compress_combined.
+   * nodes at the keys of the tasks, and `packed` the packed output of each task, keyed by
+   * the task's key, for make_compress_combined (built with the same maps).
    */
   template <typename T, Dimension NDIM, typename FunctionSetA, typename FunctionSetB,
             typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
@@ -373,10 +382,14 @@ namespace mra {
     using view_type = typename combined_type::view_type;
     using work_type = detail::MulCompressedWork<NDIM>;
     using launch_type = detail::MulCompressedLaunch<T, NDIM>;
+    using plan_type = TwoLevelPlan<NDIM, ProcMap, DeviceMap>;
+    using Role = typename plan_type::Role;
     /* static: the lambdas below use them without capturing them */
     static constexpr size_type num_children = key_type::num_children();
     static constexpr size_type num_terminals = num_children + 1; // per factor: the node and its children
     constexpr const int OUT = 0, PACKED = 1, S = 2, BALANCE = 3;
+
+    const plan_type plan{procmap, devicemap};
 
     /* per factor, to terminal 0 the node at the task's key, to terminal 1+c the node at child c */
     std::array<ttg::Edge<key_type, cnode_type>, num_terminals> route_a, route_b, balance_a, balance_b;
@@ -408,7 +421,7 @@ namespace mra {
     auto make_router =[&](const auto& fns, ttg::Edge<key_type, cnode_type> in,
                            std::array<ttg::Edge<key_type, cnode_type>, num_terminals>& outs,
                            const std::string& router_name) {
-      auto route_fn = [fns](const key_type& key, const cnode_type& node) -> TASKTYPE {
+      auto route_fn = [fns, plan](const key_type& key, const cnode_type& node) -> TASKTYPE {
 #ifndef MRA_ENABLE_HOST
         auto sends = ttg::device::forward();
         auto send_to = [&]<std::size_t... I>(std::index_sequence<I...>, std::size_t terminal, const key_type& to,
@@ -422,13 +435,17 @@ namespace mra {
         };
 #endif // MRA_ENABLE_HOST
         constexpr auto terminals = std::make_index_sequence<num_terminals>{};
-        if (key.level() % 2 == 1) {
+        const Role role = plan.role(key);
+        if (role == Role::Covered) {
           send_to(terminals, 1 + key.childindex(), key.parent(), node);
         } else {
           send_to(terminals, 0, key, node);
           for (size_type c = 0; c < num_children; ++c) {
+            /* one level: the children have their own tasks, none reads a node here */
             bool has_node = false;
-            for (size_type i = 0; i < node.count() && !has_node; ++i) has_node = !node.is_child_leaf(i, c);
+            if (role == Role::Two) {
+              for (size_type i = 0; i < node.count() && !has_node; ++i) has_node = !node.is_child_leaf(i, c);
+            }
             if (!has_node) {
               const key_type child = key.child_at(c);
               send_to(terminals, 1 + c, key, cnode_type(child, fns->num_functions(child)));
@@ -466,7 +483,7 @@ namespace mra {
     auto primer_tt = ttg::make_tt<Space>(std::move(primer_fn), ttg::edges(a), ttg::edges(primer_e), name + "-primer");
 
     auto multiply_fn = [&db, &functiondata, fnsA, fnsB, K, name, check_sizes, enable_batching, batch_pool,
-                        combined_out](
+                        combined_out, plan](
                           const key_type& key,
                           const cnode_type& anode, const cnode_type& a0, const cnode_type& a1, const cnode_type& a2,
                           const cnode_type& a3, const cnode_type& a4, const cnode_type& a5, const cnode_type& a6,
@@ -485,22 +502,24 @@ namespace mra {
       const int s_slot = s_in.find_slot(key);
       if (s_slot < 0) throw std::logic_error(name + ": no scaling coefficients for the key");
 
-      /* step 1 at the key, step 2 at every child with a task */
+      /* step 1 at the key, step 2 (two levels) at every child where the product continues;
+       * with one level, those children are the keys of the next tasks */
+      const bool two = plan.role(key) == Role::Two;
       auto layout = detail::plan_multiply_compressed_layout<T, NDIM>(
                       NA, N, anode, &bnode, [&](size_type m) { return s_in.slot_status(s_slot, m); });
       std::array<detail::MulCompressedLayout<NDIM>, num_children> child_layout;
       for (size_type c = 0; c < num_children; ++c) {
-        if (!layout.task[c]) continue;
+        if (!two || !layout.task[c]) continue;
         child_layout[c] = detail::plan_multiply_compressed_layout<T, NDIM>(
                             NA, N, *a_child[c], b_child[c], [&](size_type m) { return layout.out[c].status[m]; });
       }
 
-      /* the outputs: product nodes in packed, the scaling coefficients for the
-       * grandchildren's tasks in down; the scaling coefficients at the children between
-       * the steps in scratch, which only this task uses */
+      /* the outputs: product nodes in packed, the scaling coefficients for the next tasks
+       * in down; the scaling coefficients at the children between the steps in scratch,
+       * which only this task uses */
       node_type result = detail::make_multiply_compressed_node<T, NDIM>(key, layout.result, K);
       combined_type packed(key, K), down(key, K), scratch(key, K);
-      std::array<int, num_children> out_slot, child_result_slot;  // in scratch (a child with a task) or packed
+      std::array<int, num_children> out_slot, child_result_slot;  // in scratch or down (a child with a task) or packed
       std::array<std::array<int, num_children>, num_children> grand_slot; // in packed or down
       std::array<std::array<bool, num_children>, num_children> grand_down{};
       out_slot.fill(-1);
@@ -509,9 +528,9 @@ namespace mra {
       for (size_type c = 0; c < num_children; ++c) {
         if (layout.out[c].empty()) continue;
         const key_type child = key.child_at(c);
-        out_slot[c] = (layout.task[c] ? scratch : packed).add_slot(child, layout.out[c].sparsity,
-                                                                   layout.out[c].status);
-        if (!layout.task[c]) continue;
+        combined_type& child_out = !layout.task[c] ? packed : (two ? scratch : down);
+        out_slot[c] = child_out.add_slot(child, layout.out[c].sparsity, layout.out[c].status);
+        if (!two || !layout.task[c]) continue;
         const auto& cl = child_layout[c];
         child_result_slot[c] = packed.add_slot(child, cl.result.sparsity, cl.result.status);
         for (size_type g = 0; g < num_children; ++g) {
@@ -534,7 +553,7 @@ namespace mra {
       std::array<size_type, num_children> work_offset{};
       size_type max_child_items = 0, sum_child_items = 0;
       for (size_type c = 0; c < num_children; ++c) {
-        if (!layout.task[c]) continue;
+        if (!two || !layout.task[c]) continue;
         work_offset[c] = all_work.size();
         all_work.insert(all_work.end(), child_layout[c].work.begin(), child_layout[c].work.end());
         max_child_items = std::max<size_type>(max_child_items, child_layout[c].work.size());
@@ -593,13 +612,13 @@ namespace mra {
                                        s_in.slot_view(s_slot), result.coeffs().current_view(),
                                        views(children, [&](size_type c) {
                                          if (out_slot[c] < 0) return none;
-                                         return layout.task[c] ? scratch.slot_view(out_slot[c])
-                                                               : packed.slot_view(out_slot[c]);
+                                         if (!layout.task[c]) return packed.slot_view(out_slot[c]);
+                                         return two ? scratch.slot_view(out_slot[c]) : down.slot_view(out_slot[c]);
                                        }),
                                        0, n_items, tmp_ptr});
         size_type child_tmp = 0;
         for (size_type c = 0; c < num_children; ++c) {
-          const size_type n_child_items = layout.task[c] ? child_layout[c].work.size() : 0;
+          const size_type n_child_items = (two && layout.task[c]) ? child_layout[c].work.size() : 0;
           if (n_child_items == 0) continue;
           launches.push_back(launch_type{key.child_at(c), a_child[c]->coeffs().current_view(),
                                          b_child[c]->coeffs().current_view(), scratch.slot_view(out_slot[c]),
@@ -655,14 +674,29 @@ namespace mra {
         }
       }
 
-      /* the balance task sends empty nodes where a factor has none at a grandchild with a task */
+      /* the balance task sends empty nodes where a factor has none at the key of a next
+       * task: flags per child (one level) or per grandchild (two levels), see balance_fn */
       std::vector<std::uint8_t> balance;
       std::vector<key_type> emit_keys, down_keys;
       if (combined_out) {
-        if (packed.num_slots() > 0) emit_keys.push_back(key); // packed goes on whole, keyed by the task
+        /* packed goes on whole, keyed by the task; also empty where the product continues
+         * (one level, every child with a task): the compress task at the key takes it */
+        bool any_inner = false;
+        for (LeafStatus st : layout.result.status) any_inner = any_inner || st == LeafStatus::Inner;
+        if (packed.num_slots() > 0 || any_inner) emit_keys.push_back(key);
       }
       for (size_type c = 0; c < num_children; ++c) {
-        if (!combined_out && out_slot[c] >= 0) emit_keys.push_back(key.child_at(c));
+        /* an emit task where packed holds the child's product node */
+        if (!combined_out && out_slot[c] >= 0 && (two || !layout.task[c])) emit_keys.push_back(key.child_at(c));
+        if (!two) {
+          if (!layout.task[c]) continue;
+          down_keys.push_back(key.child_at(c));
+          const std::uint8_t flags = (layout.a_node_at[c] ? 0 : 1) | (layout.b_node_at[c] ? 0 : 2);
+          if (flags == 0) continue;
+          if (balance.empty()) balance.resize(num_children, 0);
+          balance[c] = flags;
+          continue;
+        }
         for (size_type g = 0; g < num_children; ++g) {
           if (!grand_down[c][g]) continue;
           down_keys.push_back(key.child_at(c).child_at(g));
@@ -688,15 +722,18 @@ namespace mra {
     };
 
     /**
-     * Balance (no device work): one empty node per factor, sent to the grandchildren where
-     * the factor has none, as their node and as the node of each of their children.
+     * Balance (no device work): one empty node per factor, sent to the keys of the next
+     * tasks where the factor has none, as their node and as the node of each of their
+     * children. The flags are per child of the key (the task at the key handled one level)
+     * or per grandchild (two levels).
      */
     auto balance_fn = [fnsA, fnsB](const key_type& key, const std::vector<std::uint8_t>& flags) -> TASKTYPE {
       std::vector<key_type> a_keys, b_keys;
+      const bool per_child = flags.size() == num_children;
       for (size_type i = 0; i < flags.size(); ++i) {
-        const key_type grandchild = key.child_at(i / num_children).child_at(i % num_children);
-        if (flags[i] & 1) a_keys.push_back(grandchild);
-        if (flags[i] & 2) b_keys.push_back(grandchild);
+        const key_type next = per_child ? key.child_at(i) : key.child_at(i / num_children).child_at(i % num_children);
+        if (flags[i] & 1) a_keys.push_back(next);
+        if (flags[i] & 2) b_keys.push_back(next);
       }
       auto to_all = [&]<std::size_t First, std::size_t... I>(std::integral_constant<std::size_t, First>,
                                                               std::index_sequence<I...>,
@@ -780,10 +817,10 @@ namespace mra {
       emit_op = std::move(emit_tt);
     }
 
-    /* a two-level subtree stays together: routers and emits (at odd levels, above) go where
-     * their multiply task goes */
+    /* a two-level subtree stays together: routers and emits (above) go where their multiply
+     * task goes */
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
-      auto by_task = [procmap](const key_type& key) { return procmap(key.level() % 2 == 0 ? key : key.parent()); };
+      auto by_task = [plan](const key_type& key) { return plan.procmap(plan.task_of(key)); };
       route_a_tt->set_keymap(by_task);
       route_b_tt->set_keymap(by_task);
       primer_tt->set_keymap(procmap);
@@ -791,7 +828,7 @@ namespace mra {
       balance_tt->set_keymap(procmap);
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
-      auto by_task = [devicemap](const key_type& key) { return devicemap(key.level() % 2 == 0 ? key : key.parent()); };
+      auto by_task = [plan](const key_type& key) { return plan.devicemap(plan.task_of(key)); };
       route_a_tt->set_devicemap(by_task);
       route_b_tt->set_devicemap(by_task);
       primer_tt->set_devicemap(devicemap);

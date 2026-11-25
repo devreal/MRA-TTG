@@ -8,31 +8,37 @@
 #include <string>
 #include <vector>
 #include <ttg.h>
+#include "mra/misc/two_level.h"
 #include "mra/tasks/compress.h"
 #include "mra/tensor/combinednode.h"
 
 /**
  * make_compress for the output of make_multiply_compressed_combined, which leaves the
- * product nodes at odd levels and the leaves at even levels in the packed output of
- * each multiply task (a CombinedReconstructedNode keyed by the task's key) instead of
- * unpacking them into nodes. The compress tasks read those nodes from their slots.
+ * product nodes below the key of each multiply task in the task's packed output (a
+ * CombinedReconstructedNode keyed by the task's key) instead of unpacking them into
+ * nodes. The compress tasks read those nodes from their slots.
  *
- * - The router takes the product nodes at even levels (the `in` edge): a node where some
+ * The keys of the multiply tasks (roots) and the children their tasks handle as well
+ * (covered) follow from the maps (TwoLevelPlan), so the maps must be those the multiply
+ * was built with. With ttg::Void maps, the roots are the keys at even levels.
+ *
+ * - The router takes the product nodes at the roots (the `in` edge): a node where some
  *   function continues goes to the compress task at its key, a leaf goes up to its
  *   parent's compress task, as make_compress does.
- * - The dispatch task takes the packed output of the multiply task at an even key K and
- *   forwards it to the compress task at K and to the compress tasks at the children of K
- *   where the product continues (whose own node is a slot). A child read from a slot
- *   (a leaf for every function) still needs a value on its parent's input terminals: the
- *   dispatch task sends an empty node and an empty "kept" there.
- * - Two compress tasks: at even levels, with the node from the router and the packed
- *   output of the task at the key; at odd levels, with the packed output of the task at
- *   the parent, which holds the task's own node. Both read a child from packed if it has
- *   a slot there without a function that continues, and from their input terminal
- *   otherwise. They run the kernels of make_compress, batched with each other.
+ * - The dispatch task takes the packed output of the multiply task at a root K and
+ *   forwards it to the compress task at K and to the compress tasks at the covered
+ *   children of K where the product continues (whose own node is a slot). A child read
+ *   from a slot (a leaf for every function) still needs a value on its parent's input
+ *   terminals: the dispatch task sends an empty node and an empty "kept" there.
+ * - Two compress tasks: at a root, with the node from the router and the packed output of
+ *   the task at the key; at a covered key, with the packed output of the task at the
+ *   parent, which holds the task's own node. Both read a child from packed if it has a
+ *   slot there without a function that continues, and from their input terminal
+ *   otherwise, and send up to the task of their parent, whichever kind it is. They run
+ *   the kernels of make_compress, batched with each other.
  *
- * Compress tasks at odd levels are mapped like the multiply task at their parent, so the
- * packed output stays where it was written. NDIM=3 only, as make_compress.
+ * Compress tasks at covered keys are mapped like the multiply task at their parent, so
+ * the packed output stays where it was written. NDIM=3 only, as make_compress.
  */
 
 namespace mra {
@@ -57,13 +63,15 @@ namespace mra {
     }
 
     /**
-     * With two levels, whether the even-level compress task at the parent of `child` (whose
+     * With two levels, whether the compress task at the root parent of `child` (whose
      * multiply task wrote `packed`) compresses `child` itself: the product continues at the
      * child, but ends at all of its children, which are slots of packed. Then no task a level
-     * below sends anything to the child's compress, which needs packed only.
+     * below sends anything to the child's compress, which needs packed only. Not at level 2,
+     * the first that may truncate (see compress_combined_2level_task): its parent does not.
      */
     template <typename T, Dimension NDIM>
     bool compress_folds_child(const CombinedReconstructedNode<T, NDIM>& packed, const Key<NDIM>& child) {
+      if (child.level() == 2) return false;
       const int s = packed.find_slot(child);
       if (s < 0 || !slot_any_inner(packed, s)) return false;
       for (size_type g = 0; g < Key<NDIM>::num_children(); ++g) {
@@ -142,8 +150,9 @@ namespace mra {
      * own is the node at the key, packed the packed output read by the task, p_in/kept_in
      * the task's input terminals for the children; a child with a slot in packed without
      * a function that continues is read from there (its terminals hold placeholders).
-     * The outputs are p and kept to the parent's terminals 0..7 and 8..15, and the
-     * compressed node to terminal 16.
+     * The outputs are p and kept to the terminals 0..7 and 8..15 of the parent's task at a
+     * root, the compressed node to terminal 16, and p and kept to the terminals 17..24 and
+     * 25..32 of the parent's task at a covered key (parent_covered).
      */
     template <typename T, Dimension NDIM, typename Ctx>
     TASKTYPE compress_combined_task(
@@ -152,13 +161,15 @@ namespace mra {
       CompressCombinedSource<T, NDIM> own,
       const CombinedReconstructedNode<T, NDIM>& packed,
       std::array<const FunctionsReconstructedNode<T, NDIM>*, Key<NDIM>::num_children()> p_in,
-      std::array<const KeptInfo<T>*, Key<NDIM>::num_children()> kept_children)
+      std::array<const KeptInfo<T>*, Key<NDIM>::num_children()> kept_children,
+      bool parent_covered)
     {
       using source_type = CompressCombinedSource<T, NDIM>;
       using view_type = typename source_type::view_type;
       using kept_info_type = KeptInfo<T>;
       constexpr const auto num_children = Key<NDIM>::num_children();
       constexpr const auto out_terminal_id = 2*num_children;
+      constexpr const auto covered_base = out_terminal_id + 1;
       const size_type N = ctx.fns->num_functions(key);
       const size_type K = ctx.K;
       mra::FunctionsCompressedNode<T, NDIM> result(key, N);
@@ -354,14 +365,25 @@ namespace mra {
         for (size_type i = 0; i < kept.size() && !any_kept; ++i) any_kept = (kept[i] != T(0));
         constexpr auto children = std::make_index_sequence<num_children>{};
 #ifndef MRA_ENABLE_HOST
-        auto sends = ttg::device::forward(
-          select_send_up(key, std::move(p), children, "compress_combined"),
-          select_send_up<num_children>(key, std::move(kept), children, "compress_combined-kept"));
+        auto sends = ttg::device::forward();
+        if (parent_covered) {
+          sends.push_back(select_send_up<covered_base>(key, std::move(p), children, "compress_combined"));
+          sends.push_back(select_send_up<covered_base + num_children>(key, std::move(kept), children,
+                                                                      "compress_combined-kept"));
+        } else {
+          sends.push_back(select_send_up(key, std::move(p), children, "compress_combined"));
+          sends.push_back(select_send_up<num_children>(key, std::move(kept), children, "compress_combined-kept"));
+        }
         if (any_kept) sends.push_back(ttg::device::send<out_terminal_id>(key, std::move(result)));
         co_await std::move(sends);
 #else
-        select_send_up(key, std::move(p), children, "compress_combined");
-        select_send_up<num_children>(key, std::move(kept), children, "compress_combined-kept");
+        if (parent_covered) {
+          select_send_up<covered_base>(key, std::move(p), children, "compress_combined");
+          select_send_up<covered_base + num_children>(key, std::move(kept), children, "compress_combined-kept");
+        } else {
+          select_send_up(key, std::move(p), children, "compress_combined");
+          select_send_up<num_children>(key, std::move(kept), children, "compress_combined-kept");
+        }
         if (any_kept) ttg::send<out_terminal_id>(key, std::move(result));
 #endif
       } else {
@@ -376,7 +398,7 @@ namespace mra {
 
 #ifndef MRA_ENABLE_HOST
     /**
-     * The compress task at an even key with two levels (batched only): as
+     * The compress task at a root with two levels (batched only): as
      * compress_combined_task, but it also compresses the children that
      * compress_folds_child() names, from their children in packed, in a first launch (step
      * 1). Their scaling coefficients go to a scratch combined node that the launch at the key
@@ -390,7 +412,8 @@ namespace mra {
       const FunctionsReconstructedNode<T, NDIM>& own_node,
       const CombinedReconstructedNode<T, NDIM>& packed,
       std::array<const FunctionsReconstructedNode<T, NDIM>*, Key<NDIM>::num_children()> p_in,
-      std::array<const KeptInfo<T>*, Key<NDIM>::num_children()> kept_children)
+      std::array<const KeptInfo<T>*, Key<NDIM>::num_children()> kept_children,
+      bool parent_covered)
     {
       using key_type = Key<NDIM>;
       using source_type = CompressCombinedSource<T, NDIM>;
@@ -402,9 +425,11 @@ namespace mra {
       using launch_type = Compress2Launch<T, NDIM>;
       constexpr const auto num_children = key_type::num_children();
       constexpr const auto out_terminal_id = 2*num_children;
+      constexpr const auto covered_base = out_terminal_id + 1;
       const size_type N = ctx.fns->num_functions(key);
       const size_type K = ctx.K;
-      /* a folded child is at an odd level >= 1, so it may truncate exactly when the key does */
+      /* a folded child is never at level 2 (compress_folds_child), so it may truncate exactly
+       * when the key does */
       const bool may_truncate = ctx.enable_truncate && key.level() > 1;
       const bool slot_results = detail::results_via_slot();
       const source_type own = source_type::of_node(own_node);
@@ -638,8 +663,14 @@ namespace mra {
         bool any_kept = false;
         for (size_type i = 0; i < kept.size() && !any_kept; ++i) any_kept = (kept[i] != T(0));
         constexpr auto seq = std::make_index_sequence<num_children>{};
-        sends.push_back(select_send_up(key, std::move(p), seq, "compress_combined"));
-        sends.push_back(select_send_up<num_children>(key, std::move(kept), seq, "compress_combined-kept"));
+        if (parent_covered) {
+          sends.push_back(select_send_up<covered_base>(key, std::move(p), seq, "compress_combined"));
+          sends.push_back(select_send_up<covered_base + num_children>(key, std::move(kept), seq,
+                                                                      "compress_combined-kept"));
+        } else {
+          sends.push_back(select_send_up(key, std::move(p), seq, "compress_combined"));
+          sends.push_back(select_send_up<num_children>(key, std::move(kept), seq, "compress_combined-kept"));
+        }
         if (any_kept) sends.push_back(ttg::device::send<out_terminal_id>(key, std::move(result)));
       } else {
         sends.push_back(ttg::device::send<out_terminal_id>(key, std::move(result)));
@@ -650,7 +681,7 @@ namespace mra {
   } // namespace detail
 
   /**
-   * Number of tree levels an even-level task of make_compress_combined compresses, 1 or 2
+   * Number of tree levels a task at a root of make_compress_combined compresses, 1 or 2
    * (see compress_combined_2level_task; batched only); the default is
    * MRA_TTG_COMPRESS_LEVELS, or 1 if unset.
    */
@@ -664,10 +695,10 @@ namespace mra {
 
   /**
    * Compression of the product of make_multiply_compressed_combined: `in` its product
-   * nodes at even levels, `packed` its packed outputs. Parameters and output as
+   * nodes at the keys of its tasks, `packed` its packed outputs. Parameters and output as
    * make_compress; pass the maps the multiply was built with. The batches share the
    * batch pool of batch_group with every make_compress and make_compress_combined of it,
-   * but a batch only holds tasks of one TT (the even or the odd compress tasks).
+   * but a batch only holds tasks of one TT (the compress tasks at roots or at covered keys).
    */
   template <typename T, mra::Dimension NDIM, typename FunctionSetT,
             typename ProcMap = ttg::Void, typename DeviceMap = ttg::Void>
@@ -694,6 +725,8 @@ namespace mra {
     using combined_type = mra::CombinedReconstructedNode<T, NDIM>;
     using kept_info_type = mra::KeptInfo<T>;
     using source_type = detail::CompressCombinedSource<T, NDIM>;
+    using plan_type = TwoLevelPlan<NDIM, ProcMap, DeviceMap>;
+    using Role = typename plan_type::Role;
     /* static: the lambdas below use it without capturing it */
     static constexpr size_type num_children = key_type::num_children();
     constexpr auto children = std::make_index_sequence<num_children>{};
@@ -711,9 +744,11 @@ namespace mra {
     ctx.truncate_mode = truncate_mode;
     ctx.cell_min_width = cell_min_width;
     const std::size_t max_batch_size = mra::get_batch_size();
+    /* the roots and covered keys of the multiply's tasks */
+    const plan_type plan{procmap, devicemap};
 #ifndef MRA_ENABLE_HOST
-    /* two levels: an even-level task also compresses the children that need nothing from
-     * the tasks below (compress_folds_child), which then have no odd-level task */
+    /* two levels: a task at a root also compresses the children that need nothing from the
+     * tasks below (compress_folds_child), which then have no task at a covered key */
     const bool two_level = ctx.enable_batching && get_compress_levels() == 2;
 #else  // MRA_ENABLE_HOST
     constexpr bool two_level = false;
@@ -727,58 +762,77 @@ namespace mra {
     }
 #endif // MRA_ENABLE_HOST
 
-    /* the compress tasks' terminals for their children: p and kept, at even and odd levels;
-     * produced by the compress tasks a level below, the router and the dispatch task */
-    std::array<ttg::Edge<key_type, node_type>, num_children> even_p, odd_p;
-    std::array<ttg::Edge<key_type, kept_info_type>, num_children> even_kept, odd_kept;
+    /* the compress tasks' terminals for their children: p and kept, of the tasks at roots and
+     * at covered keys; produced by the compress tasks a level below, the router and the
+     * dispatch task */
+    std::array<ttg::Edge<key_type, node_type>, num_children> root_p, covered_p;
+    std::array<ttg::Edge<key_type, kept_info_type>, num_children> root_kept, covered_kept;
     ttg::Edge<key_type, node_type> own_e(name + "-own");
-    ttg::Edge<key_type, combined_type> even_packed_e(name + "-packed_even"), odd_packed_e(name + "-packed_odd");
+    ttg::Edge<key_type, combined_type> root_packed_e(name + "-packed_root"), covered_packed_e(name + "-packed_covered");
 
     /**
-     * Router, at an even key: a node where some function continues goes to the compress
-     * task at its key, a leaf goes up with an empty "kept" (do_send_leafs_up).
+     * Router, at a root: a node where some function continues goes to the compress task at
+     * its key, a leaf goes up with an empty "kept" (do_send_leafs_up) to its parent's task,
+     * at a root (terminals 0..15) or a covered key (17..32).
      */
-    auto route_fn = [](const key_type& key, const node_type& node) -> TASKTYPE {
+    auto route_fn = [plan](const key_type& key, const node_type& node) -> TASKTYPE {
+      constexpr std::size_t OWN = 2*num_children, COVERED = OWN + 1;
       if (node.any_have_children()) {
 #ifndef MRA_ENABLE_HOST
-        co_await ttg::device::send<2*num_children>(key, node);
+        co_await ttg::device::send<OWN>(key, node);
 #else
-        ttg::send<2*num_children>(key, node);
+        ttg::send<OWN>(key, node);
 #endif
       } else if (key.level() > 0) {
         constexpr auto seq = std::make_index_sequence<num_children>{};
+        const bool parent_covered = plan.role(key.parent()) == Role::Covered;
 #ifndef MRA_ENABLE_HOST
-        co_await ttg::device::forward(select_send_up(key, node, seq, "compress_combined-route"),
-                                      select_send_up<num_children>(key, kept_info_type{}, seq,
-                                                                   "compress_combined-route-kept"));
+        if (parent_covered) {
+          co_await ttg::device::forward(select_send_up<COVERED>(key, node, seq, "compress_combined-route"),
+                                        select_send_up<COVERED + num_children>(key, kept_info_type{}, seq,
+                                                                               "compress_combined-route-kept"));
+        } else {
+          co_await ttg::device::forward(select_send_up(key, node, seq, "compress_combined-route"),
+                                        select_send_up<num_children>(key, kept_info_type{}, seq,
+                                                                     "compress_combined-route-kept"));
+        }
 #else
-        select_send_up(key, node, seq, "compress_combined-route");
-        select_send_up<num_children>(key, kept_info_type{}, seq, "compress_combined-route-kept");
+        if (parent_covered) {
+          select_send_up<COVERED>(key, node, seq, "compress_combined-route");
+          select_send_up<COVERED + num_children>(key, kept_info_type{}, seq, "compress_combined-route-kept");
+        } else {
+          select_send_up(key, node, seq, "compress_combined-route");
+          select_send_up<num_children>(key, kept_info_type{}, seq, "compress_combined-route-kept");
+        }
 #endif
       }
     };
     auto route_tt = [&]<std::size_t... I>(std::index_sequence<I...>) {
-      return ttg::make_tt<Space>(std::move(route_fn), ttg::edges(in), ttg::edges(odd_p[I]..., odd_kept[I]..., own_e),
+      return ttg::make_tt<Space>(std::move(route_fn), ttg::edges(in),
+                                 ttg::edges(root_p[I]..., root_kept[I]..., own_e, covered_p[I]..., covered_kept[I]...),
                                  name + "-route");
     }(children);
 
     /**
-     * Dispatch, at the key K of a multiply task: packed goes to the compress task at K and
-     * to those at the children of K where the product continues; for each slot that holds
-     * a leaf, an empty node and an empty "kept" go to the terminals of its parent (K or a
-     * child of K), which reads the leaf from packed.
+     * Dispatch, at the key K of a multiply task (a root): packed goes to the compress task at
+     * K and to those at the covered children of K where the product continues; for each
+     * slot that holds a leaf, an empty node and an empty "kept" go to the terminals of its
+     * parent (K, or a covered child of K), which reads the leaf from packed.
      */
     auto dispatch_fn = [fns, two_level](const key_type& key, const combined_type& packed) -> TASKTYPE {
-      constexpr std::size_t EVEN_P = 0, EVEN_KEPT = num_children, ODD_P = 2*num_children,
-                            ODD_KEPT = 3*num_children, EVEN_PACKED = 4*num_children, ODD_PACKED = 4*num_children + 1;
-      /* the parents to send placeholders to, by terminal: [0, num_children) the even
-       * terminals (a leaf at a child of K), [num_children, 2*num_children) the odd ones (a
-       * leaf at a grandchild); the same lists serve the p and the kept terminals */
+      constexpr std::size_t ROOT_P = 0, ROOT_KEPT = num_children, COVERED_P = 2*num_children,
+                            COVERED_KEPT = 3*num_children, ROOT_PACKED = 4*num_children,
+                            COVERED_PACKED = 4*num_children + 1;
+      /* the parents to send placeholders to, by terminal: [0, num_children) the root's
+       * terminals (a leaf at a child of K), [num_children, 2*num_children) those of a
+       * covered child (a leaf at a grandchild); the same lists serve the p and the kept
+       * terminals */
       std::array<std::vector<key_type>, 2*num_children> parents;
-      std::vector<key_type> odd_keys;
+      std::vector<key_type> covered_keys;
       bool any_leaf = false;
-      /* with two levels, the children the compress task at K compresses itself: no odd-level
-       * task, and placeholders on K's terminals of the child instead of on the child's */
+      /* with two levels, the children the compress task at K compresses itself: no task at
+       * the covered key, and placeholders on K's terminals of the child instead of on the
+       * child's */
       std::array<bool, num_children> folded{};
       if (two_level) {
         for (size_type c = 0; c < num_children; ++c) folded[c] = detail::compress_folds_child(packed, key.child_at(c));
@@ -793,7 +847,7 @@ namespace mra {
         }
         if (!is_child && folded[slot_key.parent().childindex()]) continue; // read by the task at K
         if (detail::slot_any_inner(packed, s)) {
-          if (is_child) odd_keys.push_back(slot_key); // the slot is the node of an odd-level compress task
+          if (is_child) covered_keys.push_back(slot_key); // the slot is the node of a compress task at a covered key
           continue;
         }
         parents[(is_child ? 0 : num_children) + slot_key.childindex()].push_back(slot_key.parent());
@@ -802,77 +856,82 @@ namespace mra {
       /* the compress task reads a leaf child from packed, never its placeholder: one
        * placeholder node and one empty "kept" serve every receiver, each a single data
        * copy (a copy per send overflows the task's copies, MAX_PARAM_COUNT) */
-      auto to_all = [&]<std::size_t EvenFirst, std::size_t OddFirst, std::size_t... I, typename Value>(
-                        std::integral_constant<std::size_t, EvenFirst>, std::integral_constant<std::size_t, OddFirst>,
+      auto to_all = [&]<std::size_t RootFirst, std::size_t CoveredFirst, std::size_t... I, typename Value>(
+                        std::integral_constant<std::size_t, RootFirst>, std::integral_constant<std::size_t, CoveredFirst>,
                         std::index_sequence<I...>, Value&& value) {
 #ifndef MRA_ENABLE_HOST
-        return ttg::device::broadcast<(EvenFirst + I)..., (OddFirst + I)...>(
+        return ttg::device::broadcast<(RootFirst + I)..., (CoveredFirst + I)...>(
                  std::make_tuple(parents[I]..., parents[num_children + I]...), std::forward<Value>(value));
 #else  // MRA_ENABLE_HOST
-        ttg::broadcast<(EvenFirst + I)..., (OddFirst + I)...>(
+        ttg::broadcast<(RootFirst + I)..., (CoveredFirst + I)...>(
           std::make_tuple(parents[I]..., parents[num_children + I]...), std::forward<Value>(value));
 #endif // MRA_ENABLE_HOST
       };
       constexpr auto seq = std::make_index_sequence<num_children>{};
-      using even_p = std::integral_constant<std::size_t, EVEN_P>;
-      using odd_p = std::integral_constant<std::size_t, ODD_P>;
-      using even_kept = std::integral_constant<std::size_t, EVEN_KEPT>;
-      using odd_kept = std::integral_constant<std::size_t, ODD_KEPT>;
+      using root_p_t = std::integral_constant<std::size_t, ROOT_P>;
+      using covered_p_t = std::integral_constant<std::size_t, COVERED_P>;
+      using root_kept_t = std::integral_constant<std::size_t, ROOT_KEPT>;
+      using covered_kept_t = std::integral_constant<std::size_t, COVERED_KEPT>;
 #ifndef MRA_ENABLE_HOST
       auto sends = ttg::device::forward();
       if (any_leaf) {
-        sends.push_back(to_all(even_p{}, odd_p{}, seq, node_type(key, fns->num_functions(key))));
-        sends.push_back(to_all(even_kept{}, odd_kept{}, seq, kept_info_type{}));
+        sends.push_back(to_all(root_p_t{}, covered_p_t{}, seq, node_type(key, fns->num_functions(key))));
+        sends.push_back(to_all(root_kept_t{}, covered_kept_t{}, seq, kept_info_type{}));
       }
       /* one data copy for all receivers */
-      if (odd_keys.empty()) {
-        sends.push_back(ttg::device::send<EVEN_PACKED>(key, packed));
+      if (covered_keys.empty()) {
+        sends.push_back(ttg::device::send<ROOT_PACKED>(key, packed));
       } else {
-        sends.push_back(ttg::device::broadcast<EVEN_PACKED, ODD_PACKED>(
-                          std::make_tuple(std::vector<key_type>{key}, std::move(odd_keys)), packed));
+        sends.push_back(ttg::device::broadcast<ROOT_PACKED, COVERED_PACKED>(
+                          std::make_tuple(std::vector<key_type>{key}, std::move(covered_keys)), packed));
       }
       co_await std::move(sends);
 #else  // MRA_ENABLE_HOST
       if (any_leaf) {
-        to_all(even_p{}, odd_p{}, seq, node_type(key, fns->num_functions(key)));
-        to_all(even_kept{}, odd_kept{}, seq, kept_info_type{});
+        to_all(root_p_t{}, covered_p_t{}, seq, node_type(key, fns->num_functions(key)));
+        to_all(root_kept_t{}, covered_kept_t{}, seq, kept_info_type{});
       }
-      if (odd_keys.empty()) {
-        ttg::send<EVEN_PACKED>(key, packed);
+      if (covered_keys.empty()) {
+        ttg::send<ROOT_PACKED>(key, packed);
       } else {
-        ttg::broadcast<EVEN_PACKED, ODD_PACKED>(std::make_tuple(std::vector<key_type>{key}, std::move(odd_keys)),
-                                                packed);
+        ttg::broadcast<ROOT_PACKED, COVERED_PACKED>(std::make_tuple(std::vector<key_type>{key},
+                                                                    std::move(covered_keys)), packed);
       }
 #endif // MRA_ENABLE_HOST
     };
     auto dispatch_tt = [&]<std::size_t... I>(std::index_sequence<I...>) {
       return ttg::make_tt<Space>(std::move(dispatch_fn), ttg::edges(packed),
-                                 ttg::edges(even_p[I]..., even_kept[I]..., odd_p[I]..., odd_kept[I]...,
-                                            even_packed_e, odd_packed_e),
+                                 ttg::edges(root_p[I]..., root_kept[I]..., covered_p[I]..., covered_kept[I]...,
+                                            root_packed_e, covered_packed_e),
                                  name + "-dispatch");
     }(children);
 
-    /* the compress tasks: inputs p0..p7, kept0..kept7, then (even) the node and packed or
-     * (odd) packed; outputs p and kept to the parent, and the compressed node */
-    auto even_fn = [ctx, two_level](const key_type& key,
+    /* the compress tasks: inputs p0..p7, kept0..kept7, then (root) the node and packed or
+     * (covered) packed; outputs p and kept to the parent's task at a root, the compressed
+     * node, and p and kept to the parent's task at a covered key */
+    auto root_fn = [ctx, two_level, plan](const key_type& key,
                          const node_type& p0, const node_type& p1, const node_type& p2, const node_type& p3,
                          const node_type& p4, const node_type& p5, const node_type& p6, const node_type& p7,
                          const kept_info_type& k0, const kept_info_type& k1, const kept_info_type& k2,
                          const kept_info_type& k3, const kept_info_type& k4, const kept_info_type& k5,
                          const kept_info_type& k6, const kept_info_type& k7,
                          const node_type& own, const combined_type& packed) -> TASKTYPE {
+      const bool parent_covered = key.level() > 0 && plan.role(key.parent()) == Role::Covered;
 #ifndef MRA_ENABLE_HOST
       if (two_level) {
         return detail::compress_combined_2level_task<T, NDIM>(ctx, key, own, packed,
                                                               {&p0, &p1, &p2, &p3, &p4, &p5, &p6, &p7},
-                                                              {&k0, &k1, &k2, &k3, &k4, &k5, &k6, &k7});
+                                                              {&k0, &k1, &k2, &k3, &k4, &k5, &k6, &k7},
+                                                              parent_covered);
       }
 #endif // MRA_ENABLE_HOST
       return detail::compress_combined_task<T, NDIM>(ctx, key, source_type::of_node(own), packed,
                                                      {&p0, &p1, &p2, &p3, &p4, &p5, &p6, &p7},
-                                                     {&k0, &k1, &k2, &k3, &k4, &k5, &k6, &k7});
+                                                     {&k0, &k1, &k2, &k3, &k4, &k5, &k6, &k7},
+                                                     parent_covered);
     };
-    auto odd_fn = [ctx](const key_type& key,
+    /* a covered key's parent is a root */
+    auto covered_fn = [ctx](const key_type& key,
                         const node_type& p0, const node_type& p1, const node_type& p2, const node_type& p3,
                         const node_type& p4, const node_type& p5, const node_type& p6, const node_type& p7,
                         const kept_info_type& k0, const kept_info_type& k1, const kept_info_type& k2,
@@ -883,35 +942,38 @@ namespace mra {
       if (s < 0) throw std::logic_error(ctx.name + ": no node for the key in the packed output");
       return detail::compress_combined_task<T, NDIM>(ctx, key, source_type::of_slot(packed, s), packed,
                                                      {&p0, &p1, &p2, &p3, &p4, &p5, &p6, &p7},
-                                                     {&k0, &k1, &k2, &k3, &k4, &k5, &k6, &k7});
+                                                     {&k0, &k1, &k2, &k3, &k4, &k5, &k6, &k7},
+                                                     /*parent_covered=*/false);
     };
-    auto even_tt = [&]<std::size_t... I>(std::index_sequence<I...>) {
-      return ttg::make_tt<Space>(std::move(even_fn), ttg::edges(even_p[I]..., even_kept[I]..., own_e, even_packed_e),
-                                 ttg::edges(odd_p[I]..., odd_kept[I]..., out), name + "-even");
+    auto root_tt = [&]<std::size_t... I>(std::index_sequence<I...>) {
+      return ttg::make_tt<Space>(std::move(root_fn), ttg::edges(root_p[I]..., root_kept[I]..., own_e, root_packed_e),
+                                 ttg::edges(root_p[I]..., root_kept[I]..., out, covered_p[I]..., covered_kept[I]...),
+                                 name + "-root");
     }(children);
-    auto odd_tt = [&]<std::size_t... I>(std::index_sequence<I...>) {
-      return ttg::make_tt<Space>(std::move(odd_fn), ttg::edges(odd_p[I]..., odd_kept[I]..., odd_packed_e),
-                                 ttg::edges(even_p[I]..., even_kept[I]..., out), name + "-odd");
+    auto covered_tt = [&]<std::size_t... I>(std::index_sequence<I...>) {
+      return ttg::make_tt<Space>(std::move(covered_fn), ttg::edges(covered_p[I]..., covered_kept[I]..., covered_packed_e),
+                                 ttg::edges(root_p[I]..., root_kept[I]..., out, covered_p[I]..., covered_kept[I]...),
+                                 name + "-covered");
     }(children);
 
-    /* everything at an odd key goes where the multiply task at its parent went */
+    /* everything at a covered key goes where the multiply task at its parent went */
     if constexpr (!std::is_same_v<ProcMap, ttg::Void>) {
       route_tt->set_keymap(procmap);
       dispatch_tt->set_keymap(procmap);
-      even_tt->set_keymap(procmap);
-      odd_tt->set_keymap([procmap](const key_type& key) { return procmap(key.parent()); });
+      root_tt->set_keymap(procmap);
+      covered_tt->set_keymap([procmap](const key_type& key) { return procmap(key.parent()); });
     }
     if constexpr (!std::is_same_v<DeviceMap, ttg::Void>) {
       route_tt->set_devicemap(devicemap);
       dispatch_tt->set_devicemap(devicemap);
-      even_tt->set_devicemap(devicemap);
-      odd_tt->set_devicemap([devicemap](const key_type& key) { return devicemap(key.parent()); });
+      root_tt->set_devicemap(devicemap);
+      covered_tt->set_devicemap([devicemap](const key_type& key) { return devicemap(key.parent()); });
     }
 #ifndef MRA_ENABLE_HOST
     if (ctx.enable_batching) {
-      even_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
-      odd_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
-      /* even_tt and odd_tt (and make_compress's TT) differ in type, so they cannot join
+      root_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
+      covered_tt->set_batch_matcher([](const key_type&, const key_type&) { return true; }, max_batch_size);
+      /* root_tt and covered_tt (and make_compress's TT) differ in type, so they cannot join
        * one ttg::device::batch_group: each batches its own tasks, all share the pool */
     }
 #else  // MRA_ENABLE_HOST
@@ -919,12 +981,12 @@ namespace mra {
 #endif // MRA_ENABLE_HOST
 
     auto ins = std::make_tuple(route_tt->template in<0>(), dispatch_tt->template in<0>());
-    auto outs = std::make_tuple(even_tt->template out<2*num_children>());
+    auto outs = std::make_tuple(root_tt->template out<2*num_children>());
     std::vector<std::unique_ptr<ttg::TTBase>> ops;
     ops.push_back(std::move(route_tt));
     ops.push_back(std::move(dispatch_tt));
-    ops.push_back(std::move(even_tt));
-    ops.push_back(std::move(odd_tt));
+    ops.push_back(std::move(root_tt));
+    ops.push_back(std::move(covered_tt));
     return make_ttg(std::move(ops), ins, outs, name);
   }
 
