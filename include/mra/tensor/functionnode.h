@@ -243,6 +243,7 @@ namespace mra {
         void serialize(Archive& ar) {
           ar& this->m_key;
           ar& this->m_coeffs;
+          ar& this->m_num_func; // count(): without it, a node from another process has no functions
 #ifdef MRA_CHECK_NORMS
           ar& this->m_norms;
 #endif // MRA_CHECK_NORMS
