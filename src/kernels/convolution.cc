@@ -33,7 +33,8 @@ namespace mra {
     size_type total_nonzero,
     size_type K,
     const double fac,
-    ttg::device::Stream stream);
+    ttg::device::Stream stream,
+    bool atomic_out);
 
   template
   void submit_conv_sum_kernel_batched<double, 3>(

@@ -442,7 +442,9 @@ namespace mra{
       InT& in,
       ResultT& result,
       size_type fnid,
-      size_type& i)
+      size_type& i,
+      bool atomic_out,
+      T*& out_ptr)
     {
       // fnid: the function id of position tmp_pos, see convolution_process_one
       i = fnid;
@@ -459,6 +461,12 @@ namespace mra{
       in        = make_ct_tensorview_from(in_view(i), TWOK);
       f         = make_ct_tensorview_from(f_view(i), TWOK);
       result    = make_ct_tensorview_from(result_view(i), TWOK);
+      if (atomic_out) {
+        /* the block computes into its scratch (in place of staged_in, as `in` is empty)
+         * and adds that to the shared result */
+        out_ptr = result.data();
+        result  = ResultT(&block_tmp_ptr[2*TWOK2NDIM + 2*K2NDIM], detail::broadcast_dims<typename ResultT::dims_type>(TWOK, std::make_index_sequence<NDIM>{}));
+      }
     }
 
     /**
@@ -493,7 +501,8 @@ namespace mra{
       T* tmp,
       size_type N,
       size_type tmp_pos,
-      size_type tmp_slot)
+      size_type tmp_slot,
+      bool atomic_out = false)
     {
       auto TWOK = Int<2>{}*K;
       using dims_k_type = decltype(make_dims<NDIM>(K));
@@ -505,6 +514,8 @@ namespace mra{
       SHARED tensor_view_2k_type work1, work2, result, staged_in;
       SHARED const_tensor_view_2k_type f, in;
       SHARED size_type i;
+      SHARED T* out_ptr;    // atomic_out: where the block adds its result
+      SHARED T atomic_norm; // atomic_out: the norm of the block's result
 
       // The function id of this position, searched for by the first warp.
       // result_view has exactly n_nonzero non-zero entries, so this
@@ -517,11 +528,14 @@ namespace mra{
       if (thread_id() < MRA_WARP_SIZE)
 #endif
       {
-        fnid = find_nth_allocated_warp(N, tmp_pos, result_view);
+        /* atomic_out: the positions are the source's non-zero functions, as several sources
+         * add into the same result */
+        fnid = atomic_out ? find_nth_nonzero_warp(N, tmp_pos, f_view) : find_nth_allocated_warp(N, tmp_pos, result_view);
       }
       if (is_team_lead()) {
         convolution_process_one_leader<T, NDIM>(in_view, f_view, result_view, tmp, K, TWOK, N, tmp_pos, tmp_slot,
-                                                f0, resultc, work1, work2, staged_in, f, in, result, fnid, i);
+                                                f0, resultc, work1, work2, staged_in, f, in, result, fnid, i,
+                                                atomic_out, out_ptr);
       }
       SYNCTHREADS();
       if (f_view.is_zero(i)) {
@@ -544,9 +558,25 @@ namespace mra{
       // unconditionally before the final combination with `in` -- which would
       // otherwise read back zeros (or worse, the half-written new value)
       // instead of the original running sum.
-      staged_in = in;
-
       int opid = opnorms_view.dim(0) > 1 ? static_cast<int>(i) : 0; // TODO: this is a bit hacky, can we do better?
+
+      if (atomic_out) {
+        /* `in` is empty (result occupies staged_in's scratch): add the screened result to
+         * the shared one, which the caller zeroed */
+        convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
+                                         transr, transs, opnorms_view, at, in, f, f0,
+                                         resultc, result, work1, work2, &atomic_norm);
+        SYNCTHREADS();
+        if (atomic_norm != T(0)) {
+          const T* src = result.data();
+          const size_type size = result.size();
+          for (size_type e = thread_id(); e < size; e += block_size()) atomic_add(out_ptr + e, src[e]);
+        }
+        SYNCTHREADS(); // the next position reuses the scratch
+        return i;
+      }
+
+      staged_in = in;
 
       convolution_kernel_impl<T, NDIM>(key, opid, displacement, K, fac, tol,
                                        transr, transs, opnorms_view, at, staged_in, f, f0,
@@ -818,7 +848,9 @@ namespace mra{
                                                // the whole launch -- indexed by blockIdx.x, not
                                                // per-member (see GroupedBatchPool::ensure_scratch)
       KT K,
-      const T fac)
+      const T fac,
+      bool atomic_out)                        // add each member's result to its result_view, see
+                                               // convolution_process_one; positions are f's non-zeros
     {
       using idx = ConvolutionBatchArgIdx;
       SHARED size_type member;
@@ -845,7 +877,7 @@ namespace mra{
                                          std::get<idx::opnorms>(arg), std::get<idx::at>(arg),
                                          std::get<idx::in_view>(arg), std::get<idx::f_view>(arg),
                                          result_view, resnorms_view,
-                                         shared_tmp, member_N, local_pos, blockIdx.x);
+                                         shared_tmp, member_N, local_pos, blockIdx.x, atomic_out);
         // See convolution_kernel's comment: demote this member's result_view
         // state for i now that resnorms_view[i] is known -- same inline
         // check as the unbatched path, replacing the old, separately
@@ -925,7 +957,8 @@ namespace mra{
     size_type total_nonzero,
     size_type K,
     const T fac,
-    ttg::device::Stream stream)
+    ttg::device::Stream stream,
+    bool atomic_out = false)
 #if defined(MRA_HAVE_KERNEL_DEFINITIONS)
   {
     using idx = detail::ConvolutionBatchArgIdx;
@@ -938,6 +971,7 @@ namespace mra{
     detail::submit_grouped_copy<arg_t>(slot, num_members, slot.offsets.size(), pool.device_id, stream);
 
 #if defined(MRA_CHECK_NORMS)
+    if (!atomic_out) { // with atomic_out, the slices are f's non-zeros, not result_view's
     // Debug-only: verify the flattened grid's per-member slice (derived from
     // each member's host-computed n_nonzero) still matches a fresh on-device
     // scan of that member's result_view -- must run AFTER the scatter above,
@@ -946,6 +980,7 @@ namespace mra{
     CALL_KERNEL((detail::convolution_verify_sparsity_kernel<T, NDIM>), num_members, 32, 0, stream,
                 (slot.dev_args, slot.dev_offsets));
     checkSubmit();
+    }
 #endif // MRA_CHECK_NORMS
 
     Dim3 thread_dims = detail::conv_thread_dims(K);
@@ -973,7 +1008,7 @@ namespace mra{
       // an empty grid (no nonzero function in the batch) is an invalid launch
       if (grid_x > 0) {
         CALL_KERNEL((detail::convolution_kernel_batched<T, NDIM>), grid_x, thread_dims, smem_size, stream,
-                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, ctK, fac));
+                    (slot.dev_args, slot.dev_offsets, num_members, total_nonzero, shared_tmp, ctK, fac, atomic_out));
       }
     });
     checkSubmit();
@@ -1172,6 +1207,7 @@ namespace mra{
       DenseTensorView<T, 1> resnorms;
       size_type n = 0;      // functions of out
       size_type nsrcs = 0;
+      bool accumulate = false; // add the sources to out instead of overwriting it
       std::array<SparseTensorView<T, NDIM+1>, conv_sum_max_srcs> srcs;
     };
 
@@ -1218,7 +1254,7 @@ namespace mra{
             const auto& src = arg.srcs[j];
             if (!src.is_zero(i)) sum += src(i).data()[e];
           }
-          out_ptr[e] = sum;
+          out_ptr[e] = arg.accumulate ? out_ptr[e] + sum : sum;
         }
         SYNCTHREADS();
         if (!arg.resnorms.empty()) {
@@ -1320,6 +1356,20 @@ namespace mra{
       T* resnorms_host = nullptr;                           // with results_via_slot(): where the norms go instead
     };
 
+    /**
+     * Whether the contributions of a chunk are added into its result atomically by the
+     * convolution launch (MRA_TTG_CONV_ATOMIC, default 1), instead of each being convolved into
+     * scratch memory of its own and summed by a second launch (0). The atomic additions make
+     * the result depend on their order in the last bits; 0 is reproducible.
+     */
+    inline bool conv_chunk_atomic() {
+      static const bool a = [] {
+        const char* v = std::getenv("MRA_TTG_CONV_ATOMIC");
+        return v == nullptr || v[0] == '\0' || std::string(v) != "0";
+      }();
+      return a;
+    }
+
     /** values of T a scratch slot of N functions, n_nonzero of them allocated, occupies (aligned) */
     template <typename T, Dimension NDIM>
     inline size_type conv_chunk_slot_size(size_type N, size_type n_nonzero, size_type K) {
@@ -1327,6 +1377,109 @@ namespace mra{
       const size_type header = align_to_type<T>(N) / sizeof(T);
       const size_type twok_ndim = static_cast<size_type>(std::pow(2*K, NDIM));
       return (header + n_nonzero * twok_ndim + align - 1) / align * align;
+    }
+
+    /**
+     * submit_conv_chunk_works with MRA_TTG_CONV_ATOMIC: one convolution launch adds every
+     * contribution of every chunk into the chunk's result (zeroed by the launch's grouped
+     * copy), without scratch memory for the contributions. A second launch, on the same
+     * stream and so after every addition, adds a node's shell-0 result (base) and computes
+     * the norms of a node's final result, for the chunks that have either.
+     */
+    template <typename T, Dimension NDIM>
+    void submit_conv_chunk_works_atomic(
+      ConvChunkWork<T, NDIM>* const* works,
+      std::size_t num_works,
+      GroupedBatchPool<ConvolutionBatchArg<T, NDIM>>& conv_pool,
+      GroupedBatchPool<ConvSumBatchArg<T, NDIM>>& sum_pool,
+      size_type K,
+      const T fac,
+      ttg::device::Stream stream)
+    {
+      const size_type twok_ndim = static_cast<size_type>(std::pow(2*K, NDIM));
+      std::size_t num_contribs = 0, num_finish = 0;
+      for (std::size_t w = 0; w < num_works; ++w) {
+        num_contribs += works[w]->contribs.size();
+        if (works[w]->has_base || works[w]->has_norms) ++num_finish;
+      }
+
+      auto& cslot = conv_pool.acquire(num_contribs, num_contribs + 1, 0);
+      cslot.args.clear();
+      cslot.offsets.clear();
+      cslot.offsets.push_back(0);
+      cslot.sparsity.clear();
+      cslot.extra_dsts.clear();
+      cslot.extra_srcs.clear();
+      cslot.extra_sizes.clear();
+      for (std::size_t w = 0; w < num_works; ++w) {
+        auto& work = *works[w];
+        if (work.out_dev == nullptr) throw std::runtime_error("convolution chunk: null result pointer");
+        /* the result's sparsity, then its zeroed values (the grouped copy applies them in order) */
+        cslot.extra_dsts.push_back(work.out_dev);
+        cslot.extra_srcs.push_back(work.out_sparsity.data());
+        cslot.extra_sizes.push_back(work.N);
+        if (work.out_nonzero > 0) {
+          /* the values follow the sparsity bytes, as in conv_chunk_slot_size */
+          cslot.extra_dsts.push_back(work.out_dev + align_to_type<T>(work.N) / sizeof(T));
+          cslot.extra_srcs.push_back(nullptr); // zero-fill
+          cslot.extra_sizes.push_back(work.out_nonzero * twok_ndim * sizeof(T));
+        }
+        for (auto& c : work.contribs) {
+          cslot.args.emplace_back(work.empty_view, c.f, work.out_view, work.no_norms, work.N,
+                                  c.transr, c.transs, c.opnorms, work.tol, work.at);
+          cslot.offsets.push_back(cslot.offsets.back() + c.n_nonzero);
+        }
+      }
+      {
+        BatchRange batch_range("convolution_chunk", num_contribs);
+        submit_convolution_kernel_batched<T, NDIM>(conv_pool, cslot, cslot.offsets.back(), K, fac, stream, true);
+      }
+      if (num_finish == 0) return;
+
+      auto& sslot = sum_pool.acquire(num_finish, num_finish + 1, 0);
+      sslot.args.clear();
+      sslot.offsets.clear();
+      sslot.offsets.push_back(0);
+      sslot.sparsity.clear();
+      sslot.extra_dsts.clear();
+      sslot.extra_srcs.clear();
+      sslot.extra_sizes.clear();
+      /* the norms of the final results go to the slot's pinned memory, see results_via_slot() */
+      const bool slot_results = results_via_slot();
+      if (slot_results) {
+        std::size_t result_bytes = 0;
+        for (std::size_t w = 0; w < num_works; ++w) {
+          if (works[w]->has_norms) result_bytes += (works[w]->N * sizeof(T) + 15) / 16 * 16;
+        }
+        sum_pool.begin_results(sslot, result_bytes);
+      }
+      for (std::size_t w = 0; w < num_works; ++w) {
+        auto& work = *works[w];
+        if (!work.has_base && !work.has_norms) continue;
+        ConvSumBatchArg<T, NDIM> sarg;
+        rebind_view(sarg.out, work.out_view);
+        if (work.has_norms && slot_results) {
+          DenseTensorView<T, 1> slot_norms(sum_pool.template add_result<T>(sslot, work.resnorms_host, work.N, true),
+                                           work.N);
+          rebind_view(sarg.resnorms, slot_norms);
+        } else {
+          rebind_view(sarg.resnorms, work.has_norms ? work.resnorms_view : work.no_norms);
+        }
+        if (work.has_norms && !slot_results) {
+          if (work.resnorms_dev == nullptr) throw std::runtime_error("convolution chunk: null norms pointer");
+          sslot.extra_dsts.push_back(work.resnorms_dev);
+          sslot.extra_srcs.push_back(nullptr); // zero-fill
+          sslot.extra_sizes.push_back(work.N * sizeof(T));
+        }
+        sarg.n = work.N;
+        sarg.accumulate = true;
+        sarg.nsrcs = work.has_base ? 1 : 0;
+        if (work.has_base) rebind_view(sarg.srcs[0], work.base_view);
+        sslot.args.push_back(sarg);
+        sslot.offsets.push_back(sslot.offsets.back() + work.out_nonzero);
+      }
+      BatchRange batch_range("convolution_sum", num_finish);
+      submit_conv_sum_kernel_batched<T, NDIM>(sum_pool, sslot, sslot.offsets.back(), stream);
     }
 
     /**
@@ -1350,6 +1503,11 @@ namespace mra{
       auto& conv_pool = conv_registry.get(device);
       auto& sum_pool = sum_registry.get(device);
       auto stream = ttg::device::current_stream();
+
+      if (conv_chunk_atomic()) {
+        submit_conv_chunk_works_atomic<T, NDIM>(works, num_works, conv_pool, sum_pool, K, fac, stream);
+        return;
+      }
 
       std::size_t w0 = 0;
       while (w0 < num_works) {
@@ -1544,7 +1702,8 @@ namespace mra{
     size_type total_nonzero,
     size_type K,
     const double fac,
-    ttg::device::Stream stream);
+    ttg::device::Stream stream,
+    bool atomic_out);
 
   extern template
   void submit_conv_sum_kernel_batched<double, 3>(

@@ -290,6 +290,30 @@ namespace mra::detail {
 #define GLOBALSCOPE
 #endif // __CUDA_ARCH__
 
+namespace mra::detail {
+  /**
+   * Adds v to *p atomically on the device (a plain addition on the host). The order in
+   * which concurrent additions land is not fixed, so the result may differ in the last
+   * bits between runs.
+   *
+   * HIP: unsafeAtomicAdd uses the hardware floating-point atomics (gfx90a and later)
+   * instead of a compare-and-swap loop. On gfx90a these only work on coarse-grained
+   * memory (hipMalloc, PaRSEC's zone): on fine-grained memory (pinned or mapped host
+   * memory, managed memory with XNACK) additions may be lost silently. Never use this on
+   * host-mapped memory.
+   */
+  template <typename T>
+  DEVSCOPE void atomic_add(T* p, T v) {
+#if defined(__CUDA_ARCH__)
+    atomicAdd(p, v);
+#elif defined(__HIP_DEVICE_COMPILE__)
+    unsafeAtomicAdd(p, v);
+#else
+    *p += v;
+#endif
+  }
+} // namespace mra::detail
+
 #if defined(MRA_ENABLE_HOST)
 #define MAX_THREADS_PER_BLOCK 1
 #else
