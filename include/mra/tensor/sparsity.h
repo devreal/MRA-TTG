@@ -1088,6 +1088,17 @@ namespace mra {
     }
 
     /**
+     * The number of allocated entries (non-zero or zero).
+     */
+    size_type count_allocated() const {
+      size_type res = 0;
+      for (const auto& r : m_allocated_ranges) {
+        res += r.to - r.from + 1;
+      }
+      return res;
+    }
+
+    /**
      * The offset of a given id, i.e., the sum of
      * all non-zero entries before the given id.
      */

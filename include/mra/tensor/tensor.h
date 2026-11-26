@@ -90,6 +90,23 @@ namespace mra {
       }
     }
 
+    /**
+     * Storage for a tensor whose allocated entries are those of `sparsity`: a sparse view
+     * stores only the allocated entries of the sparse dimension (0), back to back after its
+     * inline header, so the rest of the sparse dimension needs no memory.
+     */
+    static std::size_t buffer_size(const SparsityInfo& sparsity, const dims_type& dims) {
+      if constexpr (sparsity_traits<view_sparsity_type>::is_sparse()) {
+        std::size_t n = sparsity.count_allocated() * dims.subdims(Int<1>{}).product();
+        if constexpr (sparsity_traits<view_sparsity_type>::inline_storage()) {
+          n += sparsity_traits<view_sparsity_type>::required_space(dims);
+        }
+        return n;
+      } else {
+        return dims.product();
+      }
+    }
+
     // (Re)allocate the tensor memory
     void realloc() {
       m_buffer.reset(buffer_size());
@@ -164,7 +181,7 @@ namespace mra {
     : ttvalue_type()
     , sparsity_type()
     , m_dims(create_dims_array(sparsity_info.dim(0), K, std::make_index_sequence<NDIM-1>{}))
-    , m_buffer(buffer_size(), scope)
+    , m_buffer(buffer_size(sparsity_info, m_dims), scope)
     {
       this->apply_sparsity(sparsity_info);
     }
@@ -175,7 +192,7 @@ namespace mra {
     : ttvalue_type()
     , sparsity_type()
     , m_dims(dims)
-    , m_buffer(buffer_size(), scope)
+    , m_buffer(buffer_size(sparsity_info, m_dims), scope)
     {
       assert(sparsity_info.dim(0) == dims[0]);
       this->apply_sparsity(sparsity_info);
